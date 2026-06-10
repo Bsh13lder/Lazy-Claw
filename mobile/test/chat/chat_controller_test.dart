@@ -67,4 +67,80 @@ void main() {
     expect(c.messages[idx].pendingApprovalId, isNull);
     expect(c.messages[idx].pendingApprovalSkill, isNull);
   });
+
+  // ── Live activity streaming (phase / thinking / specialists / bg) ─────────
+
+  test('phase frame sets the streaming bubble phase', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const PhaseFrame('act', 2));
+    expect(c.messages.last.phase, 'act');
+    expect(c.messages.last.streaming, isTrue);
+  });
+
+  test('phase frame before any send creates a streaming bubble', () {
+    final c = ChatReducer();
+    c.onFrame(const PhaseFrame('think', 1));
+    expect(c.messages.length, 1);
+    expect(c.messages.last.role, 'assistant');
+    expect(c.messages.last.phase, 'think');
+  });
+
+  test('thinking_delta turns on thinking; token turns it off', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ThinkingDeltaFrame('reasoning…'));
+    expect(c.messages.last.thinking, isTrue);
+    c.onFrame(const TokenFrame('Hello'));
+    expect(c.messages.last.thinking, isFalse);
+    expect(c.messages.last.content, 'Hello');
+  });
+
+  test('thinking_done clears the thinking flag', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ThinkingDeltaFrame('x'));
+    c.onFrame(const ThinkingDoneFrame());
+    expect(c.messages.last.thinking, isFalse);
+  });
+
+  test('agent activity rows upsert by subject instead of stacking', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'research', detail: 'started'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'research', detail: 'using web_search'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist',
+        subject: 'research',
+        detail: 'finished',
+        done: true));
+    final acts = c.messages.last.agentActivities;
+    expect(acts.length, 1);
+    expect(acts.single.detail, 'finished');
+    expect(acts.single.done, isTrue);
+  });
+
+  test('distinct subjects get their own activity rows', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'research', detail: 'started'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'bg', subject: 'check whatsapp', detail: 'using whatsapp_read'));
+    expect(c.messages.last.agentActivities.length, 2);
+  });
+
+  test('activity survives token streaming and stays after done', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'research', detail: 'started'));
+    c.onFrame(const TokenFrame('Working on it'));
+    c.onFrame(const DoneFrame('Here is the answer', null));
+    expect(c.messages.last.agentActivities.length, 1);
+    expect(c.messages.last.streaming, isFalse);
+    expect(c.messages.last.content, 'Here is the answer');
+  });
 }

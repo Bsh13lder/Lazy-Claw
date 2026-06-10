@@ -1,19 +1,30 @@
 /// Background-task result card for the Chat screen.
 ///
 /// Rendered for messages with role == 'bg_task'. Uses [LzCard] + design tokens
-/// for the success/failure treatment.
+/// for the success/failure treatment. When the reducer captured a live
+/// activity timeline for the task, the card grows an expandable
+/// "Activity (N)" log.
 library;
 
 import 'package:flutter/material.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
+import 'activity_timeline.dart';
 
-class BgTaskCard extends StatelessWidget {
+class BgTaskCard extends StatefulWidget {
   const BgTaskCard(this.result, {super.key});
   final BackgroundTaskResult result;
 
   @override
+  State<BgTaskCard> createState() => _BgTaskCardState();
+}
+
+class _BgTaskCardState extends State<BgTaskCard> {
+  bool _logExpanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final result = widget.result;
     final success = result.success;
     final accentColor = success ? AppColors.success : AppColors.error;
     final bgColor = accentColor.withValues(alpha: 0.10);
@@ -71,6 +82,14 @@ class BgTaskCard extends StatelessWidget {
                           ),
                         ),
                       ],
+                      if (result.events.isNotEmpty) ...[
+                        const SizedBox(height: AppSpacing.sm),
+                        _activityToggle(),
+                        if (_logExpanded) ...[
+                          const SizedBox(height: AppSpacing.xs),
+                          ActivityEventList(events: result.events),
+                        ],
+                      ],
                     ],
                   ),
                 ),
@@ -78,6 +97,37 @@ class BgTaskCard extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _activityToggle() {
+    final n = widget.result.events.length;
+    return GestureDetector(
+      onTap: () => setState(() => _logExpanded = !_logExpanded),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.timeline_outlined,
+            size: 12,
+            color: AppColors.textMuted,
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          Text(
+            'Activity ($n)',
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          Icon(
+            _logExpanded ? Icons.expand_less : Icons.expand_more,
+            size: 13,
+            color: AppColors.textMuted,
+          ),
+        ],
       ),
     );
   }

@@ -14,14 +14,26 @@ class PlanCard extends StatelessWidget {
     required this.planText,
     required this.steps,
     required this.onSend,
+    this.kind = 'plan',
+    this.resolved = false,
   });
 
   final String planText;
   final List<String> steps;
 
+  /// 'plan' (approve/reject gate) or 'question' (the agent needs one piece
+  /// of info — the user answers with a normal chat message, so no buttons).
+  final String kind;
+
+  /// True once the server confirmed approval — buttons are replaced by an
+  /// "Approved" badge so they can't be re-tapped.
+  final bool resolved;
+
   /// Sends a plain-text message via the chat controller notifier.
   /// Called with 'approve' or 'reject'.
   final void Function(String) onSend;
+
+  bool get _isQuestion => kind == 'question';
 
   @override
   Widget build(BuildContext context) {
@@ -54,17 +66,23 @@ class PlanCard extends StatelessWidget {
                           color: AppColors.accent.withValues(alpha: 0.25),
                         ),
                       ),
-                      child: const Icon(
-                        Icons.assignment_outlined,
+                      child: Icon(
+                        _isQuestion
+                            ? Icons.help_outline
+                            : Icons.assignment_outlined,
                         size: 14,
                         color: AppColors.accent,
                       ),
                     ),
                     const SizedBox(width: AppSpacing.sm),
                     Text(
-                      'Agent Plan',
+                      _isQuestion ? 'Agent Question' : 'Agent Plan',
                       style: AppText.label.copyWith(color: AppColors.accent),
                     ),
+                    if (resolved) ...[
+                      const SizedBox(width: AppSpacing.sm),
+                      LzBadge(label: 'Approved', color: AppColors.success),
+                    ],
                   ],
                 ),
                 const SizedBox(height: AppSpacing.md),
@@ -119,30 +137,40 @@ class PlanCard extends StatelessWidget {
                       ),
                 ],
 
-                // Divider
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
-                  child: Divider(
-                    color: AppColors.borderSubtle,
-                    height: 1,
-                    thickness: 1,
+                // Footer — approve/reject for plans; questions are answered
+                // with a normal chat message, resolved plans show no buttons.
+                if (!_isQuestion && !resolved) ...[
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(vertical: AppSpacing.md),
+                    child: Divider(
+                      color: AppColors.borderSubtle,
+                      height: 1,
+                      thickness: 1,
+                    ),
                   ),
-                ),
-
-                // Action buttons — callbacks preserved exactly
-                Row(
-                  children: [
-                    LzButton.secondary(
-                      label: 'Reject',
-                      onPressed: () => onSend('reject'),
-                    ),
-                    const SizedBox(width: AppSpacing.sm),
-                    LzButton.primary(
-                      label: 'Approve',
-                      onPressed: () => onSend('approve'),
-                    ),
-                  ],
-                ),
+                  Row(
+                    children: [
+                      LzButton.secondary(
+                        label: 'Reject',
+                        onPressed: () => onSend('reject'),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                      LzButton.primary(
+                        label: 'Approve',
+                        onPressed: () => onSend('approve'),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_isQuestion) ...[
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
+                    'Reply below to answer.',
+                    style:
+                        AppText.caption.copyWith(color: AppColors.textMuted),
+                  ),
+                ],
               ],
             ),
           ),

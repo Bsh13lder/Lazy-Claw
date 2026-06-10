@@ -236,11 +236,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                   .send(text),
                             ),
                     ),
-                    // Input bar
+                    // Input bar — shows a stop button while a turn streams.
                     _InputBar(
                       controller: _input,
                       connected: _connected,
+                      streaming:
+                          messages.any((m) => m.streaming),
                       onSend: _send,
+                      onCancel: () =>
+                          ref.read(chatControllerProvider.notifier).cancel(),
                     ),
                   ],
                 ),
@@ -373,6 +377,8 @@ class _MessageList extends StatelessWidget {
       return PlanCard(
         planText: m.planText!,
         steps: m.planSteps,
+        kind: m.planKind,
+        resolved: m.planResolved,
         onSend: onSend,
       );
     }
@@ -404,12 +410,21 @@ class _InputBar extends StatefulWidget {
   const _InputBar({
     required this.controller,
     required this.connected,
+    required this.streaming,
     required this.onSend,
+    required this.onCancel,
   });
 
   final TextEditingController controller;
   final bool connected;
+
+  /// True while an agent turn is streaming — shows the stop button and the
+  /// side-note hint (a message sent mid-turn becomes a side-note serverside).
+  final bool streaming;
   final VoidCallback onSend;
+
+  /// Cancels the running agent turn ({"type":"cancel"} over the chat WS).
+  final VoidCallback onCancel;
 
   @override
   State<_InputBar> createState() => _InputBarState();
@@ -477,9 +492,11 @@ class _InputBarState extends State<_InputBar> {
                     style: AppText.body.copyWith(color: AppColors.textPrimary),
                     cursorColor: AppColors.accent,
                     decoration: InputDecoration(
-                      hintText: widget.connected
-                          ? 'Message LazyClaw…'
-                          : 'Connecting…',
+                      hintText: !widget.connected
+                          ? 'Connecting…'
+                          : widget.streaming
+                              ? 'Agent is working — type to add a side-note'
+                              : 'Message LazyClaw…',
                       hintStyle:
                           AppText.body.copyWith(color: AppColors.textMuted),
                       filled: true,
@@ -518,6 +535,34 @@ class _InputBarState extends State<_InputBar> {
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
+              // Stop button — visible only while a turn is streaming.
+              // Mirrors the web ChatInput's square-icon cancel control.
+              if (widget.streaming) ...[
+                GestureDetector(
+                  onTap: widget.onCancel,
+                  child: Semantics(
+                    button: true,
+                    label: 'Stop agent',
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: AppColors.error.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: AppColors.error.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.stop_rounded,
+                        size: 22,
+                        color: AppColors.error,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+              ],
               // Send button — disabled until connected + has text
               AnimatedOpacity(
                 duration: AppMotion.fast,

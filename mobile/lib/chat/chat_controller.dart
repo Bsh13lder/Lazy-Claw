@@ -9,9 +9,18 @@ class ChatReducer {
   final List<ChatMessage> messages = [];
   final StringBuffer _buf = StringBuffer();
 
+  /// Usage metrics from a standalone `usage` frame, attached when `done`
+  /// arrives (the `done` payload's own usage wins when both exist).
+  UsageInfo? _pendingUsage;
+
+  /// True while an agent turn is streaming — drives the input bar's
+  /// stop button.
+  bool get isStreaming => messages.any((m) => m.streaming);
+
   void onUserSend(String text) {
     messages.add(ChatMessage(role: 'user', content: text));
     _buf.clear();
+    _pendingUsage = null;
     messages.add(const ChatMessage(role: 'assistant', content: '', streaming: true));
   }
 
@@ -24,18 +33,38 @@ class ChatReducer {
     messages.insertAll(0, history);
   }
 
+  /// Makes sure the live frame has a streaming assistant bubble to land on —
+  /// activity can arrive before any token (e.g. a watcher-driven turn).
+  void _ensureStreamingBubble() {
+    if (messages.isEmpty ||
+        (messages.last.role != 'assistant' && messages.last.role != 'plan')) {
+      messages.add(
+          const ChatMessage(role: 'assistant', content: '', streaming: true));
+    }
+  }
+
   void onFrame(ServerFrame f) {
     switch (f) {
       case TokenFrame(:final content):
         if (messages.isEmpty) return;
         _buf.write(content);
-        _replaceLast(messages.last.copyWith(content: _buf.toString()));
+        // Visible text flowing ⇒ the reasoning indicator is stale.
+        _replaceLast(
+            messages.last.copyWith(content: _buf.toString(), thinking: false));
 
-      case DoneFrame(:final content):
+      case DoneFrame(:final content, :final usage):
         if (messages.isEmpty) return;
         final finalText = content.isNotEmpty ? content : _buf.toString();
-        _replaceLast(
-            messages.last.copyWith(content: finalText, streaming: false));
+        _replaceLast(messages.last.copyWith(
+          content: finalText,
+          streaming: false,
+          usage: usage ?? _pendingUsage,
+        ));
+        _pendingUsage = null;
+
+      case UsageFrame(:final usage):
+        // Stash for the terminal done frame (mirrors the web client).
+        _pendingUsage = usage;
 
       case ErrorFrame(:final message):
         if (messages.isEmpty) {
@@ -52,24 +81,12 @@ class ChatReducer {
 
       case ApprovalRequestFrame(:final requestId, :final skill):
         if (messages.isEmpty) return;
-        final last = messages.last;
-        messages[messages.length - 1] = ChatMessage(
-          role: last.role,
-          content: last.content,
-          streaming: last.streaming,
-          pendingApprovalId: requestId,
-          pendingApprovalSkill: skill,
-          toolActivities: last.toolActivities,
-        );
+        _replaceLast(messages.last.withApproval(requestId, skill));
 
       case ToolCallFrame(:final name, :final args, :final toolCallId):
         // Attach the tool activity to the current streaming assistant bubble.
         // If no bubble exists yet, create one.
-        if (messages.isEmpty ||
-            (messages.last.role != 'assistant' && messages.last.role != 'plan')) {
-          messages.add(const ChatMessage(
-              role: 'assistant', content: '', streaming: true));
-        }
+        _ensureStreamingBubble();
         final activity = ToolActivity(
           name: name,
           args: args,
@@ -82,39 +99,62 @@ class ChatReducer {
         _replaceLast(messages.last.withToolResult(toolCallId, name, preview));
 
       case BackgroundDoneFrame(:final name, :final taskId, :final result, :final durationMs):
-        final card = BackgroundTaskResult(
+        _addBgResult(BackgroundTaskResult(
           name: name,
           taskId: taskId,
           success: true,
           detail: result,
           durationMs: durationMs,
-        );
-        messages.add(ChatMessage(
-          role: 'bg_task',
-          content: '',
-          bgTaskResult: card,
         ));
 
       case BackgroundFailedFrame(:final name, :final taskId, :final error, :final durationMs):
-        final card = BackgroundTaskResult(
+        _addBgResult(BackgroundTaskResult(
           name: name,
           taskId: taskId,
           success: false,
           detail: error,
           durationMs: durationMs,
-        );
-        messages.add(ChatMessage(
-          role: 'bg_task',
-          content: '',
-          bgTaskResult: card,
         ));
 
-      case PhaseFrame():
-        // Phase transitions are informational only — they update the
-        // streaming bubble's phase label but don't add a message.
-        // Currently ignored at the reducer level; the chat screen could
-        // subscribe to the raw frame stream if it wants per-frame animation.
-        break;
+      case PhaseFrame(:final phase):
+        // Update the streaming bubble's phase label ("Thinking…", "Acting…")
+        // so the user sees the agent's loop progress without a new message.
+        _ensureStreamingBubble();
+        _replaceLast(messages.last.copyWith(phase: phase));
+
+      case ThinkingDeltaFrame(:final content):
+        // Accumulate reasoning into the collapsible "Thinking" section and
+        // flip the live "Reasoning…" indicator on.
+        _ensureStreamingBubble();
+        _replaceLast(messages.last.copyWith(
+          thinking: true,
+          thinkingText: messages.last.thinkingText + content,
+        ));
+
+      case ThinkingDoneFrame():
+        if (messages.isEmpty) return;
+        if (messages.last.thinking) {
+          _replaceLast(messages.last.copyWith(thinking: false));
+        }
+
+      case AgentActivityFrame(
+          :final kind,
+          :final subject,
+          :final detail,
+          :final done,
+          :final failed,
+          :final tool
+        ):
+        _ensureStreamingBubble();
+        _replaceLast(messages.last.withAgentActivity(AgentActivity(
+          kind: kind,
+          subject: subject,
+          detail: detail,
+          done: done,
+          failed: failed,
+          events: [detail],
+          toolsUsed: tool != null ? [tool] : const [],
+        )));
 
       case PlanPendingFrame(:final plan, :final steps):
         messages.add(ChatMessage(
@@ -124,9 +164,71 @@ class ChatReducer {
           planSteps: steps,
         ));
 
+      case PlanQuestionFrame(:final question):
+        messages.add(ChatMessage(
+          role: 'plan',
+          content: '',
+          planText: question,
+          planKind: 'question',
+        ));
+
+      case PlanApprovedFrame():
+        // Resolve the most recent unresolved plan card so its buttons hide.
+        final idx = messages.lastIndexWhere(
+            (m) => m.role == 'plan' && m.planKind == 'plan' && !m.planResolved);
+        if (idx != -1) {
+          messages[idx] = messages[idx].copyWith(planResolved: true);
+        }
+
       case UnknownFrame():
         break; // ignored
     }
+  }
+
+  /// Appends a bg_task card, folding in the activity timeline captured for
+  /// the same task name and settling that row's spinner.
+  void _addBgResult(BackgroundTaskResult card) {
+    final located = _findBgActivity(card.name);
+    var enriched = card;
+    if (located != null) {
+      final (msgIdx, activity) = located;
+      enriched = BackgroundTaskResult(
+        name: card.name,
+        taskId: card.taskId,
+        success: card.success,
+        detail: card.detail,
+        durationMs: card.durationMs,
+        events: activity.events,
+        toolsUsed: activity.toolsUsed,
+      );
+      if (!activity.done) {
+        final updated =
+            List<AgentActivity>.from(messages[msgIdx].agentActivities);
+        final aIdx = updated.indexOf(activity);
+        if (aIdx != -1) {
+          updated[aIdx] = activity.settle(success: card.success);
+          messages[msgIdx] = messages[msgIdx].withAgentActivities(updated);
+        }
+      }
+    }
+    messages.add(ChatMessage(
+      role: 'bg_task',
+      content: '',
+      bgTaskResult: enriched,
+    ));
+  }
+
+  /// Newest assistant message carrying a 'bg' activity row for [name],
+  /// returned with its message index.
+  (int, AgentActivity)? _findBgActivity(String name) {
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final m = messages[i];
+      if (m.role != 'assistant') continue;
+      for (final a in m.agentActivities) {
+        if (a.kind == 'bg' && a.subject == name) return (i, a);
+      }
+    }
+    return null;
   }
 
   void _replaceLast(ChatMessage m) => messages[messages.length - 1] = m;
@@ -191,6 +293,14 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
     state = List.unmodifiable(_reducer.messages);
     _socket.send(text);
   }
+
+  /// True while an agent turn is streaming — used by the input bar to swap
+  /// in the stop button.
+  bool get isStreaming => _reducer.isStreaming;
+
+  /// Cancel the running agent turn. The server replies with a `cancelled`
+  /// frame which finalizes the streaming bubble via the reducer.
+  void cancel() => _socket.cancel();
 
   void respondApproval(String id, bool approved) {
     _socket.approve(id, approved);

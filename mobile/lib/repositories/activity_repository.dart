@@ -140,6 +140,11 @@ abstract class ActivityTransport {
     String path, {
     Map<String, dynamic>? queryParams,
   });
+
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+  });
 }
 
 class DioActivityTransport implements ActivityTransport {
@@ -154,6 +159,17 @@ class DioActivityTransport implements ActivityTransport {
       _client.get<Map<String, dynamic>>(
         path,
         queryParams: queryParams,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map),
+      );
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+  }) =>
+      _client.post<Map<String, dynamic>>(
+        path,
+        data: body,
         fromJson: (d) => Map<String, dynamic>.from(d as Map),
       );
 }
@@ -190,5 +206,29 @@ class ActivityRepository {
         ...parse('background_recent', isRunning: false),
       ],
     );
+  }
+
+  /// Cancel one running task — foreground, specialist, or background.
+  ///
+  /// `POST /api/agents/cancel {task_id}` returns
+  /// `{success: bool, data|error}`; false means the task was not found or no
+  /// longer cancellable (it may have just settled — refresh after calling).
+  Future<bool> cancelTask(String taskId) async {
+    final json = await _t.postJson(
+      '/api/agents/cancel',
+      body: {'task_id': taskId},
+    );
+    return json['success'] == true;
+  }
+
+  /// Cancel every running task for the current user (foreground +
+  /// background). Returns how many cancellations were fired.
+  Future<int> cancelAll() async {
+    final json = await _t.postJson('/api/agents/cancel-all');
+    final data = json['data'];
+    if (data is Map && data['count'] is num) {
+      return (data['count'] as num).toInt();
+    }
+    return 0;
   }
 }

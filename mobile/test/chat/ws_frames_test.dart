@@ -29,9 +29,9 @@ void main() {
   });
 
   test('unknown type -> UnknownFrame (never throws)', () {
-    final f = parseServerFrame('{"type":"specialist_thinking","x":1}');
+    final f = parseServerFrame('{"type":"some_future_frame","x":1}');
     expect(f, isA<UnknownFrame>());
-    expect((f as UnknownFrame).type, 'specialist_thinking');
+    expect((f as UnknownFrame).type, 'some_future_frame');
   });
 
   test('malformed json -> UnknownFrame', () {
@@ -148,5 +148,86 @@ void main() {
     final f = parseServerFrame('{"type":"plan_pending","plan":"Do stuff"}');
     expect(f, isA<PlanPendingFrame>());
     expect((f as PlanPendingFrame).steps, isEmpty);
+  });
+
+  // ── Live-activity frames (streaming "what the agent is doing") ────────────
+
+  test('parses thinking_delta frame', () {
+    final f =
+        parseServerFrame('{"type":"thinking_delta","content":"hmm"}');
+    expect(f, isA<ThinkingDeltaFrame>());
+    expect((f as ThinkingDeltaFrame).content, 'hmm');
+  });
+
+  test('parses thinking_done frame', () {
+    expect(parseServerFrame('{"type":"thinking_done"}'),
+        isA<ThinkingDoneFrame>());
+  });
+
+  test('parses team_delegate as a delegate activity', () {
+    final f = parseServerFrame(
+        '{"type":"team_delegate","name":"check email","specialist":"email_specialist","instruction":"read inbox"}');
+    expect(f, isA<AgentActivityFrame>());
+    final a = f as AgentActivityFrame;
+    expect(a.kind, 'delegate');
+    expect(a.subject, 'email_specialist');
+    expect(a.done, isFalse);
+  });
+
+  test('parses specialist_start / specialist_tool / specialist_done', () {
+    final start = parseServerFrame(
+            '{"type":"specialist_start","name":"research","task":"find X"}')
+        as AgentActivityFrame;
+    expect(start.kind, 'specialist');
+    expect(start.subject, 'research');
+    expect(start.detail, 'started');
+
+    final tool = parseServerFrame(
+            '{"type":"specialist_tool","specialist":"research","tool":"web_search"}')
+        as AgentActivityFrame;
+    expect(tool.detail, 'using web_search');
+
+    final done = parseServerFrame(
+            '{"type":"specialist_done","name":"research","success":true,"duration_ms":1200}')
+        as AgentActivityFrame;
+    expect(done.done, isTrue);
+    expect(done.failed, isFalse);
+    expect(done.detail, 'finished');
+  });
+
+  test('parses specialist_done failure', () {
+    final f = parseServerFrame(
+            '{"type":"specialist_done","name":"research","success":false,"error":"boom"}')
+        as AgentActivityFrame;
+    expect(f.done, isTrue);
+    expect(f.failed, isTrue);
+    expect(f.detail, 'failed');
+  });
+
+  test('parses bg_tool_call / bg_tool_result / bg_event', () {
+    final call = parseServerFrame(
+            '{"type":"bg_tool_call","task_id":"t1","task_name":"check whatsapp","name":"whatsapp_read","args":{}}')
+        as AgentActivityFrame;
+    expect(call.kind, 'bg');
+    expect(call.subject, 'check whatsapp');
+    expect(call.detail, 'using whatsapp_read');
+
+    final result = parseServerFrame(
+            '{"type":"bg_tool_result","task_id":"t1","task_name":"check whatsapp","name":"whatsapp_read","preview":"3 chats"}')
+        as AgentActivityFrame;
+    expect(result.detail, 'whatsapp_read done');
+
+    final evt = parseServerFrame(
+            '{"type":"bg_event","task_id":"t1","task_name":"check whatsapp","kind":"phase","detail":"observing results"}')
+        as AgentActivityFrame;
+    expect(evt.subject, 'check whatsapp');
+    expect(evt.detail, 'observing results');
+  });
+
+  test('bg_event with blank detail falls back to kind', () {
+    final f = parseServerFrame(
+            '{"type":"bg_event","task_id":"t1","task_name":"job","kind":"llm_call","detail":""}')
+        as AgentActivityFrame;
+    expect(f.detail, 'llm_call');
   });
 }

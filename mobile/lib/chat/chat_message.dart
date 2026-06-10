@@ -1,3 +1,7 @@
+import 'usage_info.dart';
+
+export 'usage_info.dart';
+
 /// Represents a single tool activity entry attached to a message.
 class ToolActivity {
   final String name;
@@ -19,6 +23,60 @@ class ToolActivity {
       );
 }
 
+/// One live "what the agent is doing" row shown under a streaming bubble:
+/// delegation, specialist progress, background-task or browser activity.
+/// Upserted by [subject] so each specialist/background task holds a single
+/// row, while [events] accumulates the chronological timeline behind it.
+class AgentActivity {
+  final String kind; // 'delegate' | 'specialist' | 'bg' | 'browser'
+  final String subject;
+
+  /// Latest state line, e.g. 'using web_search'.
+  final String detail;
+  final bool done;
+  final bool failed;
+
+  /// Chronological detail lines (oldest → newest) for the expandable timeline.
+  final List<String> events;
+
+  /// Tool names in call order — drives the "N tools" summary.
+  final List<String> toolsUsed;
+
+  const AgentActivity({
+    required this.kind,
+    required this.subject,
+    required this.detail,
+    this.done = false,
+    this.failed = false,
+    this.events = const [],
+    this.toolsUsed = const [],
+  });
+
+  /// Fold a newer event for the same subject into this row: latest detail /
+  /// terminal flags win, histories concatenate. Returns a new instance.
+  AgentActivity merge(AgentActivity next) => AgentActivity(
+        kind: kind,
+        subject: subject,
+        detail: next.detail,
+        done: next.done,
+        failed: next.failed,
+        events: [...events, ...next.events],
+        toolsUsed: [...toolsUsed, ...next.toolsUsed],
+      );
+
+  /// Copy with terminal flags forced (used when a background_done /
+  /// background_failed frame settles the matching activity row).
+  AgentActivity settle({required bool success}) => AgentActivity(
+        kind: kind,
+        subject: subject,
+        detail: success ? 'finished' : 'failed',
+        done: true,
+        failed: !success,
+        events: [...events, success ? 'finished' : 'failed'],
+        toolsUsed: toolsUsed,
+      );
+}
+
 /// Represents the outcome of a background task.
 class BackgroundTaskResult {
   final String name;
@@ -26,12 +84,20 @@ class BackgroundTaskResult {
   final bool success;
   final String? detail; // result text or error text
   final int? durationMs;
+
+  /// Chronological activity lines captured while the task ran (from the
+  /// matching [AgentActivity] row) — renders as an expandable log.
+  final List<String> events;
+  final List<String> toolsUsed;
+
   const BackgroundTaskResult({
     required this.name,
     required this.success,
     this.taskId,
     this.detail,
     this.durationMs,
+    this.events = const [],
+    this.toolsUsed = const [],
   });
 }
 
@@ -43,11 +109,25 @@ class ChatMessage {
   final String? pendingApprovalSkill;
   // Tool activity chips shown under a streaming/done assistant bubble.
   final List<ToolActivity> toolActivities;
+  // Live agent activity rows (delegation / specialists / background work).
+  final List<AgentActivity> agentActivities;
+  // Current TAOR phase ('think'|'act'|'observe'|'reflect') while streaming.
+  final String? phase;
+  // Extended-thinking in progress (shows a "Reasoning…" indicator).
+  final bool thinking;
+  // Accumulated extended-thinking text (collapsible "Thinking" section).
+  final String thinkingText;
+  // Token/cost metrics attached when the turn completes.
+  final UsageInfo? usage;
   // Background task result card (role == 'bg_task').
   final BackgroundTaskResult? bgTaskResult;
   // Plan pending (role == 'plan').
   final String? planText;
   final List<String> planSteps;
+  // 'plan' (approve/reject gate) or 'question' (answer via normal message).
+  final String planKind;
+  // True once the server confirmed approval (hides the action buttons).
+  final bool planResolved;
 
   const ChatMessage({
     required this.role,
@@ -56,47 +136,108 @@ class ChatMessage {
     this.pendingApprovalId,
     this.pendingApprovalSkill,
     this.toolActivities = const [],
+    this.agentActivities = const [],
+    this.phase,
+    this.thinking = false,
+    this.thinkingText = '',
+    this.usage,
     this.bgTaskResult,
     this.planText,
     this.planSteps = const [],
+    this.planKind = 'plan',
+    this.planResolved = false,
   });
 
-  ChatMessage copyWith({String? content, bool? streaming}) => ChatMessage(
+  /// Single cloning seam — every public copy helper delegates here so a new
+  /// field only has to be threaded through once.
+  ChatMessage _clone({
+    String? content,
+    bool? streaming,
+    String? phase,
+    bool? thinking,
+    String? thinkingText,
+    UsageInfo? usage,
+    bool? planResolved,
+    bool clearApprovalFields = false,
+    String? pendingApprovalId,
+    String? pendingApprovalSkill,
+    List<ToolActivity>? toolActivities,
+    List<AgentActivity>? agentActivities,
+  }) =>
+      ChatMessage(
         role: role,
         content: content ?? this.content,
         streaming: streaming ?? this.streaming,
-        pendingApprovalId: pendingApprovalId,
-        pendingApprovalSkill: pendingApprovalSkill,
-        toolActivities: toolActivities,
+        pendingApprovalId: clearApprovalFields
+            ? null
+            : (pendingApprovalId ?? this.pendingApprovalId),
+        pendingApprovalSkill: clearApprovalFields
+            ? null
+            : (pendingApprovalSkill ?? this.pendingApprovalSkill),
+        toolActivities: toolActivities ?? this.toolActivities,
+        agentActivities: agentActivities ?? this.agentActivities,
+        phase: phase ?? this.phase,
+        thinking: thinking ?? this.thinking,
+        thinkingText: thinkingText ?? this.thinkingText,
+        usage: usage ?? this.usage,
         bgTaskResult: bgTaskResult,
         planText: planText,
         planSteps: planSteps,
+        planKind: planKind,
+        planResolved: planResolved ?? this.planResolved,
+      );
+
+  ChatMessage copyWith({
+    String? content,
+    bool? streaming,
+    String? phase,
+    bool? thinking,
+    String? thinkingText,
+    UsageInfo? usage,
+    bool? planResolved,
+  }) =>
+      _clone(
+        content: content,
+        streaming: streaming,
+        phase: phase,
+        thinking: thinking,
+        thinkingText: thinkingText,
+        usage: usage,
+        planResolved: planResolved,
+      );
+
+  /// Attach a pending approval prompt to this message.
+  ChatMessage withApproval(String requestId, String skill) => _clone(
+        pendingApprovalId: requestId,
+        pendingApprovalSkill: skill,
       );
 
   /// Returns a copy with approval fields cleared (prevents double-tap).
-  ChatMessage clearApproval() => ChatMessage(
-        role: role,
-        content: content,
-        streaming: streaming,
-        // pendingApprovalId and pendingApprovalSkill intentionally omitted → null
-        toolActivities: toolActivities,
-        bgTaskResult: bgTaskResult,
-        planText: planText,
-        planSteps: planSteps,
-      );
+  ChatMessage clearApproval() => _clone(clearApprovalFields: true);
+
+  /// Upserts an [AgentActivity] by (kind, subject): an existing row for the
+  /// same specialist/background task absorbs the new event via
+  /// [AgentActivity.merge], otherwise the row is appended.
+  ChatMessage withAgentActivity(AgentActivity activity) {
+    final updated = List<AgentActivity>.from(agentActivities);
+    final idx = updated.indexWhere(
+        (a) => a.kind == activity.kind && a.subject == activity.subject);
+    if (idx == -1) {
+      updated.add(activity);
+    } else {
+      updated[idx] = updated[idx].merge(activity);
+    }
+    return _clone(agentActivities: updated);
+  }
+
+  /// Replaces the agent-activity list wholesale (used to settle a row when
+  /// its background task completes).
+  ChatMessage withAgentActivities(List<AgentActivity> activities) =>
+      _clone(agentActivities: activities);
 
   /// Appends a new pending ToolActivity (no result yet).
-  ChatMessage withToolCall(ToolActivity activity) => ChatMessage(
-        role: role,
-        content: content,
-        streaming: streaming,
-        pendingApprovalId: pendingApprovalId,
-        pendingApprovalSkill: pendingApprovalSkill,
-        toolActivities: [...toolActivities, activity],
-        bgTaskResult: bgTaskResult,
-        planText: planText,
-        planSteps: planSteps,
-      );
+  ChatMessage withToolCall(ToolActivity activity) =>
+      _clone(toolActivities: [...toolActivities, activity]);
 
   /// Updates the most recent matching ToolActivity with a result preview.
   ChatMessage withToolResult(String? toolCallId, String name, String preview) {
@@ -109,16 +250,6 @@ class ChatMessage {
     if (idx != -1) {
       updated[idx] = updated[idx].withResult(preview);
     }
-    return ChatMessage(
-      role: role,
-      content: content,
-      streaming: streaming,
-      pendingApprovalId: pendingApprovalId,
-      pendingApprovalSkill: pendingApprovalSkill,
-      toolActivities: updated,
-      bgTaskResult: bgTaskResult,
-      planText: planText,
-      planSteps: planSteps,
-    );
+    return _clone(toolActivities: updated);
   }
 }

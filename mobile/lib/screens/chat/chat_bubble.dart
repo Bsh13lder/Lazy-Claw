@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
+import 'activity_timeline.dart';
 import 'tool_chip.dart';
 
 class ChatBubble extends StatelessWidget {
@@ -100,6 +101,10 @@ class _BubbleContainer extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (!isUser && m.thinkingText.isNotEmpty) ...[
+            _ThinkingSection(text: m.thinkingText, active: m.thinking),
+            const SizedBox(height: AppSpacing.sm),
+          ],
           _BubbleContent(m: m, isUser: isUser),
           if (m.toolActivities.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
@@ -111,9 +116,22 @@ class _BubbleContainer extends StatelessWidget {
                   .toList(),
             ),
           ],
+          if (m.agentActivities.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
+            ActivityTimeline(activities: m.agentActivities),
+          ],
           if (m.streaming) ...[
             const SizedBox(height: AppSpacing.xs),
-            _StreamingIndicator(),
+            _StreamingIndicator(label: _liveLabel(m)),
+          ],
+          if (!m.streaming &&
+              m.usage != null &&
+              m.usage!.summaryLine.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              m.usage!.summaryLine,
+              style: AppText.caption.copyWith(color: AppColors.textMuted),
+            ),
           ],
         ],
       ),
@@ -175,9 +193,110 @@ class _BubbleContent extends StatelessWidget {
   }
 }
 
+/// The label shown beside the streaming dots: extended thinking wins, then
+/// the current TAOR phase, else nothing (plain dots).
+String? _liveLabel(ChatMessage m) {
+  if (m.thinking) return 'Reasoning…';
+  switch (m.phase) {
+    case 'think':
+      return 'Thinking…';
+    case 'act':
+      return 'Acting…';
+    case 'observe':
+      return 'Observing…';
+    case 'reflect':
+      return 'Reflecting…';
+  }
+  return null;
+}
+
+// ── Thinking section ───────────────────────────────────────────────────────
+
+/// Collapsible extended-thinking panel. Collapsed by default — a tap reveals
+/// the accumulated reasoning text. Pulses subtly while [active].
+class _ThinkingSection extends StatefulWidget {
+  const _ThinkingSection({required this.text, required this.active});
+  final String text;
+  final bool active;
+
+  @override
+  State<_ThinkingSection> createState() => _ThinkingSectionState();
+}
+
+class _ThinkingSectionState extends State<_ThinkingSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _expanded = !_expanded),
+      child: AnimatedContainer(
+        duration: AppMotion.fast,
+        curve: AppMotion.curve,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: AppColors.bgSurfaceElevated,
+          borderRadius: AppRadii.rMd,
+          border: Border.all(color: AppColors.borderSubtle),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.psychology_outlined,
+                  size: 13,
+                  color:
+                      widget.active ? AppColors.accent : AppColors.textMuted,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  widget.active ? 'Thinking…' : 'Thinking',
+                  style: AppText.caption.copyWith(
+                    color: widget.active
+                        ? AppColors.accent
+                        : AppColors.textMuted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Icon(
+                  _expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 13,
+                  color: AppColors.textMuted,
+                ),
+              ],
+            ),
+            if (_expanded) ...[
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                widget.text,
+                style: AppText.caption.copyWith(
+                  color: AppColors.textSecondary,
+                  fontWeight: FontWeight.w400,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ── Streaming indicator ────────────────────────────────────────────────────
 
 class _StreamingIndicator extends StatefulWidget {
+  const _StreamingIndicator({this.label});
+  final String? label;
+
   @override
   State<_StreamingIndicator> createState() => _StreamingIndicatorState();
 }
@@ -209,20 +328,29 @@ class _StreamingIndicatorState extends State<_StreamingIndicator>
       opacity: _fade,
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: List.generate(
-          3,
-          (i) => Padding(
-            padding: EdgeInsets.only(right: i < 2 ? 3 : 0),
-            child: Container(
-              width: 5,
-              height: 5,
-              decoration: BoxDecoration(
-                color: AppColors.accent,
-                shape: BoxShape.circle,
+        children: [
+          ...List.generate(
+            3,
+            (i) => Padding(
+              padding: EdgeInsets.only(right: i < 2 ? 3 : 0),
+              child: Container(
+                width: 5,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  shape: BoxShape.circle,
+                ),
               ),
             ),
           ),
-        ),
+          if (widget.label != null) ...[
+            const SizedBox(width: AppSpacing.xs),
+            Text(
+              widget.label!,
+              style: AppText.caption.copyWith(color: AppColors.textMuted),
+            ),
+          ],
+        ],
       ),
     );
   }

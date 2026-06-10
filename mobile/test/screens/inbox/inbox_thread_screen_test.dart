@@ -96,6 +96,27 @@ void main() {
     expect(find.text('Ask AI'), findsOneWidget);
   });
 
+  testWidgets('newest message renders at the BOTTOM (chat order)',
+      (tester) async {
+    // Channel reads return newest-first: messages[0] is the newest. With the
+    // reversed list it must paint BELOW the older message, and the view opens
+    // scrolled to it — like every messaging app.
+    await tester.pumpWidget(_buildScope(
+      threadId: 't9',
+      title: 'Maria',
+      messages: const [
+        InboxMessage(sender: 'Maria', text: 'newest message', timestamp: '10:05'),
+        InboxMessage(sender: 'Maria', text: 'older message', timestamp: '10:00'),
+      ],
+    ));
+    await tester.pumpAndSettle();
+
+    final newestY = tester.getCenter(find.text('newest message')).dy;
+    final olderY = tester.getCenter(find.text('older message')).dy;
+    expect(newestY, greaterThan(olderY),
+        reason: 'newest must be below (greater dy than) the older message');
+  });
+
   testWidgets('markRead is called on open', (tester) async {
     final transport = _FakeTransport();
 

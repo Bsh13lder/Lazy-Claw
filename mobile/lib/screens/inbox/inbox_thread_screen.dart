@@ -135,7 +135,13 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
                     hint: 'Start the conversation below.',
                   );
                 }
+                // Chat-style ordering: channel reads return NEWEST-FIRST
+                // (whatsapp_read sorts desc), so `reverse: true` puts
+                // messages[0] (the newest) at the BOTTOM and opens the view
+                // already scrolled there — older messages scroll up, like
+                // every messaging app.
                 return ListView.builder(
+                  reverse: true,
                   padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.lg,
                     vertical: AppSpacing.md,

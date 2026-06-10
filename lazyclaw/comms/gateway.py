@@ -78,9 +78,16 @@ class ChannelGateway:
             result = await self._call(send_tool, {rcpt_key: contact, text_key: text})
         except Exception as e:  # surface as typed failure, never raise
             return SendResult(ok=False, error=str(e))
-        status = str(result.get("status", "")).lower() if isinstance(result, dict) else ""
+        if not isinstance(result, dict):
+            return SendResult(ok=False, error=str(result))
+        status = str(result.get("status", "")).lower()
         if status in ("blocked", "error", "failed"):
             return SendResult(ok=False, error=str(result))
+        # MCP error shape without a status field — e.g. mcp-whatsapp's
+        # err() returns {"error": "Contact 'X' not found."}. Treating it as
+        # success made replies vanish SILENTLY (input cleared, nothing sent).
+        if result.get("error"):
+            return SendResult(ok=False, error=str(result.get("error")))
         return SendResult(ok=True)
 
     async def download_media(

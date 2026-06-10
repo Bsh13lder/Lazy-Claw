@@ -191,9 +191,13 @@ async def _upsert_threads_for_items(
 
     latest_handle: str | None = None
     for item in new_items:
-        # Instagram items use "user"; all others use "from"
+        # STABLE identifier first: WhatsApp's `chat_jid` (msg.key.remoteJid).
+        # `from` is a DISPLAY NAME (pushName) there — storing it as the
+        # handle broke every later read/send ("Maria 🌸" never resolves);
+        # email/instagram keep using from/user, which ARE stable handles.
         handle = (
-            item.get("from")
+            item.get("chat_jid")
+            or item.get("from")
             or item.get("user")
             or item.get("handle")
             or ""

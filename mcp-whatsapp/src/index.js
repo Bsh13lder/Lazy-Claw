@@ -1042,6 +1042,23 @@ function resolveContact(query) {
   const q = String(query).toLowerCase().trim();
   if (!q) return null;
 
+  // Tier 0 — already a JID ("…@s.whatsapp.net" / "…@g.us" / "…@lid"):
+  // trust it directly. The unified inbox stores chat JIDs as the thread
+  // handle, so reads/sends arrive here with a full JID — name matching
+  // would miss it, and the phone tier mangles @lid / group JIDs.
+  if (/@(s\.whatsapp\.net|g\.us|lid)$/.test(q)) {
+    const raw = String(query).trim();
+    // Prefer the phone-JID twin for @lid contacts (sending needs it).
+    const jid = raw.endsWith("@lid") && lidToPhone.has(raw)
+      ? lidToPhone.get(raw)
+      : raw;
+    return {
+      jid,
+      name: _displayNameForJid(jid) || extractPhone(jid) || jid.split("@")[0],
+      source: "jid-input",
+    };
+  }
+
   // Tier 1 — phone-looking input
   if (/^\+?\d{7,}$/.test(q.replace(/[^0-9+]/g, ""))) {
     const jid = formatJid(q);
@@ -1185,6 +1202,10 @@ function _formatMsg(msg) {
     fromMe: msg.key.fromMe,
     type: isGroup ? "group" : "direct",
     chatName,
+    // Stable chat identifier — `from` is a DISPLAY NAME (pushName) and must
+    // never be used as a handle: the unified inbox stored it as the thread
+    // contact and later reads/sends failed to resolve it.
+    chat_jid: jid,
     muted: isMuted,
   };
 

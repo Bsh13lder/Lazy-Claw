@@ -69,7 +69,7 @@ async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
         return True, False
 
 
-async def push_telegram(
+async def _send_telegram_raw(
     config: Any,
     text: str,
     *,
@@ -77,29 +77,14 @@ async def push_telegram(
     max_chars: int = 3800,
     inline_keyboard: Sequence[Sequence[dict]] | None = None,
 ) -> bool:
-    """Send a Telegram message to the admin chat.
+    """Low-level Telegram send: token resolve → truncate → keyboard build → Bot.send_message.
 
-    Returns ``True`` if the send attempt completed without raising, ``False``
-    if Telegram is not configured or any step failed. This is intentionally
-    best-effort — skills should continue on failure.
-
-    ``inline_keyboard`` is a 2D matrix of button specs, each a dict with
-    ``{"text": "...", "callback_data": "..."}``. Used by the contract-
-    intake watcher push to surface a one-tap ✅ Accept button alongside
-    the alert text. Pass ``None`` for plain-text pushes.
-
-    Per-user channel routing (``telegram`` | ``app`` | ``both``) is applied
-    centrally here: ``app`` records the (full, untruncated) text to the in-app
-    notification feed and skips Telegram entirely (reporting delivered);
-    ``both`` records AND sends; ``telegram`` (default) is the legacy path.
+    Does NOT call ``_route_to_feed_or_skip`` and does NOT record to the
+    notification feed. Returns ``True`` on success, ``False`` if Telegram is
+    not configured or any step fails. Intended to be called by
+    :func:`push_telegram` (after routing) and by a future ``deliver()`` funnel
+    that records the feed itself before delegating the actual send here.
     """
-    # Resolve the routing channel + record to the in-app feed BEFORE any
-    # truncation so the feed keeps the full body. Best-effort: failures fall
-    # back to the legacy Telegram-only path.
-    send_telegram, delivered_as_app = await _route_to_feed_or_skip(config, text)
-    if not send_telegram:
-        return delivered_as_app
-
     token = getattr(config, "telegram_bot_token", None) if config else None
     chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT")
     if not token or not chat_id:
@@ -155,6 +140,44 @@ async def push_telegram(
     except Exception as exc:
         logger.warning("push_telegram failed: %s", exc)
         return False
+
+
+async def push_telegram(
+    config: Any,
+    text: str,
+    *,
+    parse_mode: str | None = "Markdown",
+    max_chars: int = 3800,
+    inline_keyboard: Sequence[Sequence[dict]] | None = None,
+) -> bool:
+    """Send a Telegram message to the admin chat.
+
+    Returns ``True`` if the send attempt completed without raising, ``False``
+    if Telegram is not configured or any step failed. This is intentionally
+    best-effort — skills should continue on failure.
+
+    ``inline_keyboard`` is a 2D matrix of button specs, each a dict with
+    ``{"text": "...", "callback_data": "..."}``. Used by the contract-
+    intake watcher push to surface a one-tap ✅ Accept button alongside
+    the alert text. Pass ``None`` for plain-text pushes.
+
+    Per-user channel routing (``telegram`` | ``app`` | ``both``) is applied
+    centrally here: ``app`` records the (full, untruncated) text to the in-app
+    notification feed and skips Telegram entirely (reporting delivered);
+    ``both`` records AND sends; ``telegram`` (default) is the legacy path.
+    """
+    # Resolve the routing channel + record to the in-app feed BEFORE any
+    # truncation so the feed keeps the full body. Best-effort: failures fall
+    # back to the legacy Telegram-only path.
+    send_telegram, delivered_as_app = await _route_to_feed_or_skip(config, text)
+    if not send_telegram:
+        return delivered_as_app
+    return await _send_telegram_raw(
+        config, text,
+        parse_mode=parse_mode,
+        max_chars=max_chars,
+        inline_keyboard=inline_keyboard,
+    )
 
 
 async def push_telegram_document(

@@ -48,6 +48,7 @@ from lazyclaw.gateway.routes.awake import router as awake_router
 from lazyclaw.gateway.routes.contacts import router as internal_contacts_router
 from lazyclaw.gateway.routes.mobile import router as mobile_apk_router
 from lazyclaw.gateway.routes.mobile_settings import router as mobile_settings_router
+from lazyclaw.gateway.routes.inbox import router as inbox_router, set_inbox_registry
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ def set_registry(registry) -> None:
     global _shared_registry
     _shared_registry = registry
     set_chat_ws_deps(_lane_queue, registry, _task_runner, _team_lead)
+    set_inbox_registry(registry)
 
 
 def set_agent_deps(task_runner=None, team_lead=None) -> None:
@@ -240,6 +242,7 @@ app.include_router(mobile_apk_router)
 app.include_router(mobile_settings_router)
 from lazyclaw.gateway.routes.notifications import router as notifications_router  # noqa: E402
 app.include_router(notifications_router)
+app.include_router(inbox_router)
 
 
 class ChatRequest(BaseModel):

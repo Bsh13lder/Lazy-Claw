@@ -439,6 +439,30 @@ def _most_duplicated_name(tool_calls: list[ToolCall]) -> str:
     return f"{name} (×{count})"
 
 
+def _success_tail_action(
+    err_str: str,
+    have_usable_response: bool,
+    already_retried: bool,
+) -> str:
+    """Classify an SDK iterator exception → "swallow" | "retry" | "raise".
+
+    Targets the upstream quirk where the CLI emits a ResultMessage with
+    is_error=True, errors=[], subtype="success" and the SDK surfaces it
+    as a bare Exception "Claude Code returned an error result: success".
+    With output already collected the turn actually succeeded → swallow.
+    On an EMPTY turn the quirk wasted the whole call → retry ONCE
+    (2026-06-09 09:33: a user-visible "Chat failed" on this exact shape).
+    Anything else is a genuine iterator error → raise.
+    """
+    if "returned an error result: success" not in err_str:
+        return "raise"
+    if have_usable_response:
+        return "swallow"
+    if not already_retried:
+        return "retry"
+    return "raise"
+
+
 def _find_claude_binary() -> str | None:
     """Search well-known paths for the `claude` binary.
 
@@ -683,18 +707,29 @@ class ClaudeSDKProvider(BaseLLMProvider):
             # no upstream api_error), absorb the trailing exception and
             # return normally. Otherwise re-wrap and re-raise so genuine
             # iterator errors still surface.
-            err_str = str(exc)
-            looks_like_success_tail = (
-                "returned an error result: success" in err_str
+            action = _success_tail_action(
+                str(exc),
+                have_usable_response=bool(
+                    (text_parts or tool_calls) and not api_error
+                ),
+                already_retried=bool(kwargs.get("_success_tail_retried")),
             )
-            have_usable_response = bool(
-                (text_parts or tool_calls) and not api_error
-            )
-            if looks_like_success_tail and have_usable_response:
+            if action == "swallow":
                 logger.warning(
                     "Claude SDK: swallowed trailing 'error result: success' "
                     "(turn succeeded — %d text chars + %d tool call(s))",
                     sum(len(t) for t in text_parts), len(tool_calls),
+                )
+            elif action == "retry":
+                # Empty turn killed by the quirk — nothing was produced
+                # and no lazyclaw tool ran, so ONE full retry is safe.
+                logger.warning(
+                    "Claude SDK: empty turn ended with 'error result: "
+                    "success' (SDK quirk) — retrying once"
+                )
+                return await self.chat(
+                    messages, model,
+                    **{**kwargs, "_success_tail_retried": True},
                 )
             else:
                 raise RuntimeError(

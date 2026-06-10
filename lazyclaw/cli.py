@@ -210,6 +210,16 @@ async def run_agent(config: Config) -> None:
     except Exception as exc:
         logging.getLogger(__name__).warning("MCP auto-connect failed: %s", exc)
 
+    # ADR-0005: surface builtin-specialist allowlist drift at boot, after
+    # MCP connect so bridged tool names count as known. Logging-only.
+    try:
+        from lazyclaw.teams.specialist_loader import startup_specialist_self_check
+        startup_specialist_self_check(registry)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "specialist startup self-check failed", exc_info=True
+        )
+
     # Auto-detect ECO mode
     from lazyclaw.llm.eco_settings import auto_detect_eco_mode
     try:
@@ -1161,6 +1171,16 @@ async def _chat_loop() -> None:
     except Exception as exc:
         mcp_tool_count = 0
         logging.getLogger(__name__).warning("MCP auto-connect failed: %s", exc)
+
+    # ADR-0005: surface builtin-specialist allowlist drift at boot, after
+    # MCP connect so bridged tool names count as known. Logging-only.
+    try:
+        from lazyclaw.teams.specialist_loader import startup_specialist_self_check
+        startup_specialist_self_check(registry)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "specialist startup self-check failed", exc_info=True
+        )
 
     # Auto-detect ECO mode if free providers are available
     from lazyclaw.llm.eco_settings import auto_detect_eco_mode

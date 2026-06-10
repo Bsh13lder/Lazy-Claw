@@ -15,6 +15,7 @@ import '../../screens/more/skills_screen.dart';
 import '../../screens/more/specialists_screen.dart';
 import '../../screens/more/vault_screen.dart';
 import '../../screens/more/watchers_screen.dart';
+import '../../screens/activity/activity_screen.dart';
 import '../../screens/documents/documents_screen.dart';
 import '../../screens/register_screen.dart';
 import '../../screens/settings_screen.dart';
@@ -118,6 +119,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Auth routes — OUTSIDE the shell so they have no bottom nav bar.
       GoRoute(path: '/login', builder: (ctx, _) => const LoginScreen()),
       GoRoute(path: '/register', builder: (ctx, _) => const RegisterScreen()),
+
+      // Agent activity — full-screen over bottom nav, reached from the chat
+      // app-bar ⚡ button and the Power-tools hub.
+      GoRoute(path: '/activity', builder: (ctx, _) => const ActivityScreen()),
 
       // Power-tools routes — full-screen over bottom nav (authed, back button).
       GoRoute(path: '/more', builder: (ctx, _) => const MoreHubScreen()),

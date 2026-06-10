@@ -11,17 +11,29 @@ class _PowerTool {
   final String description;
   final IconData icon;
 
+  /// Optional absolute route — when null the route is derived as `/more/$key`.
+  /// Lets first-class surfaces (e.g. Activity at `/activity`) live in the hub.
+  final String? fullRoute;
+
   const _PowerTool({
     required this.key,
     required this.label,
     required this.description,
     required this.icon,
+    this.fullRoute,
   });
 
-  String get route => '/more/$key';
+  String get route => fullRoute ?? '/more/$key';
 }
 
 const _kTools = <_PowerTool>[
+  _PowerTool(
+    key: 'activity',
+    label: 'Activity',
+    description: 'What the agent is doing & recently did',
+    icon: Icons.bolt_outlined,
+    fullRoute: '/activity',
+  ),
   _PowerTool(
     key: 'skills',
     label: 'Skills',

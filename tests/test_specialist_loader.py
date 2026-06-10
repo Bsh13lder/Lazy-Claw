@@ -239,3 +239,67 @@ def test_research_specialist_fields():
         "google_run_task",
     )
     assert "TOOL LADDER" in s.system_prompt
+
+
+def test_freelance_allowlists_raw_upwork_read_tools():
+    """Regression (2026-06-10 00:33): the brain delegated "call
+    upwork_get_conversation with room_id=..." but the freelance allowlist
+    lacked the raw MCP read tools its own prompt ladder promises.
+    search_tools discovery does NOT grant callability — _filter_tools only
+    unions MCP tools whose bare name is allowlisted — so the worker
+    stuck-looped on search_tools and the user never got an answer.
+    """
+    spec = next(
+        s for s in BUILTIN_SPECIALISTS if s.name == "freelance_specialist"
+    )
+    assert {
+        "upwork_get_messages",
+        "upwork_get_conversation",
+        "upwork_get_unread_count",
+        "upwork_last_conversation",
+        "upwork_inbox_check",
+    } <= set(spec.allowed_skills)
+
+
+def test_startup_self_check_accepts_bare_mcp_suffixes(caplog):
+    """ADR-0005 startup self-check: MCP tool ids carry a mcp_<uuid>_
+    prefix while allowlists hold bare names — both forms must count as
+    known, and genuine typos must still warn."""
+    import logging as _logging
+
+    from lazyclaw.teams.specialist_loader import startup_specialist_self_check
+
+    native = {s for spec in BUILTIN_SPECIALISTS for s in spec.allowed_skills}
+    # Simulate a live registry: every allowlisted native name, plus the
+    # upwork read tools exposed ONLY under their prefixed MCP ids.
+    mcp_only = {
+        "upwork_get_messages", "upwork_get_conversation",
+        "upwork_get_unread_count", "upwork_last_conversation",
+        "upwork_inbox_check", "upwork_submit_proposal",
+        "upwork_contract_poll",
+    }
+
+    class _FakeRegistry:
+        def list_tools(self):
+            tools = [
+                {"function": {"name": n}} for n in native - mcp_only
+            ]
+            tools += [
+                {"function": {"name": f"mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_{n}"}}
+                for n in mcp_only
+            ]
+            return tools
+
+    with caplog.at_level(_logging.WARNING):
+        report = startup_specialist_self_check(_FakeRegistry())
+    assert report == {}, f"false positives: {report}"
+
+    class _EmptyRegistry:
+        def list_tools(self):
+            return [{"function": {"name": "web_search"}}]
+
+    with caplog.at_level(_logging.WARNING):
+        report = startup_specialist_self_check(_EmptyRegistry())
+    # With a near-empty registry the drift IS reported, loudly.
+    assert "freelance_specialist" in report
+    assert any("unknown tools" in r.message for r in caplog.records)

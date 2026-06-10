@@ -19,6 +19,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import '../chat/chat_controller.dart';
 import '../chat/chat_message.dart';
 import '../chat/chat_socket.dart';
@@ -26,6 +27,7 @@ import '../core/config/server_config.dart';
 import '../notifications/local_notifications.dart';
 import '../notifications/notifications_service.dart';
 import '../providers/auth_provider.dart';
+import '../repositories/chat_history_repository.dart';
 import '../ui/ui.dart';
 import 'chat/bg_task_card.dart';
 import 'chat/chat_bubble.dart';
@@ -48,6 +50,12 @@ final chatControllerProvider =
                   LocalNotifications.showTaskNotification(title, body),
             ));
 
+/// Loads prior conversation history so the chat isn't empty on open.
+final chatHistoryRepositoryProvider = Provider<ChatHistoryRepository>((ref) {
+  return ChatHistoryRepository(
+      DioChatHistoryTransport(ref.watch(apiClientProvider)));
+});
+
 // ── Screen ─────────────────────────────────────────────────────────────────
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -69,6 +77,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // Safe to call multiple times — the implementation is idempotent.
     LocalNotifications.init();
     _connect();
+    // Replay prior conversation so the screen isn't empty on open. Best-effort
+    // and independent of the socket — the live chat works without it.
+    unawaited(_loadHistory());
+  }
+
+  /// Fetch the primary session's history and seed the controller once.
+  /// Swallows errors: history is a nicety, never a blocker.
+  Future<void> _loadHistory() async {
+    try {
+      final history =
+          await ref.read(chatHistoryRepositoryProvider).loadPrimaryHistory();
+      if (!mounted) return;
+      ref.read(chatControllerProvider.notifier).seedHistory(history);
+    } catch (_) {
+      // History is best-effort — leave the chat empty and carry on live.
+    }
   }
 
   @override
@@ -203,6 +227,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Agent activity — what the agent is doing & recently did.
+            IconButton(
+              icon: const Icon(Icons.bolt_outlined),
+              color: AppColors.textSecondary,
+              tooltip: 'Activity',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => context.push('/activity'),
+            ),
             // Operating-mode switcher (shared agentModeProvider — same state as
             // the Settings screen). Tappable pill → bottom-sheet picker.
             const ModeSwitcher(),

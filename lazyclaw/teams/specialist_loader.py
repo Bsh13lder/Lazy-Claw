@@ -174,10 +174,36 @@ def warn_on_unknown_tools(
     return report
 
 
+def startup_specialist_self_check(registry) -> dict[str, list[str]]:
+    """ADR-0005 startup self-check: builtin allowlists vs the LIVE registry.
+
+    Runs after MCP servers connect so the known set covers both native
+    skills and bridged MCP tools. MCP tool ids carry a ``mcp_<uuid>_``
+    prefix while allowlists hold bare names (the runner matches by bare
+    suffix), so both the full id and its bare form count as known.
+    Logging-only — drift is surfaced loudly at boot, never fatal.
+    """
+    from lazyclaw.skills.tool_namespace import bare_tool_name
+    from lazyclaw.teams.specialist import BUILTIN_SPECIALISTS
+
+    known: set[str] = set()
+    try:
+        for t in registry.list_tools():
+            name = t.get("function", {}).get("name", "")
+            if name:
+                known.add(name)
+                known.add(bare_tool_name(name))
+    except Exception:
+        logger.debug("specialist self-check: registry listing failed", exc_info=True)
+        return {}
+    return warn_on_unknown_tools(BUILTIN_SPECIALISTS, known)
+
+
 __all__ = [
     "BUILTIN_SPECIALISTS_DIR",
     "parse_specialist_md",
     "load_builtin_specialists",
     "validate_specialist_tools",
     "warn_on_unknown_tools",
+    "startup_specialist_self_check",
 ]

@@ -46,6 +46,9 @@ async def init_db(config: Config) -> None:
             ("background_tasks", "cost_usd", "ALTER TABLE background_tasks ADD COLUMN cost_usd REAL DEFAULT 0.0"),
             ("background_tasks", "tokens_used", "ALTER TABLE background_tasks ADD COLUMN tokens_used INTEGER DEFAULT 0"),
             ("background_tasks", "llm_calls", "ALTER TABLE background_tasks ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+            # ADR-0005 follow-up — custom specialists keep scraper access
+            # across restarts (routes accepted the flag; DB dropped it).
+            ("specialists", "include_scraper", "ALTER TABLE specialists ADD COLUMN include_scraper INTEGER DEFAULT 0"),
             # Task execution tracking — saved-but-unexecuted gap fix
             ("tasks", "last_error", "ALTER TABLE tasks ADD COLUMN last_error TEXT"),
             ("tasks", "attempt_count", "ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"),
@@ -292,6 +295,68 @@ async def init_db(config: Config) -> None:
             )
         except Exception:
             logger.debug("notifications table migration skipped", exc_info=True)
+
+        # meta: encrypted JSON sidecar for feed entries (thread_ref for
+        # tap-to-open deep links on channel_message notifications).
+        try:
+            cols = await db.execute("PRAGMA table_info(notifications)")
+            names = [r[1] for r in await cols.fetchall()]
+            if "meta" not in names:
+                await db.execute("ALTER TABLE notifications ADD COLUMN meta TEXT")
+        except Exception:
+            logger.debug("notifications.meta migration skipped", exc_info=True)
+
+        # ── Unified-comms: channel inbox-thread metadata ──────────────────
+        # Stores one encrypted row per (user, channel, contact) thread so the
+        # mobile inbox can list threads, show previews, and track unread counts
+        # without making a live channel read on every load.
+        # Plaintext: id, user_id, channel, contact_handle_hash, unread_count,
+        #            last_activity, created_at, updated_at, deleted_at
+        #            (needed for queries, sync delta feed, and tombstones).
+        # Encrypted: contact_handle, contact_name, last_preview,
+        #            last_seen_msg_id (user-visible content / PII — handles
+        #            are phone numbers, WhatsApp JIDs, email addresses).
+        # Dedup queries use contact_handle_hash = HMAC-SHA256(user DEK, handle)
+        # so the unique index never sees the plaintext handle.
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS channel_threads ("
+                "id TEXT PRIMARY KEY, "
+                "user_id TEXT NOT NULL REFERENCES users(id), "
+                "channel TEXT NOT NULL, "
+                "contact_handle TEXT NOT NULL, "
+                "contact_handle_hash TEXT, "
+                "contact_name TEXT, "
+                "last_preview TEXT, "
+                "unread_count INTEGER NOT NULL DEFAULT 0, "
+                "last_activity TEXT NOT NULL DEFAULT (datetime('now')), "
+                "last_seen_msg_id TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "deleted_at TEXT"
+                ")"
+            )
+            # Upgrade pass for tables created before handle encryption
+            # (2026-06-10): add the hash column, drop the plaintext index.
+            # Legacy rows keep a NULL hash (distinct in SQLite unique
+            # indexes) and are upgraded in place by thread_store.upsert.
+            try:
+                await db.execute(
+                    "ALTER TABLE channel_threads ADD COLUMN contact_handle_hash TEXT"
+                )
+            except Exception:
+                pass  # column already exists (fresh table or already upgraded)
+            await db.execute("DROP INDEX IF EXISTS idx_channel_threads_unique")
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_threads_unique_hash "
+                "ON channel_threads(user_id, channel, contact_handle_hash)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_channel_threads_updated "
+                "ON channel_threads(user_id, updated_at)"
+            )
+        except Exception:
+            logger.debug("channel_threads migration skipped", exc_info=True)
 
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.

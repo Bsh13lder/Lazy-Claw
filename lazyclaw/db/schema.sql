@@ -311,6 +311,7 @@ CREATE TABLE IF NOT EXISTS specialists (
     allowed_skills TEXT NOT NULL,
     preferred_model TEXT,
     is_builtin INTEGER DEFAULT 0,
+    include_scraper INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
 

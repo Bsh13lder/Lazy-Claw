@@ -4161,6 +4161,20 @@ class Agent:
                             if tc.name in _suppressed_tool_names:
                                 _resurrect_blocked.append(tc.name)
                                 continue
+                            if (
+                                _thin_router_capped
+                                and tc.name not in _META_TOOLS
+                            ):
+                                # THIN-ROUTER cap: after the one inline
+                                # action only meta tools are callable.
+                                # The narrowing only suppresses tools that
+                                # were IN the sent list — domain tools the
+                                # LLM remembers from history (e.g.
+                                # upwork_inbox_check on 2026-06-10 16:20)
+                                # would otherwise re-enter through this
+                                # late-inject door and bypass the cap.
+                                _resurrect_blocked.append(tc.name)
+                                continue
                             _schema = self.registry.get_tool_schema(tc.name)
                             if _schema is not None:
                                 tools.append(_schema)
@@ -5271,6 +5285,17 @@ class Agent:
                                 "'status': 'failed'",
                                 '"isError": true', '"isError":true',
                                 "'isError': True",
+                                # mcp-upwork empty_or_blocked reads: only
+                                # the wall diagnoses are failures — a
+                                # selector_drift_or_truly_empty result may
+                                # be a genuinely empty list and must NOT
+                                # feed the failure counter.
+                                '"diagnosis": "cloudflare_challenge"',
+                                '"diagnosis":"cloudflare_challenge"',
+                                "'diagnosis': 'cloudflare_challenge'",
+                                '"diagnosis": "login_required"',
+                                '"diagnosis":"login_required"',
+                                "'diagnosis': 'login_required'",
                             )
                             head = result[:512]  # only check the head; results can be huge
                             _is_err_result = any(m in head for m in _err_status_markers)
@@ -5393,6 +5418,18 @@ class Agent:
                             ))
                         else:
                             _denied_approvals.add(_denial_key)
+                            # Audit the user's denial (2026-06-10, Phase 3)
+                            # — approvals are logged by execute_allowed;
+                            # denials never reach the executor.
+                            try:
+                                from lazyclaw.permissions.audit import log_action
+
+                                await log_action(
+                                    self.config, user_id, "tool_denied",
+                                    skill_name=skill_name, arguments=parsed_args,
+                                )
+                            except Exception:
+                                logger.debug("denial audit swallowed", exc_info=True)
                             await cb.on_event(AgentEvent(
                                 "approval", f"{_display} denied",
                                 {"skill": skill_name, "display_name": _display, "approved": False},

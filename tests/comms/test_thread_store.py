@@ -153,3 +153,96 @@ async def test_cross_user_isolation(config, user_id):
     assert all(th["id"] != t["id"] for th in other_threads)
     # direct get must also return None for wrong user
     assert await thread_store.get_thread(config, other_user, t["id"]) is None
+
+
+# ── Security hardening (2026-06-10 review) ─────────────────────────────────────
+
+
+async def test_contact_handle_encrypted_at_rest(config, user_id):
+    """contact_handle is PII (phone numbers / WhatsApp JIDs) — the raw row must
+    hold an enc:v1 ciphertext plus an HMAC hash column for dedup, never the
+    plaintext handle. The decrypted dict still returns the plaintext."""
+    handle = "34611234567@s.whatsapp.net"
+    t = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle=handle,
+        contact_name="Vato", preview="hola",
+    )
+    assert t["contact_handle"] == handle  # API surface unchanged
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT contact_handle, contact_handle_hash FROM channel_threads WHERE id=?",
+            (t["id"],),
+        )
+        row = await cur.fetchone()
+    assert row["contact_handle"].startswith("enc:v1:")
+    assert handle not in row["contact_handle"]
+    assert row["contact_handle_hash"] is not None
+    assert handle not in row["contact_handle_hash"]
+
+
+async def test_encrypted_handle_dedup_still_works(config, user_id):
+    """Dedup by (user, channel, handle) must survive encryption — the HMAC hash
+    lookup must map a second upsert onto the same row."""
+    t1 = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="+34699999999",
+        preview="first", increment_unread=True,
+    )
+    t2 = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="+34699999999",
+        preview="second", increment_unread=True,
+    )
+    assert t2["id"] == t1["id"]
+    assert t2["unread_count"] == 2
+
+
+async def test_legacy_plaintext_row_upgraded_on_upsert(config, user_id):
+    """Rows written before handle encryption (plaintext handle, NULL hash) must
+    be claimed and upgraded in place on the next upsert — no duplicate thread."""
+    handle = "legacy@old.com"
+    async with db_session(config) as db:
+        await db.execute(
+            "INSERT INTO channel_threads "
+            "(id,user_id,channel,contact_handle,unread_count,last_activity,"
+            "created_at,updated_at,deleted_at) "
+            "VALUES ('legacy-1',?,'email',?,1,'2026-01-01T00:00:00+00:00',"
+            "'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',NULL)",
+            (user_id, handle),
+        )
+        await db.commit()
+
+    t = await thread_store.upsert_thread(
+        config, user_id, channel="email", contact_handle=handle,
+        preview="new mail", increment_unread=True,
+    )
+    assert t["id"] == "legacy-1"          # same row, not a duplicate
+    assert t["unread_count"] == 2
+    assert t["contact_handle"] == handle  # still decodes to the plaintext
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT contact_handle, contact_handle_hash FROM channel_threads "
+            "WHERE id='legacy-1'",
+        )
+        row = await cur.fetchone()
+    assert row["contact_handle"].startswith("enc:v1:")  # upgraded in place
+    assert row["contact_handle_hash"] is not None
+
+
+async def test_upsert_rejects_invalid_channel(config, user_id):
+    """Channel names must be sane tokens — path traversal & junk rejected."""
+    for bad in ("../../etc", "What Sapp", "", "A" * 64):
+        with pytest.raises(ValueError):
+            await thread_store.upsert_thread(
+                config, user_id, channel=bad, contact_handle="+34600000001",
+            )
+
+
+async def test_upsert_readback_failure_raises(config, user_id, monkeypatch):
+    """The post-upsert readback guard must raise (not silently return None)
+    even under `python -O` — i.e. it must NOT be a bare assert."""
+    async def _none(*a, **kw):
+        return None
+    monkeypatch.setattr(thread_store, "get_thread", _none)
+    with pytest.raises(RuntimeError):
+        await thread_store.upsert_thread(
+            config, user_id, channel="whatsapp", contact_handle="+34600000002",
+        )

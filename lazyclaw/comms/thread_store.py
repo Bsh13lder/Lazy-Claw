@@ -2,6 +2,9 @@
 message bodies are read live via ChannelGateway)."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -10,16 +13,31 @@ from lazyclaw.crypto.encryption import encrypt_field, decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
+# Channel names come from MCP watcher service ids and HTTP filters — keep them
+# sane lowercase tokens (hyphens allowed: MCP service ids use them).
+# Deliberately NOT a closed allowlist: custom MCP watchers may mirror threads
+# for services beyond the built-in comms channels.
+_CHANNEL_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _handle_hash(key: bytes, contact_handle: str) -> str:
+    """Deterministic HMAC of the contact handle, used for the dedup lookup +
+    unique index. Handles are PII (phone numbers, WhatsApp JIDs, emails), so
+    the stored column is encrypted and only this keyed hash is queryable."""
+    return hmac.new(key, contact_handle.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _row_to_dict(row, key: bytes) -> dict:
     return {
         "id": row["id"],
         "channel": row["channel"],
-        "contact_handle": row["contact_handle"],
+        # Plaintext-tolerant decrypt: rows written before handle encryption
+        # (2026-06-10) hold the raw handle and pass through unchanged.
+        "contact_handle": decrypt_field(row["contact_handle"], key),
         "contact_name": decrypt_field(row["contact_name"], key),
         "last_preview": decrypt_field(row["last_preview"], key),
         "unread_count": row["unread_count"],
@@ -44,29 +62,47 @@ async def upsert_thread(
 ) -> dict:
     """Create or update a thread record, returning the decrypted dict.
 
-    Deduplication key: (user_id, channel, contact_handle).
+    Deduplication key: (user_id, channel, HMAC(contact_handle)) — the handle
+    itself is stored encrypted (it's PII: phone numbers / JIDs / emails).
     When a thread already exists, unread_count is incremented if
     ``increment_unread`` is True; encrypted fields are refreshed.
     A soft-deleted thread is revived (deleted_at=NULL) on upsert.
     """
+    if not _CHANNEL_RE.match(channel or ""):
+        raise ValueError(f"invalid channel name: {channel!r}")
     key = await get_user_dek(config, user_id)
+    handle_hash = _handle_hash(key, contact_handle)
     now = _now()
     async with db_session(config) as db:
         cur = await db.execute(
             "SELECT id, unread_count FROM channel_threads "
-            "WHERE user_id=? AND channel=? AND contact_handle=?",
-            (user_id, channel, contact_handle),
+            "WHERE user_id=? AND channel=? AND contact_handle_hash=?",
+            (user_id, channel, handle_hash),
         )
         existing = await cur.fetchone()
+        if existing is None:
+            # Legacy row from before handle encryption (plaintext handle,
+            # NULL hash) — claim it so the upsert upgrades it in place
+            # instead of creating a duplicate thread.
+            cur = await db.execute(
+                "SELECT id, unread_count FROM channel_threads "
+                "WHERE user_id=? AND channel=? AND contact_handle=? "
+                "AND contact_handle_hash IS NULL",
+                (user_id, channel, contact_handle),
+            )
+            existing = await cur.fetchone()
         if existing is None:
             tid = str(uuid4())
             await db.execute(
                 "INSERT INTO channel_threads "
-                "(id,user_id,channel,contact_handle,contact_name,last_preview,"
+                "(id,user_id,channel,contact_handle,contact_handle_hash,"
+                "contact_name,last_preview,"
                 "unread_count,last_activity,last_seen_msg_id,created_at,updated_at,deleted_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                 (
-                    tid, user_id, channel, contact_handle,
+                    tid, user_id, channel,
+                    encrypt_field(contact_handle, key),
+                    handle_hash,
                     encrypt_field(contact_name, key),
                     encrypt_field(preview, key),
                     1 if increment_unread else 0,
@@ -80,17 +116,21 @@ async def upsert_thread(
             new_unread = existing["unread_count"] + (1 if increment_unread else 0)
             await db.execute(
                 "UPDATE channel_threads SET "
+                "contact_handle=?, contact_handle_hash=?, "
                 "contact_name=COALESCE(?, contact_name), "
                 "last_preview=COALESCE(?, last_preview), "
                 "unread_count=?, last_activity=?, "
                 "last_seen_msg_id=COALESCE(?, last_seen_msg_id), "
                 "updated_at=?, deleted_at=NULL WHERE id=?",
-                (encrypt_field(contact_name, key), encrypt_field(preview, key),
+                (encrypt_field(contact_handle, key), handle_hash,
+                 encrypt_field(contact_name, key), encrypt_field(preview, key),
                  new_unread, now, encrypt_field(last_seen_msg_id, key), now, tid),
             )
         await db.commit()
     result = await get_thread(config, user_id, tid)
-    assert result is not None  # just upserted
+    if result is None:
+        # Explicit guard, not `assert` — asserts vanish under `python -O`.
+        raise RuntimeError(f"thread upsert readback failed (thread={tid})")
     return result
 
 

@@ -59,6 +59,16 @@ def _make_app(cfg: Config) -> FastAPI:
 # ── fixtures ───────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _reset_reply_limiter():
+    """The reply rate limiter is module-level — clear it between tests so
+    earlier tests' sends can't trip a 429 in later ones."""
+    from lazyclaw.gateway.routes import inbox as inbox_mod
+    inbox_mod._reply_limiter._requests.clear()
+    yield
+    inbox_mod._reply_limiter._requests.clear()
+
+
 @pytest.fixture
 async def inbox_client(tmp_path: Path):
     cfg = await _setup_db(tmp_path)
@@ -275,10 +285,15 @@ async def test_reply_direct_default_mode(inbox_client_with_thread) -> None:
 
 @pytest.mark.asyncio
 async def test_reply_direct_send_failure_raises_502(inbox_client_with_thread) -> None:
-    """When gateway.send returns ok=False, reply returns HTTP 502."""
+    """When gateway.send returns ok=False, reply returns HTTP 502 with a
+    GENERIC detail — internal error strings (paths, endpoints, payloads)
+    must never reach the client. The full error is logged server-side."""
     client, thread, _cfg = inbox_client_with_thread
     fake_gw = MagicMock()
-    fake_gw.send = AsyncMock(return_value=SendResult(ok=False, error="blocked by channel"))
+    fake_gw.send = AsyncMock(return_value=SendResult(
+        ok=False,
+        error="Traceback /internal/secret.py: MCP endpoint 10.0.0.5 refused",
+    ))
 
     with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=fake_gw):
         r = client.post(
@@ -287,7 +302,10 @@ async def test_reply_direct_send_failure_raises_502(inbox_client_with_thread) ->
         )
 
     assert r.status_code == 502
-    assert "blocked by channel" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert detail == "send failed"
+    assert "secret.py" not in detail
+    assert "10.0.0.5" not in detail
 
 
 @pytest.mark.asyncio
@@ -345,3 +363,87 @@ async def test_reply_ai_mode_success(inbox_client_with_thread) -> None:
         assert body["conversation_id"] == "conv-123"
     finally:
         del sys.modules["lazyclaw.comms.conversation_runner"]
+
+
+# ── Security hardening (2026-06-10 review) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reply_rate_limited_returns_429(inbox_client_with_thread) -> None:
+    """The reply endpoint triggers live external channel sends — bursts past
+    the per-user limit must get HTTP 429, not reach the gateway."""
+    from lazyclaw.gateway.auth import _RateLimiter
+    from lazyclaw.gateway.routes import inbox as inbox_mod
+
+    client, thread, _cfg = inbox_client_with_thread
+    fake_gw = MagicMock()
+    fake_gw.send = AsyncMock(return_value=SendResult(ok=True))
+
+    with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=fake_gw), \
+         patch.object(inbox_mod, "_reply_limiter", _RateLimiter(max_requests=2, window_seconds=60)):
+        for _ in range(2):
+            r = client.post(
+                f"/api/inbox/threads/{thread['id']}/reply",
+                json={"text": "ok", "mode": "direct"},
+            )
+            assert r.status_code == 200
+        r = client.post(
+            f"/api/inbox/threads/{thread['id']}/reply",
+            json={"text": "one too many", "mode": "direct"},
+        )
+
+    assert r.status_code == 429
+    assert fake_gw.send.await_count == 2  # third send never reached the gateway
+
+
+@pytest.mark.asyncio
+async def test_changes_invalid_since_returns_400(inbox_client) -> None:
+    """A non-ISO `since` would silently corrupt the SQLite string comparison —
+    it must be rejected with HTTP 400."""
+    r = inbox_client.get("/api/inbox/threads/changes?since=not-a-date")
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_changes_valid_since_still_accepted(inbox_client) -> None:
+    """A proper ISO-8601 `since` must keep working after validation is added —
+    both correctly URL-encoded and with a raw '+' (which decodes to a space)."""
+    r = inbox_client.get(
+        "/api/inbox/threads/changes",
+        params={"since": "2026-06-10T00:00:00+00:00"},  # httpx encodes the '+'
+    )
+    assert r.status_code == 200
+    assert "now" in r.json()
+    # Sloppy client: raw '+' in the URL arrives server-side as a space.
+    r = inbox_client.get("/api/inbox/threads/changes?since=2026-06-10T00:00:00+00:00")
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_list_threads_invalid_channel_returns_400(inbox_client) -> None:
+    """Junk channel values (path traversal, uppercase, spaces) must be 400."""
+    for bad in ("../../etc", "WhatsApp Premium", "a" * 64):
+        r = inbox_client.get("/api/inbox/threads", params={"channel": bad})
+        assert r.status_code == 400, f"channel={bad!r} should be rejected"
+
+
+@pytest.mark.asyncio
+async def test_reply_text_too_long_returns_422(inbox_client_with_thread) -> None:
+    """ReplyBody.text must carry a max_length bound (multi-MB bodies rejected)."""
+    client, thread, _cfg = inbox_client_with_thread
+    r = client.post(
+        f"/api/inbox/threads/{thread['id']}/reply",
+        json={"text": "x" * 5000, "mode": "direct"},
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_reply_empty_text_returns_422(inbox_client_with_thread) -> None:
+    """Empty reply text must be rejected at the schema boundary."""
+    client, thread, _cfg = inbox_client_with_thread
+    r = client.post(
+        f"/api/inbox/threads/{thread['id']}/reply",
+        json={"text": "", "mode": "direct"},
+    )
+    assert r.status_code == 422

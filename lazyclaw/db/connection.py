@@ -307,11 +307,14 @@ async def init_db(config: Config) -> None:
         # Stores one encrypted row per (user, channel, contact) thread so the
         # mobile inbox can list threads, show previews, and track unread counts
         # without making a live channel read on every load.
-        # Plaintext: id, user_id, channel, contact_handle, unread_count,
+        # Plaintext: id, user_id, channel, contact_handle_hash, unread_count,
         #            last_activity, created_at, updated_at, deleted_at
         #            (needed for queries, sync delta feed, and tombstones).
-        # Encrypted: contact_name, last_preview, last_seen_msg_id
-        #            (user-visible content).
+        # Encrypted: contact_handle, contact_name, last_preview,
+        #            last_seen_msg_id (user-visible content / PII — handles
+        #            are phone numbers, WhatsApp JIDs, email addresses).
+        # Dedup queries use contact_handle_hash = HMAC-SHA256(user DEK, handle)
+        # so the unique index never sees the plaintext handle.
         try:
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS channel_threads ("
@@ -319,6 +322,7 @@ async def init_db(config: Config) -> None:
                 "user_id TEXT NOT NULL REFERENCES users(id), "
                 "channel TEXT NOT NULL, "
                 "contact_handle TEXT NOT NULL, "
+                "contact_handle_hash TEXT, "
                 "contact_name TEXT, "
                 "last_preview TEXT, "
                 "unread_count INTEGER NOT NULL DEFAULT 0, "
@@ -329,9 +333,20 @@ async def init_db(config: Config) -> None:
                 "deleted_at TEXT"
                 ")"
             )
+            # Upgrade pass for tables created before handle encryption
+            # (2026-06-10): add the hash column, drop the plaintext index.
+            # Legacy rows keep a NULL hash (distinct in SQLite unique
+            # indexes) and are upgraded in place by thread_store.upsert.
+            try:
+                await db.execute(
+                    "ALTER TABLE channel_threads ADD COLUMN contact_handle_hash TEXT"
+                )
+            except Exception:
+                pass  # column already exists (fresh table or already upgraded)
+            await db.execute("DROP INDEX IF EXISTS idx_channel_threads_unique")
             await db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_threads_unique "
-                "ON channel_threads(user_id, channel, contact_handle)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_threads_unique_hash "
+                "ON channel_threads(user_id, channel, contact_handle_hash)"
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_channel_threads_updated "

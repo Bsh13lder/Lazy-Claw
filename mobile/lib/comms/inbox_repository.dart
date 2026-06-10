@@ -91,8 +91,9 @@ class InboxRepository {
 
   /// Send a reply on [threadId].
   ///
-  /// [mode] can be `'direct'` (send immediately) or `'suggest'`
-  /// (queue as AI suggestion for human review).
+  /// [mode] can be `'direct'` (send immediately) or `'ai'`
+  /// (hand the thread to an AI conversation — server Phase E).
+  /// These are the only values the server's `Literal` accepts.
   ///
   /// Maps `POST /api/inbox/threads/{id}/reply {text, mode}`.
   Future<Map<String, dynamic>> reply(

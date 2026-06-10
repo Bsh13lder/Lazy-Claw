@@ -18,19 +18,29 @@ SkillRegistry so the route is always importable / testable without a live runtim
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.comms import thread_store
 from lazyclaw.comms.gateway import build_gateway
-from lazyclaw.gateway.auth import User, get_current_user
+from lazyclaw.gateway.auth import User, _RateLimiter, get_current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/inbox", tags=["inbox"])
+
+# Channel filter must be a sane lowercase token (matches thread_store's rule) —
+# rejects path-traversal junk without hardcoding a closed channel list.
+_CHANNEL_PARAM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+# Replies trigger live external channel sends (WhatsApp/email/Instagram) —
+# rate-limit per user like the vault routes do (auth.py _RateLimiter pattern).
+_reply_limiter = _RateLimiter(max_requests=20, window_seconds=60)
 
 # Injected by app.py at startup (same module-level-singleton pattern as chat_ws.py).
 _shared_registry = None
@@ -59,7 +69,9 @@ def _get_registry():
 
 
 class ReplyBody(BaseModel):
-    text: str
+    # 4096 chars ≈ the push.py max_chars=3800 budget with headroom; multi-MB
+    # bodies are rejected at the schema boundary before any processing.
+    text: str = Field(min_length=1, max_length=4096)
     mode: Literal["direct", "ai"] = "direct"
 
 
@@ -76,6 +88,8 @@ async def list_threads(
 
     Returns ``{"threads": [...], "count": n}``.
     """
+    if channel is not None and not _CHANNEL_PARAM_RE.match(channel):
+        raise HTTPException(status_code=400, detail="invalid channel")
     threads = await thread_store.list_threads(config, user.id, channel=channel)
     return {"threads": threads, "count": len(threads)}
 
@@ -97,6 +111,18 @@ async def get_thread_changes(
 
     Returns ``{threads, deleted, now}``.
     """
+    if since is not None:
+        # An unencoded '+' in a query string URL-decodes to a space, mangling
+        # ISO offsets like '+00:00'. Repair that case (a space after the 'T'
+        # separator can only be a mangled '+') before validating.
+        if "T" in since and " " in since:
+            since = since.replace(" ", "+")
+        # SQLite compares timestamps as strings — a malformed value would
+        # silently return a wrong result set instead of erroring.
+        try:
+            datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid 'since' timestamp")
     return await thread_store.get_thread_changes(config, user.id, since)
 
 
@@ -162,6 +188,11 @@ async def reply_to_thread(
     Returns ``{"success": true, "mode": "<mode>"}`` (direct) or
     ``{"success": true, "conversation_id": "<id>", "mode": "ai"}`` (ai).
     """
+    if not _reply_limiter.check(user.id):
+        raise HTTPException(
+            status_code=429, detail="Too many sends — wait a minute and retry."
+        )
+
     thread = await thread_store.get_thread(config, user.id, thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -191,5 +222,11 @@ async def reply_to_thread(
     gw = build_gateway(registry, user.id)
     res = await gw.send(thread["channel"], thread["contact_handle"], body.text)
     if not res.ok:
-        raise HTTPException(status_code=502, detail=res.error or "send failed")
+        # Log the real error server-side; the client gets a generic message —
+        # raw exception strings can carry internal paths/endpoints/payloads.
+        logger.warning(
+            "inbox reply send failed (thread=%s channel=%s): %s",
+            thread_id, thread["channel"], res.error,
+        )
+        raise HTTPException(status_code=502, detail="send failed")
     return {"success": True, "mode": "direct"}

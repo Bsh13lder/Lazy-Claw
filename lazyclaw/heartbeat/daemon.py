@@ -147,6 +147,10 @@ def _needs_live_browser(
 # Format: {user_id: {"service": "whatsapp", "items": [...], "notification": "...", "timestamp": float}}
 _last_watcher_context: dict[str, dict] = {}
 
+# Bound the per-user context dict so it can't grow without limit in
+# multi-user deployments (one entry per user, oldest evicted past the cap).
+_MAX_WATCHER_CONTEXT_USERS = 50
+
 
 def get_last_watcher_context(user_id: str) -> dict | None:
     """Get last watcher notification context for a user. Used by agent for reply context."""
@@ -166,6 +170,15 @@ def _store_watcher_context(
     used for instant mute commands without LLM parsing.
     """
     import time
+    if (
+        user_id not in _last_watcher_context
+        and len(_last_watcher_context) >= _MAX_WATCHER_CONTEXT_USERS
+    ):
+        oldest = min(
+            _last_watcher_context,
+            key=lambda u: _last_watcher_context[u].get("timestamp", 0.0),
+        )
+        _last_watcher_context.pop(oldest, None)
     _last_watcher_context[user_id] = {
         "service": service,
         "items": items[:5],  # Cap stored items

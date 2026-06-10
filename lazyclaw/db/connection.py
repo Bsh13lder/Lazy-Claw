@@ -46,6 +46,9 @@ async def init_db(config: Config) -> None:
             ("background_tasks", "cost_usd", "ALTER TABLE background_tasks ADD COLUMN cost_usd REAL DEFAULT 0.0"),
             ("background_tasks", "tokens_used", "ALTER TABLE background_tasks ADD COLUMN tokens_used INTEGER DEFAULT 0"),
             ("background_tasks", "llm_calls", "ALTER TABLE background_tasks ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+            # ADR-0005 follow-up — custom specialists keep scraper access
+            # across restarts (routes accepted the flag; DB dropped it).
+            ("specialists", "include_scraper", "ALTER TABLE specialists ADD COLUMN include_scraper INTEGER DEFAULT 0"),
             # Task execution tracking — saved-but-unexecuted gap fix
             ("tasks", "last_error", "ALTER TABLE tasks ADD COLUMN last_error TEXT"),
             ("tasks", "attempt_count", "ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"),

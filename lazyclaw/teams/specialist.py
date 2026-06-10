@@ -145,27 +145,42 @@ async def save_specialist(
     skills_json = json.dumps(list(specialist.allowed_skills))
 
     async with db_session(config) as db:
-        # Upsert: delete existing with same name, then insert
+        # Upsert. The name column is AES-GCM encrypted with a random
+        # nonce, so two encryptions of the same name never compare equal
+        # — match by decrypting stored names (same as delete_specialist).
+        # Comparing ciphertexts here silently duplicated a row per save.
         existing = await db.execute(
-            "SELECT id FROM specialists WHERE user_id = ? AND name = ?",
-            (user_id, encrypted_name),
+            "SELECT id, name FROM specialists "
+            "WHERE user_id = ? AND is_builtin = 0",
+            (user_id,),
         )
-        row = await existing.fetchone()
-        if row:
-            record_id = row[0]
+        existing_id = None
+        for row_id, name_enc in await existing.fetchall():
+            try:
+                if decrypt_field(name_enc, key) == specialist.name:
+                    existing_id = row_id
+                    break
+            except Exception:
+                continue
+        if existing_id:
+            record_id = existing_id
             await db.execute(
                 "UPDATE specialists SET display_name = ?, system_prompt = ?, "
-                "allowed_skills = ?, preferred_model = ? WHERE id = ?",
+                "allowed_skills = ?, preferred_model = ?, include_scraper = ? "
+                "WHERE id = ?",
                 (encrypted_display, encrypted_prompt, skills_json,
-                 specialist.preferred_model, record_id),
+                 specialist.preferred_model,
+                 int(specialist.include_scraper), record_id),
             )
         else:
             await db.execute(
                 "INSERT INTO specialists "
                 "(id, user_id, name, display_name, system_prompt, allowed_skills, "
-                "preferred_model, is_builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                "preferred_model, is_builtin, include_scraper) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
                 (record_id, user_id, encrypted_name, encrypted_display,
-                 encrypted_prompt, skills_json, specialist.preferred_model),
+                 encrypted_prompt, skills_json, specialist.preferred_model,
+                 int(specialist.include_scraper)),
             )
         await db.commit()
 
@@ -181,12 +196,14 @@ async def load_specialists(config: Config, user_id: str) -> list[SpecialistConfi
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT name, display_name, system_prompt, allowed_skills, "
-            "preferred_model FROM specialists WHERE user_id = ? AND is_builtin = 0",
+            "preferred_model, include_scraper "
+            "FROM specialists WHERE user_id = ? AND is_builtin = 0",
             (user_id,),
         )
         user_rows = await rows.fetchall()
 
-    for name_enc, display_enc, prompt_enc, skills_json, pref_model in user_rows:
+    for (name_enc, display_enc, prompt_enc, skills_json, pref_model,
+         scraper_flag) in user_rows:
         try:
             name = decrypt(name_enc, key) if name_enc.startswith("enc:") else name_enc
             display = decrypt(display_enc, key) if display_enc.startswith("enc:") else display_enc
@@ -200,6 +217,7 @@ async def load_specialists(config: Config, user_id: str) -> list[SpecialistConfi
                 allowed_skills=skills,
                 preferred_model=pref_model,
                 is_builtin=False,
+                include_scraper=bool(scraper_flag),
             ))
         except Exception as exc:
             logger.warning("Failed to load specialist: %s", exc)

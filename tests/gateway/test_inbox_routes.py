@@ -319,7 +319,9 @@ async def test_reply_404_for_unknown_thread(inbox_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reply_ai_mode_lazy_import_missing_module(inbox_client_with_thread) -> None:
+async def test_reply_ai_mode_lazy_import_missing_module(
+    inbox_client_with_thread, monkeypatch,
+) -> None:
     """mode=ai returns 200 with mode='ai' when conversation_runner is available,
     or 503 when the module doesn't exist yet (Phase E not shipped).
 
@@ -327,42 +329,85 @@ async def test_reply_ai_mode_lazy_import_missing_module(inbox_client_with_thread
     cleanly even when conversation_runner doesn't exist.
     """
     client, thread, _cfg = inbox_client_with_thread
-    # The module does not exist yet — the route must handle ImportError gracefully.
+    # Force the no-runtime path: if an earlier test in this process created a
+    # TaskRunner, the module singleton would be live and the real start()
+    # would actually submit a background task from inside this test.
+    import lazyclaw.runtime.task_runner as tr_mod
+    monkeypatch.setattr(tr_mod, "_task_runner_instance", None)
     r = client.post(
         f"/api/inbox/threads/{thread['id']}/reply",
         json={"text": "Start AI convo", "mode": "ai"},
     )
-    # Either 503 (module missing) or 200 (module present) — never 500.
+    # Either 503 (runtime unavailable / module missing) or 200 — never 500.
     assert r.status_code in (200, 503)
     assert r.status_code != 500
 
 
 @pytest.mark.asyncio
-async def test_reply_ai_mode_success(inbox_client_with_thread) -> None:
-    """mode=ai with a mocked conversation_runner returns {success, conversation_id, mode='ai'}."""
+async def test_reply_ai_mode_success(inbox_client_with_thread, monkeypatch) -> None:
+    """mode=ai with a mocked conversation_runner.start returns
+    {success, conversation_id, mode='ai'}.
+
+    Phase E shipped — the module is real now, so patch its start() instead of
+    injecting a fake module (the package attribute would win over sys.modules).
+    """
     client, thread, _cfg = inbox_client_with_thread
 
-    fake_runner = MagicMock()
-    fake_runner.start = AsyncMock(return_value={"id": "conv-123"})
+    from lazyclaw.comms import conversation_runner
+    fake_start = AsyncMock(return_value={"id": "conv-123"})
+    monkeypatch.setattr(conversation_runner, "start", fake_start)
 
-    import sys
-    import types
-    # Temporarily inject a fake conversation_runner into the comms namespace.
-    fake_mod = types.ModuleType("lazyclaw.comms.conversation_runner")
-    fake_mod.start = fake_runner.start
-    sys.modules["lazyclaw.comms.conversation_runner"] = fake_mod
-    try:
-        r = client.post(
-            f"/api/inbox/threads/{thread['id']}/reply",
-            json={"text": "Respond for me", "mode": "ai"},
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["success"] is True
-        assert body["mode"] == "ai"
-        assert body["conversation_id"] == "conv-123"
-    finally:
-        del sys.modules["lazyclaw.comms.conversation_runner"]
+    r = client.post(
+        f"/api/inbox/threads/{thread['id']}/reply",
+        json={"text": "Respond for me", "mode": "ai"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["mode"] == "ai"
+    assert body["conversation_id"] == "conv-123"
+    # The route forwards the thread context to the runner.
+    kwargs = fake_start.await_args.kwargs
+    assert kwargs["channel"] == "whatsapp"
+    assert kwargs["goal"] == "Respond for me"
+
+
+@pytest.mark.asyncio
+async def test_reply_ai_mode_no_runtime_returns_503(
+    inbox_client_with_thread, monkeypatch,
+) -> None:
+    """When the agent runtime isn't wired (no task runner), mode=ai → 503."""
+    client, thread, _cfg = inbox_client_with_thread
+
+    from lazyclaw.comms import conversation_runner
+    monkeypatch.setattr(
+        conversation_runner, "start",
+        AsyncMock(side_effect=RuntimeError("task runner not available")),
+    )
+    r = client.post(
+        f"/api/inbox/threads/{thread['id']}/reply",
+        json={"text": "Respond for me", "mode": "ai"},
+    )
+    assert r.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_reply_ai_mode_unsupported_channel_returns_400(
+    inbox_client_with_thread, monkeypatch,
+) -> None:
+    """ValueError from the runner (unsupported channel) maps to 400."""
+    client, thread, _cfg = inbox_client_with_thread
+
+    from lazyclaw.comms import conversation_runner
+    monkeypatch.setattr(
+        conversation_runner, "start",
+        AsyncMock(side_effect=ValueError("unsupported channel: telegram")),
+    )
+    r = client.post(
+        f"/api/inbox/threads/{thread['id']}/reply",
+        json={"text": "Respond for me", "mode": "ai"},
+    )
+    assert r.status_code == 400
 
 
 # ── Security hardening (2026-06-10 review) ─────────────────────────────────────

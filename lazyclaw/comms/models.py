@@ -49,11 +49,21 @@ class ChannelThread:
 
 @dataclass(frozen=True)
 class Msg:
-    """One message in a thread (from a live channel read)."""
+    """One message in a thread (from a live channel read).
+
+    ``id`` and ``media`` are set when the channel read surfaces them
+    (WhatsApp: message id + media metadata dict from describeMedia —
+    ``{kind, mimetype, file_name, seconds, voice_note, size_bytes}``).
+    ``media`` lets the inbox render a playable voice note / photo instead
+    of a "[audio]" placeholder; ``id`` is what the per-channel download
+    tool needs to fetch the actual bytes.
+    """
     sender: str
     text: str
     timestamp: str
     is_mine: bool = False
+    id: str | None = None
+    media: dict | None = None
 
 
 @dataclass(frozen=True)

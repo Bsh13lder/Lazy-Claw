@@ -5,8 +5,10 @@ Exposes channel-thread metadata and live message access over:
   GET  /api/inbox/threads                   — list threads (optionally filtered by channel)
   GET  /api/inbox/threads/changes           — delta feed for offline-sync clients
   GET  /api/inbox/threads/{id}/messages     — live messages via ChannelGateway
+  GET  /api/inbox/threads/{id}/media/{mid}  — download/stream a message's media bytes
   POST /api/inbox/threads/{id}/read         — mark thread as read
   POST /api/inbox/threads/{id}/reply        — direct send OR start an AI conversation
+  GET/PUT/DELETE /api/inbox/channels/{ch}/instruction — per-channel standing instruction
 
 Registry access: module-level ``_shared_registry`` singleton, identical to the
 pattern used in ``gateway/routes/chat_ws.py`` (lines 29–42). The singleton is
@@ -20,9 +22,11 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import Config, load_config
@@ -41,6 +45,18 @@ _CHANNEL_PARAM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 # Replies trigger live external channel sends (WhatsApp/email/Instagram) —
 # rate-limit per user like the vault routes do (auth.py _RateLimiter pattern).
 _reply_limiter = _RateLimiter(max_requests=20, window_seconds=60)
+
+# Media downloads pull bytes from WhatsApp servers via the MCP — heavier than
+# a read, so they get their own (more generous than replies) per-user budget.
+_media_limiter = _RateLimiter(max_requests=30, window_seconds=60)
+
+# Message ids come from channel reads (WhatsApp ids are URL-safe tokens);
+# reject anything that could smuggle path segments into the MCP call.
+_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_\-=.]{1,128}$")
+
+# Sane "type/subtype" (+ optional parameters) before echoing a tool-provided
+# mimetype into a response header.
+_MIME_RE = re.compile(r"^[\w.+-]+/[\w.+-]+(;\s*[\w.+-]+=[^;]+)*$")
 
 # Injected by app.py at startup (same module-level-singleton pattern as chat_ws.py).
 _shared_registry = None
@@ -73,6 +89,10 @@ class ReplyBody(BaseModel):
     # bodies are rejected at the schema boundary before any processing.
     text: str = Field(min_length=1, max_length=4096)
     mode: Literal["direct", "ai"] = "direct"
+
+
+class InstructionBody(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -150,11 +170,76 @@ async def get_thread_messages(
                 "text": m.text,
                 "timestamp": m.timestamp,
                 "is_mine": m.is_mine,
+                # media metadata (voice note / photo / file) + the message id
+                # needed to fetch the bytes via the /media/{message_id} route.
+                "id": m.id,
+                "media": m.media,
             }
             for m in msgs
         ],
         "thread": thread,
     }
+
+
+@router.get("/threads/{thread_id}/media/{message_id}")
+async def get_thread_media(
+    thread_id: str,
+    message_id: str,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Download the media behind one message and stream it to the client.
+
+    The per-channel MCP downloads the bytes to its media dir and returns the
+    file path; this route streams that file with the right content type so
+    the mobile app can render a playable voice note / photo inline.
+    """
+    if not _MESSAGE_ID_RE.match(message_id):
+        raise HTTPException(status_code=400, detail="invalid message id")
+    if not _media_limiter.check(user.id):
+        raise HTTPException(
+            status_code=429, detail="Too many media downloads — wait a minute and retry."
+        )
+
+    thread = await thread_store.get_thread(config, user.id, thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    registry = _get_registry()
+    gw = build_gateway(registry, user.id)
+    result = await gw.download_media(
+        thread["channel"], message_id, contact=thread["contact_handle"],
+    )
+
+    path = result.get("path") if isinstance(result, dict) else None
+    if not path or result.get("error"):
+        # Log the real error server-side; the client gets a generic message —
+        # tool errors can carry internal paths (same policy as reply sends).
+        logger.warning(
+            "inbox media download failed (thread=%s message=%s): %s",
+            thread_id, message_id,
+            result.get("error") if isinstance(result, dict) else result,
+        )
+        raise HTTPException(status_code=502, detail="media download failed")
+
+    media_file = Path(path)
+    if not media_file.is_file():
+        logger.warning(
+            "inbox media download returned a missing file (thread=%s): %s",
+            thread_id, path,
+        )
+        raise HTTPException(status_code=502, detail="media download failed")
+
+    # Sanitize the mimetype before echoing it into a response header.
+    mimetype = str(result.get("mimetype") or "application/octet-stream")
+    if not _MIME_RE.match(mimetype):
+        mimetype = "application/octet-stream"
+
+    return FileResponse(
+        media_file,
+        media_type=mimetype,
+        filename=str(result.get("file_name") or media_file.name),
+    )
 
 
 @router.post("/threads/{thread_id}/read")
@@ -209,12 +294,26 @@ async def reply_to_thread(
                     "(conversation_runner not installed — Phase E)."
                 ),
             )
-        conv = await conversation_runner.start(
-            config, user.id,
-            channel=thread["channel"],
-            contact=thread["contact_handle"],
-            goal=body.text,
-        )
+        # NOTE: call signature is the SHARED Phase E contract — keyword-args
+        # (channel, contact, goal) only, so the fuller conversation-runner
+        # state machine on feat/comms-continue drops in without route changes.
+        try:
+            conv = await conversation_runner.start(
+                config, user.id,
+                channel=thread["channel"],
+                contact=thread["contact_handle"],
+                goal=body.text,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="AI replies are not supported on this channel.",
+            )
+        except RuntimeError:
+            raise HTTPException(
+                status_code=503,
+                detail="AI conversation mode needs the agent runtime — try again shortly.",
+            )
         return {"success": True, "conversation_id": conv["id"], "mode": "ai"}
 
     # Default: direct send via ChannelGateway.
@@ -230,3 +329,68 @@ async def reply_to_thread(
         )
         raise HTTPException(status_code=502, detail="send failed")
     return {"success": True, "mode": "direct"}
+
+
+# ── Per-channel standing instructions ──────────────────────────────────────────
+
+
+def _validated_channel(channel: str) -> str:
+    if not _CHANNEL_PARAM_RE.match(channel):
+        raise HTTPException(status_code=400, detail="invalid channel")
+    return channel
+
+
+@router.get("/channels/{channel}/instruction")
+async def get_channel_instruction(
+    channel: str,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Read the standing instruction for a channel (or null when unset)."""
+    from lazyclaw.comms import channel_instructions
+
+    try:
+        result = await channel_instructions.get_channel_instruction(
+            config, user.id, _validated_channel(channel),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result or {"channel": channel, "instruction": None}
+
+
+@router.put("/channels/{channel}/instruction")
+async def put_channel_instruction(
+    channel: str,
+    body: InstructionBody,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Set the standing instruction — executed as a real agent turn whenever
+    new messages arrive on the channel (result pushed via notifications)."""
+    from lazyclaw.comms import channel_instructions
+
+    try:
+        result = await channel_instructions.set_channel_instruction(
+            config, user.id, _validated_channel(channel), body.instruction,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.delete("/channels/{channel}/instruction")
+async def delete_channel_instruction(
+    channel: str,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Clear the standing instruction (the watcher keeps notifying)."""
+    from lazyclaw.comms import channel_instructions
+
+    try:
+        removed = await channel_instructions.clear_channel_instruction(
+            config, user.id, _validated_channel(channel),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": removed}

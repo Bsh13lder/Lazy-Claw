@@ -20,6 +20,12 @@ _DISPATCH = {
     "instagram": ("instagram_read_dms", "instagram_send_dm", "to_username", "message"),
 }
 
+# channel -> media download tool (message bytes by id). Channels without an
+# entry don't support media fetch yet.
+_MEDIA_DOWNLOAD = {
+    "whatsapp": "whatsapp_download_media",
+}
+
 
 def _parse_messages(result: object) -> list[Msg]:
     """Normalize varied per-channel message shapes into a list of Msg objects."""
@@ -30,11 +36,15 @@ def _parse_messages(result: object) -> list[Msg]:
     for m in raw:
         if not isinstance(m, dict):
             continue
+        media = m.get("media")
+        msg_id = m.get("id")
         out.append(Msg(
             sender=str(m.get("sender") or m.get("from") or m.get("author") or ""),
             text=str(m.get("content") or m.get("body") or m.get("text") or ""),
             timestamp=str(m.get("timestamp") or m.get("ts") or m.get("date") or ""),
             is_mine=bool(m.get("is_mine", False)),
+            id=str(msg_id) if msg_id else None,
+            media=media if isinstance(media, dict) else None,
         ))
     return out
 
@@ -73,6 +83,26 @@ class ChannelGateway:
             return SendResult(ok=False, error=str(result))
         return SendResult(ok=True)
 
+    async def download_media(
+        self, channel: str, message_id: str, *, contact: str | None = None,
+    ) -> dict:
+        """Fetch the media bytes behind a message via the per-channel download tool.
+
+        Returns the tool's result dict (``{path, kind, mimetype, ...}`` on
+        success) or ``{"error": ...}`` — never raises.
+        """
+        tool = _MEDIA_DOWNLOAD.get(channel)
+        if not tool:
+            return {"error": f"media download not supported on channel: {channel}"}
+        args: dict = {"message_id": message_id}
+        if contact:
+            args["contact"] = contact
+        try:
+            result = await self._call(tool, args)
+        except Exception as e:  # surface as typed failure, never raise
+            return {"error": str(e)}
+        return result if isinstance(result, dict) else {"error": str(result)}
+
 
 def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
     """Factory that wires ChannelGateway.mcp_call to the real skill registry.
@@ -88,6 +118,14 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
 
     async def _call(tool_name: str, args: dict) -> dict:
         skill = registry.get(tool_name)  # type: ignore[attr-defined]
+        if skill is None:
+            # MCP tools register under "mcp_<server>_<tool>" — a bare name
+            # like "whatsapp_send" misses the dict lookup. Resolve by base
+            # name (see feedback_test_mocks_masked_production_bug: every
+            # unit test mocked the bare lookup, so this only failed live).
+            getter = getattr(registry, "get_mcp_by_base_name", None)
+            if callable(getter):
+                skill = getter(tool_name)
         if skill is None:
             return {"status": "error", "error": f"unknown tool: {tool_name}"}
         result = await skill.execute(user_id, args)

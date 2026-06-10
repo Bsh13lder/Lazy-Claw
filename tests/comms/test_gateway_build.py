@@ -96,15 +96,39 @@ async def test_non_json_string_wraps_gracefully():
 
 @pytest.mark.asyncio
 async def test_unknown_skill_name_returns_clean_error():
-    """If registry.get returns None, _call returns a clean error dict — no raise."""
+    """If neither the bare lookup nor the MCP base-name fallback finds the
+    skill, _call returns a clean error dict — no raise."""
     registry = MagicMock()
     registry.get = MagicMock(return_value=None)  # skill not found
+    registry.get_mcp_by_base_name = MagicMock(return_value=None)  # fallback miss too
 
     gw = build_gateway(registry, user_id="u5")
     res = await gw.send("whatsapp", "+5", "no skill")
     assert res.ok is False
     assert res.error is not None
     assert "unknown tool" in res.error
+
+
+@pytest.mark.asyncio
+async def test_mcp_base_name_fallback_resolves_prefixed_tool():
+    """MCP tools register as "mcp_<server>_<tool>" — a bare registry.get
+    misses them, and every earlier unit test mocked the bare lookup, so the
+    miss only failed live (feedback_test_mocks_masked_production_bug).
+    _call must fall back to get_mcp_by_base_name."""
+    skill = MagicMock()
+    skill.execute = AsyncMock(return_value=json.dumps({"status": "sent"}))
+    registry = MagicMock()
+    registry.get = MagicMock(return_value=None)  # bare name MISSES — real prod shape
+    registry.get_mcp_by_base_name = MagicMock(
+        side_effect=lambda base: skill if base == "whatsapp_send" else None,
+    )
+
+    gw = build_gateway(registry, user_id="u10")
+    res = await gw.send("whatsapp", "+10", "hi")
+
+    assert res.ok is True
+    registry.get_mcp_by_base_name.assert_called_with("whatsapp_send")
+    skill.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

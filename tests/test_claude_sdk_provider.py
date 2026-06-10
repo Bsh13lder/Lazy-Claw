@@ -22,6 +22,7 @@ from lazyclaw.llm.providers.claude_sdk_provider import (
     _serialize_messages,
     _shorten_tool_name,
     _split_leading_system,
+    _success_tail_action,
 )
 
 
@@ -604,3 +605,33 @@ class TestSDKUnavailableRaisedOnMissingBinary:
             assert p._claude_bin is None
             with pytest.raises(SDKUnavailable, match="binary not found"):
                 await p.chat([LLMMessage(role="user", content="hi")], tools=[])
+
+
+class TestSuccessTailAction:
+    """Decision table for the SDK 'error result: success' iterator quirk.
+
+    The CLI sometimes emits a ResultMessage with is_error=True,
+    errors=[], subtype="success" — the SDK re-wraps it as a bare
+    Exception "Claude Code returned an error result: success".
+    With output in hand we swallow it (turn succeeded); on an EMPTY
+    turn we retry ONCE (2026-06-09 09:33 user-visible 'Chat failed');
+    anything else re-raises.
+    """
+
+    def test_unrelated_error_raises(self) -> None:
+        assert _success_tail_action("boom", False, False) == "raise"
+
+    def test_success_tail_with_output_swallows(self) -> None:
+        assert _success_tail_action(
+            "Claude Code returned an error result: success", True, False
+        ) == "swallow"
+
+    def test_success_tail_empty_turn_retries_once(self) -> None:
+        assert _success_tail_action(
+            "Claude Code returned an error result: success", False, False
+        ) == "retry"
+
+    def test_success_tail_empty_turn_already_retried_raises(self) -> None:
+        assert _success_tail_action(
+            "Claude Code returned an error result: success", False, True
+        ) == "raise"

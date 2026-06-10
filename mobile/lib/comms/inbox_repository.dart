@@ -173,4 +173,42 @@ class InboxRepository {
   /// Maps `DELETE /api/inbox/channels/{channel}/instruction`.
   Future<void> clearChannelInstruction(String channel) =>
       _t.deleteJson('/api/inbox/channels/$channel/instruction');
+
+  /// Read this thread's per-contact instruction (null when unset).
+  ///
+  /// Rides the messages endpoint — its `thread` envelope carries the
+  /// decrypted `instruction` field.
+  Future<String?> getThreadInstruction(String threadId) async {
+    final json = await _t.getJson('/api/inbox/threads/$threadId/messages');
+    final thread = json['thread'];
+    if (thread is Map) return thread['instruction'] as String?;
+    return null;
+  }
+
+  /// Set the per-contact standing instruction — the agent executes it as a
+  /// real turn whenever THIS contact writes.
+  ///
+  /// Maps `PUT /api/inbox/threads/{id}/instruction`.
+  Future<Map<String, dynamic>> setThreadInstruction(
+    String threadId,
+    String instruction,
+  ) =>
+      _t.putJson(
+        '/api/inbox/threads/$threadId/instruction',
+        {'instruction': instruction},
+      );
+
+  /// Clear the per-contact standing instruction.
+  ///
+  /// Maps `DELETE /api/inbox/threads/{id}/instruction`.
+  Future<void> clearThreadInstruction(String threadId) =>
+      _t.deleteJson('/api/inbox/threads/$threadId/instruction');
+
+  /// Name this thread's contact — saves the name on the thread, attaches the
+  /// handle(s) to the unified contact store, and creates a [[Name]] LazyBrain
+  /// page.
+  ///
+  /// Maps `PUT /api/inbox/threads/{id}/contact`.
+  Future<Map<String, dynamic>> nameContact(String threadId, String name) =>
+      _t.putJson('/api/inbox/threads/$threadId/contact', {'name': name});
 }

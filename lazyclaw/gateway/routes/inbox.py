@@ -95,6 +95,10 @@ class InstructionBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
 
 
+class ContactNameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
@@ -329,6 +333,61 @@ async def reply_to_thread(
         )
         raise HTTPException(status_code=502, detail="send failed")
     return {"success": True, "mode": "direct"}
+
+
+# ── Per-thread (per-contact) standing instruction + contact naming ────────────
+
+
+@router.put("/threads/{thread_id}/instruction")
+async def put_thread_instruction(
+    thread_id: str,
+    body: InstructionBody,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Set the standing instruction for THIS contact — the agent executes it
+    as a real turn whenever they write (on top of the channel-wide one)."""
+    ok = await thread_store.set_thread_instruction(
+        config, user.id, thread_id, body.instruction,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"success": True, "thread_id": thread_id}
+
+
+@router.delete("/threads/{thread_id}/instruction")
+async def delete_thread_instruction(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Clear the per-contact standing instruction."""
+    ok = await thread_store.set_thread_instruction(config, user.id, thread_id, None)
+    return {"success": ok}
+
+
+@router.put("/threads/{thread_id}/contact")
+async def put_thread_contact_name(
+    thread_id: str,
+    body: ContactNameBody,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Name the thread's contact — updates the thread, attaches the handle to
+    the unified contact store, and creates a [[Name]] LazyBrain page."""
+    thread = await thread_store.get_thread(config, user.id, thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    from lazyclaw.comms import contact_naming
+
+    try:
+        result = await contact_naming.name_thread_contact(
+            config, user.id, thread, body.name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
 
 
 # ── Per-channel standing instructions ──────────────────────────────────────────

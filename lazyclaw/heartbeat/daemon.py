@@ -1536,6 +1536,21 @@ class HeartbeatDaemon:
                             **cb_kwargs,
                         )
 
+                    # Per-CONTACT standing instructions: when a thread has its
+                    # own instruction, run an agent turn scoped to that
+                    # contact's new messages (layered over the channel-wide
+                    # auto_reply above). Capped at 3 dispatches per tick.
+                    if self._lane_queue:
+                        try:
+                            await self._dispatch_contact_instructions(
+                                user_id, ctx.get("service", ""), _notified,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "contact-instruction dispatch failed",
+                                exc_info=True,
+                            )
+
                     if new_ctx.get("one_shot"):
                         await delete_job(self._config, user_id, job_id)
                         logger.info("One-shot MCP watcher '%s' auto-deleted", job_name)
@@ -1544,6 +1559,70 @@ class HeartbeatDaemon:
                 logger.exception(
                     "Error checking MCP watcher %s for user %s", job_id, user_id,
                 )
+
+    async def _dispatch_contact_instructions(
+        self, user_id: str, service: str, items: list,
+    ) -> None:
+        """Run per-contact standing instructions for newly arrived messages.
+
+        Groups the watcher's new items by stable contact handle, looks up the
+        thread's encrypted ``instruction`` (set via the inbox ⚡ editor), and
+        enqueues ONE agent turn per instructed contact. Capped to 3 dispatches
+        per tick so a burst can't flood the lane.
+        """
+        from lazyclaw.comms import thread_store
+
+        by_handle: dict[str, list[dict]] = {}
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            handle = str(
+                item.get("chat_jid") or item.get("from")
+                or item.get("user") or "",
+            ).strip()
+            if handle and handle != "me":
+                by_handle.setdefault(handle, []).append(item)
+
+        dispatched = 0
+        for handle, msgs in by_handle.items():
+            if dispatched >= 3:
+                logger.info(
+                    "contact-instruction cap hit (3/tick); %d contacts deferred",
+                    len(by_handle) - dispatched,
+                )
+                break
+            found = await thread_store.get_instruction_for_handle(
+                self._config, user_id, service, handle,
+            )
+            if not found:
+                continue
+            who = found.get("contact_name") or handle
+            lines = "\n".join(
+                f"- {m.get('body') or m.get('text') or m.get('subject') or '[media]'}"
+                for m in msgs[:5]
+            )
+            cb = (
+                self._notifier_factory(f"{who} auto-pilot", "🤖")
+                if self._notifier_factory else None
+            )
+            cb_kwargs = {"callback": cb} if cb is not None else {}
+            await self._lane_queue.enqueue(
+                user_id,
+                f"[CONTACT_INSTRUCTION] New {service} message(s) from "
+                f"{who}.\nYour standing instruction for THIS contact: "
+                f"{found['instruction']}\n\nTheir new message(s):\n{lines}\n\n"
+                f"Ground yourself with the {service} read tool for "
+                f'"{handle}" FIRST, then carry out the instruction. Report '
+                f"what you did.",
+                lane_key=f"{user_id}:heartbeat",
+                browser_role="background",
+                **cb_kwargs,
+            )
+            dispatched += 1
+            logger.info(
+                "contact instruction dispatched (service=%s thread=%s)",
+                service, found.get("thread_id"),
+            )
 
     async def _check_task_nagging(self) -> None:
         """Due App-style nagging + advance pre-reminders for important tasks.

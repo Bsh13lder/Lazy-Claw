@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../comms/inbox_models.dart';
 import '../../comms/inbox_providers.dart';
 import '../../ui/ui.dart';
+import 'inbox_instruction_sheet.dart';
 import 'inbox_media_bubble.dart';
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -101,6 +102,56 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
     }
   }
 
+  // ── Name contact ───────────────────────────────────────────────────────────
+
+  Future<void> _nameContact() async {
+    final controller = TextEditingController(
+      text: widget.title == 'Conversation' ? '' : widget.title,
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bgSurfaceElevated,
+        title: Text('Name this contact',
+            style: AppText.title.copyWith(color: AppColors.textPrimary)),
+        content: LzTextField(
+          controller: controller,
+          hint: 'e.g. Maria Garcia',
+          maxLines: 1,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('Cancel',
+                style: AppText.label.copyWith(color: AppColors.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child:
+                Text('Save', style: AppText.label.copyWith(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    try {
+      await ref.read(inboxRepositoryProvider).nameContact(widget.threadId, name);
+      if (!mounted) return;
+      ref.invalidate(inboxThreadsProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saved — $name added to your contacts and LazyBrain.'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save name: $e')),
+      );
+    }
+  }
+
   // ── Build ───────────────────────────────────────────────────────────────────
 
   @override
@@ -109,6 +160,28 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
 
     return LzScaffold(
       title: widget.title,
+      actions: [
+        // Per-contact auto-pilot (standing instruction for THIS person).
+        IconButton(
+          icon: const Icon(Icons.bolt_rounded),
+          color: AppColors.textSecondary,
+          tooltip: 'Auto-pilot for this contact',
+          visualDensity: VisualDensity.compact,
+          onPressed: () => showThreadInstructionSheet(
+            context,
+            threadId: widget.threadId,
+            contactLabel: widget.title,
+          ),
+        ),
+        // Name the contact (contacts store + LazyBrain wikilink page).
+        IconButton(
+          icon: const Icon(Icons.person_outline_rounded),
+          color: AppColors.textSecondary,
+          tooltip: 'Name this contact',
+          visualDensity: VisualDensity.compact,
+          onPressed: _nameContact,
+        ),
+      ],
       resizeToAvoidBottomInset: true,
       body: Column(
         children: [

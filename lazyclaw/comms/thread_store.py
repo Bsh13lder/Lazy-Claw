@@ -43,6 +43,12 @@ def _row_to_dict(row, key: bytes) -> dict:
         "unread_count": row["unread_count"],
         "last_activity": row["last_activity"],
         "last_seen_msg_id": decrypt_field(row["last_seen_msg_id"], key),
+        # Per-contact standing instruction (column added 2026-06-10; tolerate
+        # rows read before the migration ran).
+        "instruction": (
+            decrypt_field(row["instruction"], key)
+            if "instruction" in row.keys() else None
+        ),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "deleted_at": row["deleted_at"],
@@ -171,6 +177,73 @@ async def list_threads(
         cur = await db.execute(sql, tuple(params))
         rows = await cur.fetchall()
     return [_row_to_dict(r, key) for r in rows]
+
+
+async def set_thread_instruction(
+    config: Config, user_id: str, thread_id: str, instruction: str | None,
+) -> bool:
+    """Set (or clear with ``None``/empty) the per-contact standing instruction.
+
+    The agent executes it as a real turn whenever THIS contact writes —
+    layered on top of the channel-wide watcher auto_reply. Stored encrypted.
+    Returns True when the thread row was found and updated.
+    """
+    key = await get_user_dek(config, user_id)
+    value = encrypt_field(instruction, key) if (instruction or "").strip() else None
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "UPDATE channel_threads SET instruction=?, updated_at=? "
+            "WHERE id=? AND user_id=? AND deleted_at IS NULL",
+            (value, _now(), thread_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def set_thread_contact_name(
+    config: Config, user_id: str, thread_id: str, name: str,
+) -> bool:
+    """Rename the thread's contact display name (encrypted). True if updated."""
+    key = await get_user_dek(config, user_id)
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "UPDATE channel_threads SET contact_name=?, updated_at=? "
+            "WHERE id=? AND user_id=? AND deleted_at IS NULL",
+            (encrypt_field(name, key), _now(), thread_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_instruction_for_handle(
+    config: Config, user_id: str, channel: str, contact_handle: str,
+) -> dict | None:
+    """Heartbeat lookup: the live thread + instruction for one contact handle.
+
+    Returns ``{"thread_id", "instruction", "contact_name"}`` when the contact
+    has a standing instruction, else ``None``. Queries by the handle HMAC so
+    the plaintext handle never hits an index.
+    """
+    key = await get_user_dek(config, user_id)
+    handle_hash = _handle_hash(key, contact_handle)
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT * FROM channel_threads "
+            "WHERE user_id=? AND channel=? AND contact_handle_hash=? "
+            "AND deleted_at IS NULL",
+            (user_id, channel, handle_hash),
+        )
+        row = await cur.fetchone()
+    if row is None or "instruction" not in row.keys():
+        return None
+    instruction = decrypt_field(row["instruction"], key)
+    if not instruction:
+        return None
+    return {
+        "thread_id": row["id"],
+        "instruction": instruction,
+        "contact_name": decrypt_field(row["contact_name"], key),
+    }
 
 
 async def mark_thread_read(

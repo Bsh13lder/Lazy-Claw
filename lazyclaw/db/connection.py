@@ -346,6 +346,15 @@ async def init_db(config: Config) -> None:
                 )
             except Exception:
                 pass  # column already exists (fresh table or already upgraded)
+            # Per-contact standing instruction (2026-06-10): encrypted free
+            # text the agent executes when THIS contact writes — layered on
+            # top of the channel-wide watcher auto_reply.
+            try:
+                await db.execute(
+                    "ALTER TABLE channel_threads ADD COLUMN instruction TEXT"
+                )
+            except Exception:
+                pass  # column already exists
             await db.execute("DROP INDEX IF EXISTS idx_channel_threads_unique")
             await db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_threads_unique_hash "

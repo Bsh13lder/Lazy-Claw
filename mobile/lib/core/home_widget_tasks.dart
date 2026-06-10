@@ -16,6 +16,8 @@ import 'due_date.dart';
 ///   * `task_<i>_title` / `task_<i>_due` — the i-th row (i = 0,1,2).
 ///   * `task_more`    — footer label ('+2 more') when open tasks overflow
 ///                      the rows, else '' (footer hidden).
+///   * `task_stamp`   — `HH:mm` of the last snapshot write (header freshness
+///                      stamp; '' until the first write / after logout).
 ///
 /// Every method is best-effort and NEVER throws: a platform without the plugin,
 /// a denied widget, or a serialization hiccup simply leaves the widget stale.
@@ -45,6 +47,11 @@ Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
     await HomeWidget.saveWidgetData<String>(
       'task_more', widgetMoreLabel(tier.length),
     );
+    // Freshness stamp shown in the widget header — doubles as the frozen-
+    // widget diagnostic (stamp moving = paint path alive).
+    await HomeWidget.saveWidgetData<String>(
+      'task_stamp', widgetUpdatedStamp(now ?? DateTime.now()),
+    );
     await HomeWidget.updateWidget(
       name: 'TasksWidget',
       androidName: 'TasksWidget',
@@ -64,6 +71,7 @@ Future<void> clearTasksWidget() async {
       await HomeWidget.saveWidgetData<String>('task_${i}_due', '');
     }
     await HomeWidget.saveWidgetData<String>('task_more', '');
+    await HomeWidget.saveWidgetData<String>('task_stamp', '');
     await HomeWidget.updateWidget(
       name: 'TasksWidget',
       androidName: 'TasksWidget',
@@ -144,6 +152,11 @@ String widgetDueLabel(Task task, {DateTime? now}) {
   }
   return '';
 }
+
+/// The 24h `HH:mm` freshness stamp shown in the widget header. Pure.
+String widgetUpdatedStamp(DateTime now) =>
+    '${now.hour.toString().padLeft(2, '0')}:'
+    '${now.minute.toString().padLeft(2, '0')}';
 
 /// The footer overflow label: '' when everything fits the rows, else
 /// '+N more' for the open tasks beyond [kTasksWidgetRowCount]. Pure.

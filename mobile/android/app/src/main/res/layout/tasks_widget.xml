@@ -30,6 +30,19 @@
             android:textStyle="bold"
             android:maxLines="1"
             android:ellipsize="end" />
+        <!-- Last-repaint stamp ("19:42") — freshness at a glance, and the
+             tell when diagnosing a frozen widget: stamp moving + empty rows =
+             data path; no stamp at all = launcher never delivered onUpdate.
+             Hidden until the app writes its first snapshot. -->
+        <TextView
+            android:id="@+id/tw_stamp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="10dp"
+            android:textColor="@color/lz_widget_muted"
+            android:textSize="10sp"
+            android:maxLines="1"
+            android:visibility="gone" />
         <TextView
             android:id="@+id/tw_add"
             android:layout_width="wrap_content"

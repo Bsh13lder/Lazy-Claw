@@ -38,14 +38,42 @@ class TasksWidget : HomeWidgetProvider() {
     ) {
         val count = readCount(widgetData)
         for (widgetId in appWidgetIds) {
-            val views = RemoteViews(context.packageName, R.layout.tasks_widget).apply {
-                bindRows(widgetData, count)
-                // Tapping the body opens the Tasks page; the Add button opens the
-                // add-task flow. Both go through home_widget's launch intent.
-                setOnClickPendingIntent(R.id.tw_root, launchIntent(context, "tasks"))
-                setOnClickPendingIntent(R.id.tw_add, launchIntent(context, "addTask"))
+            // A binding throw must never abort onUpdate: an aborted update
+            // leaves the widget frozen on whatever the launcher last had —
+            // typically the static initialLayout, i.e. a header with no data.
+            try {
+                val views = RemoteViews(context.packageName, R.layout.tasks_widget).apply {
+                    bindRows(widgetData, count)
+                    bindStamp(widgetData)
+                    // Tapping the body opens the Tasks page; the Add button opens
+                    // the add-task flow. Both via home_widget's launch intent.
+                    setOnClickPendingIntent(R.id.tw_root, launchIntent(context, "tasks"))
+                    setOnClickPendingIntent(R.id.tw_add, launchIntent(context, "addTask"))
+                }
+                appWidgetManager.updateAppWidget(widgetId, views)
+            } catch (_: Throwable) {
+                // Fall back to a bare-but-alive paint (empty state visible) so
+                // the widget shows SOMETHING rather than a stale frame.
+                try {
+                    val fallback = RemoteViews(context.packageName, R.layout.tasks_widget)
+                    fallback.setViewVisibility(R.id.tw_empty, View.VISIBLE)
+                    appWidgetManager.updateAppWidget(widgetId, fallback)
+                } catch (_: Throwable) {
+                    // Out of options for this widget id; skip it.
+                }
             }
-            appWidgetManager.updateAppWidget(widgetId, views)
+        }
+    }
+
+    /** Show the "last painted" HH:mm stamp the Flutter side writes; hidden
+     *  until the first snapshot lands so a fresh widget isn't lying. */
+    private fun RemoteViews.bindStamp(data: SharedPreferences) {
+        val stamp = (data.all[KEY_STAMP] as? String).orEmpty()
+        if (stamp.isBlank()) {
+            setViewVisibility(R.id.tw_stamp, View.GONE)
+        } else {
+            setTextViewText(R.id.tw_stamp, stamp)
+            setViewVisibility(R.id.tw_stamp, View.VISIBLE)
         }
     }
 
@@ -134,6 +162,7 @@ class TasksWidget : HomeWidgetProvider() {
     private companion object {
         const val KEY_COUNT = "task_count"
         const val KEY_MORE = "task_more"
+        const val KEY_STAMP = "task_stamp"
         const val ROWS = 3
     }
 }

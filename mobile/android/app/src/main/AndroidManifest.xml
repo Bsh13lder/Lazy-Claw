@@ -66,6 +66,16 @@
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
             android:exported="false"/>
+        <!-- Repaints both widgets after every self-update: OEM launchers
+             (HyperOS especially) freeze widgets on the pre-update RemoteViews
+             until the app happens to run again — see WidgetRefreshReceiver.kt. -->
+        <receiver
+            android:name=".WidgetRefreshReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <!-- Quick-Capture home-screen widget (4x1). Buttons deep-link into the
              app via home_widget's launch intent — see QuickCaptureWidget.kt. -->
         <receiver

@@ -144,6 +144,14 @@ void main() {
     });
   });
 
+  group('widgetUpdatedStamp', () {
+    test('zero-pads to 24h HH:mm', () {
+      expect(widgetUpdatedStamp(DateTime(2026, 6, 10, 9, 5)), '09:05');
+      expect(widgetUpdatedStamp(DateTime(2026, 6, 10, 19, 42)), '19:42');
+      expect(widgetUpdatedStamp(DateTime(2026, 6, 10, 0, 0)), '00:00');
+    });
+  });
+
   group('widgetMoreLabel', () {
     test('empty when open tasks fit the rows', () {
       expect(widgetMoreLabel(0), '');

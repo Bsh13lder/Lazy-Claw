@@ -20,7 +20,11 @@
         android:orientation="horizontal"
         android:gravity="center_vertical"
         android:baselineAligned="false">
+        <!-- Today's date, bound at every repaint (TasksWidget.bindHeaderDate)
+             so the widget always names the day it's showing tasks for. The
+             static string is just the pre-first-paint fallback. -->
         <TextView
+            android:id="@+id/tw_title"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"

@@ -43,6 +43,7 @@ class TasksWidget : HomeWidgetProvider() {
             // typically the static initialLayout, i.e. a header with no data.
             try {
                 val views = RemoteViews(context.packageName, R.layout.tasks_widget).apply {
+                    bindHeaderDate()
                     bindRows(widgetData, count)
                     bindStamp(widgetData)
                     // Tapping the body opens the Tasks page; the Add button opens
@@ -63,6 +64,18 @@ class TasksWidget : HomeWidgetProvider() {
                 }
             }
         }
+    }
+
+    /**
+     * Header shows TODAY'S DATE ("Tue, 10 Jun"), not a static label — the
+     * widget names the day it's listing tasks for. Computed at paint time
+     * (incl. the 30-min system repaints), so it rolls over midnight without
+     * the app running. Localized via the device default locale.
+     */
+    private fun RemoteViews.bindHeaderDate() {
+        val date = java.text.SimpleDateFormat("EEE, d MMM", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        setTextViewText(R.id.tw_title, date)
     }
 
     /** Show the "last painted" HH:mm stamp the Flutter side writes; hidden

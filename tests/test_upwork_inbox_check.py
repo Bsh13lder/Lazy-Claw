@@ -239,3 +239,55 @@ async def test_push_escalation_alert_falls_back_to_canonical_url(
         urgency="business_hours",
     )
     assert "https://www.upwork.com/ab/messages/rooms/abc123" in captured["text"]
+
+
+# ── empty_or_blocked passthrough (mcp-upwork structured reads) ──────
+
+def test_blocked_inbox_cloudflare_is_loud():
+    from lazyclaw.skills.builtin.survival.upwork_inbox_check import (
+        _blocked_inbox_result,
+    )
+    out = _blocked_inbox_result({
+        "status": "empty_or_blocked",
+        "diagnosis": "cloudflare_challenge",
+        "hint": "Solve the Cloudflare check in Brave.",
+    })
+    assert out is not None
+    assert not out.startswith("[SILENT]")
+    assert "cloudflare_challenge" in out
+    assert "BLOCKED" in out
+
+
+def test_blocked_inbox_login_required_is_loud():
+    from lazyclaw.skills.builtin.survival.upwork_inbox_check import (
+        _blocked_inbox_result,
+    )
+    out = _blocked_inbox_result(
+        {"result": {"status": "empty_or_blocked",
+                    "diagnosis": "login_required", "hint": "Log in."}}
+    )
+    assert out is not None and not out.startswith("[SILENT]")
+    assert "login_required" in out
+
+
+def test_blocked_inbox_selector_drift_stays_silent():
+    from lazyclaw.skills.builtin.survival.upwork_inbox_check import (
+        _blocked_inbox_result,
+    )
+    out = _blocked_inbox_result({
+        "status": "empty_or_blocked",
+        "diagnosis": "selector_drift_or_truly_empty",
+        "hint": "",
+    })
+    assert out is not None
+    assert out.startswith("[SILENT]")
+    # but it must not claim the inbox is verified-empty
+    assert "No unread" not in out
+
+
+def test_blocked_inbox_none_on_normal_list():
+    from lazyclaw.skills.builtin.survival.upwork_inbox_check import (
+        _blocked_inbox_result,
+    )
+    assert _blocked_inbox_result([{"room_id": "r1"}]) is None
+    assert _blocked_inbox_result({"messages": []}) is None

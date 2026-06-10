@@ -107,6 +107,34 @@ def _classify_deadline(message_body: str) -> bool:
     return False
 
 
+def _blocked_inbox_result(messages) -> str | None:
+    """Map mcp-upwork's ``empty_or_blocked`` structured read to a skill
+    result, or ``None`` for a normal inbox payload.
+
+    Cloudflare / login walls are LOUD (no ``[SILENT]`` prefix — the user
+    must act in Brave); ambiguous selector-drift stays silent so the
+    15-min cron doesn't spam, but never claims a verified-empty inbox.
+    """
+    if isinstance(messages, dict) and isinstance(messages.get("result"), dict):
+        messages = messages["result"]
+    if not (
+        isinstance(messages, dict)
+        and messages.get("status") == "empty_or_blocked"
+    ):
+        return None
+    diagnosis = str(messages.get("diagnosis") or "unknown")
+    hint = str(messages.get("hint") or "").strip()
+    if diagnosis == "selector_drift_or_truly_empty":
+        return (
+            "[SILENT] Upwork inbox read returned no rooms (selector "
+            "drift or truly empty) — unread state unverified."
+        )
+    return (
+        f"⚠️ Upwork inbox check BLOCKED ({diagnosis}) — unread state "
+        f"unknown, NOT an empty inbox. {hint}"
+    ).strip()
+
+
 class UpworkInboxCheckSkill(BaseSkill):
     """Sweep Upwork unread DMs, classify, auto-reply or escalate.
 
@@ -203,6 +231,9 @@ class UpworkInboxCheckSkill(BaseSkill):
                 return f"Could not parse mcp-upwork response. Raw: {messages_raw[:500]}"
         else:
             messages = messages_raw
+        blocked = _blocked_inbox_result(messages)
+        if blocked is not None:
+            return blocked
         if not isinstance(messages, list) or not messages:
             # [SILENT] prefix: heartbeat skips the Telegram push when the
             # result starts with this token. User asked for "no news = no

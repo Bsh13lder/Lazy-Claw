@@ -26,6 +26,7 @@ from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.runtime.instant_dispatch import INSTANT_ROUTES, _CRON_PREFIX_RE
 from lazyclaw.skills.builtin.survival.upwork_last_conversation import (
     UpworkLastConversationSkill,
+    _blocked_diagnosis,
     _match_contact,
     _normalize_conversation,
     _normalize_inbox,
@@ -619,3 +620,48 @@ async def test_skill_no_contact_name_keeps_legacy_behavior(tmp_config):
     assert cv_call["room_id"] == "https://x/sarah"
     # Legacy inbox scan is still limit=1 to minimize cost
     assert registry._get_messages.calls[0]["limit"] == 1
+
+
+# ── empty_or_blocked passthrough (mcp-upwork structured reads) ──────
+
+_BLOCKED_RAW = {
+    "status": "empty_or_blocked",
+    "items": [],
+    "page_url": "https://www.upwork.com/ab/messages/rooms/",
+    "page_title": "Just a moment...",
+    "diagnosis": "cloudflare_challenge",
+    "hint": "Solve the Cloudflare check in Brave, then retry.",
+}
+
+
+def test_blocked_diagnosis_detects_dict():
+    assert _blocked_diagnosis(_BLOCKED_RAW) == _BLOCKED_RAW
+
+
+def test_blocked_diagnosis_detects_json_string():
+    found = _blocked_diagnosis(json.dumps(_BLOCKED_RAW))
+    assert found is not None
+    assert found["diagnosis"] == "cloudflare_challenge"
+
+
+def test_blocked_diagnosis_unwraps_result_envelope():
+    assert _blocked_diagnosis({"result": _BLOCKED_RAW}) is not None
+
+
+def test_blocked_diagnosis_none_on_normal_shapes():
+    assert _blocked_diagnosis([{"contact_name": "X"}]) is None
+    assert _blocked_diagnosis({"messages": []}) is None
+    assert _blocked_diagnosis("not json {") is None
+    assert _blocked_diagnosis(None) is None
+
+
+@pytest.mark.asyncio
+async def test_skill_blocked_inbox_not_reported_as_empty(tmp_config):
+    """A Cloudflare-blocked read must NOT become 'No Upwork
+    conversations found' — that's the 2026-06-06 false-negative."""
+    registry = _Registry(get_messages_response=_BLOCKED_RAW)
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    result = await skill.execute("u1", {})
+    assert "No Upwork conversations found" not in result
+    assert "cloudflare_challenge" in result
+    assert "BLOCKED" in result

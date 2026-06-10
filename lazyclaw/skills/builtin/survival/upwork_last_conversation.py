@@ -125,6 +125,20 @@ class UpworkLastConversationSkill(BaseSkill):
             logger.exception("upwork_get_messages call raised")
             return f"Failed to fetch Upwork inbox: {exc}"
 
+        blocked = _blocked_diagnosis(messages_raw)
+        if blocked is not None:
+            diagnosis = blocked.get("diagnosis") or "unknown"
+            hint = (blocked.get("hint") or "").strip()
+            page = blocked.get("page_url") or ""
+            return (
+                f"Upwork inbox read was BLOCKED, not empty "
+                f"(diagnosis: {diagnosis}). {hint} Page: {page}. "
+                "Do NOT report 'no conversations' — the data could not "
+                "be read. Recovery: solve the wall in Brave, or drive "
+                "the page directly with the `browser` tool "
+                "(https://www.upwork.com/ab/messages/rooms/)."
+            )
+
         messages = _normalize_inbox(messages_raw)
         if not messages:
             return (
@@ -391,6 +405,28 @@ def _match_contact(inbox: list[dict], query: str) -> dict | None:
         first = name.split(maxsplit=1)[0] if name else ""
         if first.startswith(q):
             return item
+    return None
+
+
+def _blocked_diagnosis(raw) -> dict | None:
+    """Detect mcp-upwork's ``empty_or_blocked`` structured result.
+
+    Since 2026-06-10 the MCP read tools return
+    ``{status: "empty_or_blocked", diagnosis, hint, page_url, ...}``
+    instead of a bare ``[]`` when extraction yielded zero items —
+    Cloudflare wall, login redirect, or selector drift. Returns that
+    dict (unwrapped from a ``{"result": ...}`` envelope) so callers can
+    surface the block instead of reporting a false empty inbox.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if isinstance(raw, dict) and isinstance(raw.get("result"), dict):
+        raw = raw["result"]
+    if isinstance(raw, dict) and raw.get("status") == "empty_or_blocked":
+        return raw
     return None
 
 

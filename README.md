@@ -47,7 +47,7 @@
 Most agent platforms store everything in plaintext. LazyClaw doesn't. It's Python-native (home to the dominant AI/ML ecosystem — PyTorch, Hugging Face, scikit-learn), MCP-native (client *and* server), runs across your messengers (Telegram, WhatsApp, Instagram, Email — text or voice), and ships a React control panel **plus** a native Flutter mobile app.
 
 <p align="center">
-  <strong>~225K LOC</strong> first-party · <strong>436 Python modules</strong> · <strong>~280 builtin skills</strong> · <strong>13 bundled MCP servers</strong> · <strong>2,450+ tests</strong> · AES-256-GCM by default
+  <strong>~225K LOC</strong> first-party · <strong>440+ Python modules</strong> · <strong>~280 builtin skills</strong> · <strong>13 bundled MCP servers</strong> · <strong>3,000+ tests</strong> · AES-256-GCM by default
 </p>
 
 ## How LazyClaw compares
@@ -170,7 +170,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
                         (AST-validated) (cookies shared) (any MCP server)
 ```
 
-16 modules in `lazyclaw/`:
+18 modules in `lazyclaw/`:
 
 | Module | Purpose |
 |--------|---------|
@@ -189,6 +189,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `replay/` | Session trace recording + shareable tokens |
 | `tasks/` | Encrypted task store, nagging reminders, recurring tasks |
 | `notifications/` | Telegram push for background tasks |
+| `comms/` | Unified cross-channel inbox — ChannelGateway over the MCP channel tools, encrypted thread store, `/api/inbox` + mobile inbox |
 | `pipeline/` | CRM-style pipeline store |
 | `survival/` | Gig economy tools — Upwork MCP search, proposal drafter, freelance platform watchers (Upwork/Workana/PeoplePerHour/Reddit), invoices |
 
@@ -233,16 +234,16 @@ LazyClaw runs four parallel-agent surfaces in one runtime — `delegate` for in-
 
 ### Specialists & Operating Modes *(specialist-first dispatch — ADR-0005)*
 
-Specialists are **declarative `.md` + YAML files** (name / tools / model / system-prompt) — the maintained unit is a small editable file, not a 277-tool registry. Builtins ship in-repo; you create/edit your own from the web or mobile **Specialists** page (custom ones encrypted in DB). Specialists **auto-improve** by accruing lessons from past runs (the LazyBrain skill-lesson loop), and a **research-first fan-out** can send read-only code + web research specialists ahead of any plan so the brain never works from memory.
+Specialists are **declarative `.md` + YAML files** (name / tools / model / system-prompt) — the maintained unit is a small editable file, not a 277-tool registry. **15 builtins** ship in-repo (browser, code, research, freelance/Upwork, email, messaging, notes, tasks, documents, contacts, automation, bounty, system + code/web research); you create/edit your own from the web or mobile **Specialists** page (custom ones encrypted in DB). Specialists **auto-improve** by accruing lessons from past runs (the LazyBrain skill-lesson loop), and a **research-first fan-out** can send read-only code + web research specialists ahead of any plan so the brain never works from memory.
 
 Four **operating modes** layer over the permission system — switch per chat (Telegram `/act`, web/mobile mode switch):
 
 | Mode | Behavior |
 |------|----------|
-| **Chat** | Conversation only — no tools fire |
-| **Ask** | Acts, but confirms each write (default) |
+| **Ask** | Conversation only — no tools fire |
 | **Plan** | Read-only research → numbered plan → one **Execute** tap → then autonomous |
-| **Auto** | Fully autonomous |
+| **Action** | Acts, but confirms each write (default) |
+| **Execute** | Fully autonomous |
 
 ### Background Tasks
 
@@ -347,7 +348,7 @@ LazyClaw routes through a single `LLMRouter` that speaks five provider dialects.
 
 | Provider | Models | How it bills | Good for |
 |----------|--------|--------------|----------|
-| **Anthropic** | Sonnet 4.6, Haiku 4.5, Opus 4.6 | Per-token API | Best tool use, best-in-class quality. **LazyClaw is optimized around Claude.** |
+| **Anthropic** | Sonnet 4.6, Haiku 4.5, Opus 4.8 | Per-token API | Best tool use, best-in-class quality. **LazyClaw is optimized around Claude.** |
 | **MiniMax** | MiniMax-M2.7, minimax-m2.5 | Subscription-priced (flat-rate), OpenAI-compatible API | **Tested and works really well** as an alternative brain — 204K context, strong tool calling, predictable monthly cost. Auto-falls-back to Claude on rate-limit. |
 | **OpenAI** | GPT-5, GPT-5-mini | Per-token API | Legacy fallback; kept for users with existing OpenAI keys. |
 | **Ollama** (local) | Gemma 4 E2B / E4B (custom Modelfiles with agent identity baked in) | Free (runs on your machine) | Default HYBRID worker. |
@@ -388,7 +389,7 @@ LazyClaw doesn't have one "agent" — it has a runtime that ships work across **
 
 ### 1. In-turn Specialists — `delegate(specialist, instruction)`
 
-The brain calls `delegate(...)` inline; the specialist runs to completion and its result merges into the same TAOR turn.
+The brain calls `delegate(...)` inline; the specialist runs to completion and its result merges into the same TAOR turn. All **15 builtin specialists** are reachable here — the three below are the heavyweights:
 
 | Specialist | Strong angles | Model |
 |---|---|---|

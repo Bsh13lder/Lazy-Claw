@@ -192,7 +192,18 @@ rollout tracked in `docs/superpowers/plans/2026-06-07-specialist-first-dispatch.
   superseded. Not started — hard precondition is the grounding migration + a
   green F1 suite.
 
-Still TODO: persist `include_scraper` for custom specialists (DB column);
-startup `warn_on_unknown_tools` self-check; reconcile the 4-way ModeSwitch with
-the legacy `PlanModeToggle`; web/mobile build verification on a real toolchain;
-`make rebuild`. No phase removes a defense before its replacement exists.
+Follow-ups closed 2026-06-10 (branch `fix/dispatch-audit-hardening`):
+`include_scraper` persisted for custom specialists (schema column + migration +
+save/load; the same pass fixed a latent upsert bug — the encrypted-name
+comparison never matched under AES-GCM's random nonce, so every save duplicated
+the row); `startup_specialist_self_check(registry)` wired into both cli startup
+paths (bare-MCP-suffix aware); the ModeSwitch/`PlanModeToggle` reconciliation is
+obsolete (the legacy toggle no longer exists).
+
+**Thin-router soak**: `LAZYCLAW_THIN_ROUTER=1` is live in prod since 2026-06-08.
+First soak finding (2026-06-10 00:33): the brain delegated a raw upwork read to
+the freelance specialist whose allowlist lacked the tools its own prompt
+promises — `search_tools` discovery does NOT grant callability, so the worker
+stuck-looped and died. Fixed (allowlist + regression test + the startup
+self-check above). Phase 5 / 4c teardown stays deferred until the soak runs
+clean. No phase removes a defense before its replacement exists.

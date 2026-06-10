@@ -28,6 +28,7 @@ slower past a few thousand vectors. Tests force the fallback path via
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -50,6 +51,10 @@ logger = logging.getLogger(__name__)
 EMBED_MODEL = "nomic-embed-text"
 EMBED_DIM = 768
 OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+# Serializes the DELETE+INSERT pair in _vec_upsert — vec0 has no UPSERT,
+# and interleaved pairs on the shared connection hit the PK constraint.
+_VEC_UPSERT_LOCK = asyncio.Lock()
 
 # Drop hits below this cosine similarity. Lowered from 0.45 → 0.32 so
 # legitimate paraphrase hits at 0.35–0.44 (which a 768-d nomic-embed-text
@@ -307,25 +312,29 @@ async def _vec_upsert(
 
     vec0 doesn't support ``ON CONFLICT`` / ``INSERT OR REPLACE``
     (UPSERT isn't implemented for virtual tables), so we DELETE-then-
-    INSERT. Both ops live in the same transaction so a query can't
-    observe a partial row.
+    INSERT. ``_VEC_UPSERT_LOCK`` keeps the pair atomic across
+    coroutines: two concurrent upserts for the same note on the shared
+    connection interleaved as DELETE/DELETE/INSERT/INSERT and the
+    second INSERT died on the vec0 PK UNIQUE constraint (seen 5+ times
+    in prod logs 2026-06-07..08).
     """
     try:
-        async with db_session(config) as db:
-            if not await _vec_available(config, db):
-                return True
-            packed = _pack(vec)
-            await db.execute(
-                "DELETE FROM vec_note_embeddings WHERE note_id = ?",
-                (note_id,),
-            )
-            await db.execute(
-                "INSERT INTO vec_note_embeddings"
-                "(note_id, user_id, model, dim, embedding) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (note_id, user_id, EMBED_MODEL, EMBED_DIM, packed),
-            )
-            await db.commit()
+        async with _VEC_UPSERT_LOCK:
+            async with db_session(config) as db:
+                if not await _vec_available(config, db):
+                    return True
+                packed = _pack(vec)
+                await db.execute(
+                    "DELETE FROM vec_note_embeddings WHERE note_id = ?",
+                    (note_id,),
+                )
+                await db.execute(
+                    "INSERT INTO vec_note_embeddings"
+                    "(note_id, user_id, model, dim, embedding) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (note_id, user_id, EMBED_MODEL, EMBED_DIM, packed),
+                )
+                await db.commit()
         return True
     except Exception:
         logger.debug("vec0 upsert failed for %s", note_id, exc_info=True)

@@ -26,6 +26,10 @@ enum _LedgerSort { newest, oldest, amount }
 /// (e.g. their project was deleted locally before the sync caught up).
 const String _kUncategorizedFilter = '__uncategorized__';
 
+/// Sentinel filter value scoping the ledger to the starred (favorite)
+/// projects — the same set the Home dashboard and the Overview tab lead with.
+const String _kFavoritesFilter = '__favorites__';
+
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
 
@@ -327,6 +331,16 @@ class _OverviewTab extends StatelessWidget {
     // server rollup) and currency-aware so mixed currencies aren't summed.
     final totals = BudgetTotals.from(state.projects, state.expenses);
 
+    // Favorites lead — the same starred set the Home dashboard pins, so the
+    // projects the user actually budgets against sit on top instead of being
+    // buried in a flat created-at list.
+    final favorites = state.projects
+        .where((p) => p.isFavorite && !p.isArchived)
+        .toList();
+    final favoriteIds = favorites.map((p) => p.id).toSet();
+    final others =
+        state.projects.where((p) => !favoriteIds.contains(p.id)).toList();
+
     return LzRefresh(
       onRefresh: onRefresh,
       child: ListView(
@@ -334,41 +348,72 @@ class _OverviewTab extends StatelessWidget {
         children: [
           // Hero summary card.
           BudgetSummaryCard(totals: totals),
-          // Projects section header — a slim label sitting directly above the
-          // cards (an empty LzSection here just wasted vertical space).
-          if (state.projects.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.lg,
-                AppSpacing.md,
-                AppSpacing.lg,
-                AppSpacing.sm,
-              ),
-              child: Text(
-                'PROJECTS',
-                style: AppText.caption.copyWith(
-                  color: AppColors.textMuted,
-                  letterSpacing: 0.8,
-                  fontWeight: FontWeight.w700,
+          if (favorites.isNotEmpty) ...[
+            const _SectionLabel('★ FAVORITES'),
+            ...favorites.map(_projectCard),
+          ],
+          if (others.isNotEmpty) ...[
+            _SectionLabel(favorites.isEmpty ? 'PROJECTS' : 'OTHER PROJECTS'),
+            // No favorites yet → teach the star (same affordance as Home).
+            if (favorites.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg,
+                  0,
+                  AppSpacing.lg,
+                  AppSpacing.sm,
+                ),
+                child: Text(
+                  'Star a project to pin it here and on Home.',
+                  style:
+                      AppText.caption.copyWith(color: AppColors.textMuted),
                 ),
               ),
-            ),
-            ...state.projects.map((p) {
-              final projectExpenses = state.expenses
-                  .where((e) => e.projectId == p.id && !e.isVoid)
-                  .toList();
-              return ProjectCard(
-                project: p,
-                expenses: projectExpenses,
-                pendingSync: state.dirtyProjectIds.contains(p.id),
-                onDelete: () => onDeleteProject(p.id),
-                onEdit: () => onEditProject(p),
-                onToggleFavorite: () => onToggleFavorite(p.id),
-              );
-            }),
-            const SizedBox(height: AppSpacing.xxxl),
+            ...others.map(_projectCard),
           ],
+          if (state.projects.isNotEmpty)
+            const SizedBox(height: AppSpacing.xxxl),
         ],
+      ),
+    );
+  }
+
+  Widget _projectCard(Project p) {
+    final projectExpenses = state.expenses
+        .where((e) => e.projectId == p.id && !e.isVoid)
+        .toList();
+    return ProjectCard(
+      project: p,
+      expenses: projectExpenses,
+      pendingSync: state.dirtyProjectIds.contains(p.id),
+      onDelete: () => onDeleteProject(p.id),
+      onEdit: () => onEditProject(p),
+      onToggleFavorite: () => onToggleFavorite(p.id),
+    );
+  }
+}
+
+/// Slim uppercase section label used above project card groups.
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.md,
+        AppSpacing.lg,
+        AppSpacing.sm,
+      ),
+      child: Text(
+        text,
+        style: AppText.caption.copyWith(
+          color: AppColors.textMuted,
+          letterSpacing: 0.8,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -457,11 +502,18 @@ class _LedgerTabState extends State<_LedgerTab> {
     });
   }
 
-  List<Expense> _applyFilter(List<Expense> visible, Set<String> liveIds) {
+  List<Expense> _applyFilter(
+    List<Expense> visible,
+    Set<String> liveIds,
+    Set<String> favoriteIds,
+  ) {
     final filter = _projectFilter;
     if (filter == null) return visible;
     if (filter == _kUncategorizedFilter) {
       return visible.where((e) => !liveIds.contains(e.projectId)).toList();
+    }
+    if (filter == _kFavoritesFilter) {
+      return visible.where((e) => favoriteIds.contains(e.projectId)).toList();
     }
     return visible.where((e) => e.projectId == filter).toList();
   }
@@ -480,10 +532,19 @@ class _LedgerTabState extends State<_LedgerTab> {
     }
 
     final liveIds = state.projects.map((p) => p.id).toSet();
-    // A stale filter (its project was just deleted) collapses back to "All".
+    final favoriteIds = state.projects
+        .where((p) => p.isFavorite && !p.isArchived)
+        .map((p) => p.id)
+        .toSet();
+    // A stale filter (its project was just deleted, or the last favorite was
+    // un-starred) collapses back to "All".
     if (_projectFilter != null &&
         _projectFilter != _kUncategorizedFilter &&
+        _projectFilter != _kFavoritesFilter &&
         !liveIds.contains(_projectFilter)) {
+      _projectFilter = null;
+    }
+    if (_projectFilter == _kFavoritesFilter && favoriteIds.isEmpty) {
       _projectFilter = null;
     }
 
@@ -496,13 +557,14 @@ class _LedgerTabState extends State<_LedgerTab> {
       customStart: _customRange?.start,
       customEnd: _customRange?.end,
     );
-    final filtered = _applyFilter(ranged, liveIds);
+    final filtered = _applyFilter(ranged, liveIds, favoriteIds);
 
     final currency = filtered.isNotEmpty
         ? filtered.first.currency
         : (visible.isNotEmpty ? visible.first.currency : 'USD');
     final controls = _LedgerControls(
       projects: state.projects,
+      favoriteIds: favoriteIds,
       selectedProjectId: _projectFilter,
       showUncategorized: _hasUncategorized(ranged, liveIds),
       sort: _sort,
@@ -640,11 +702,12 @@ class _LedgerTabState extends State<_LedgerTab> {
 ///    `‹ June 2026 ›` stepper (one-tap month selection), otherwise an icon +
 ///    range label; the window's running total is bold-right, with a compact sort
 ///    menu (Newest · Oldest · Largest) trailing.
-/// 3. A horizontally-scrollable project filter (All · each project ·
-///    Uncategorized).
+/// 3. A horizontally-scrollable project filter (All · ★ Favorites · each
+///    project, starred first · Uncategorized).
 class _LedgerControls extends StatelessWidget {
   const _LedgerControls({
     required this.projects,
+    required this.favoriteIds,
     required this.selectedProjectId,
     required this.showUncategorized,
     required this.sort,
@@ -659,6 +722,7 @@ class _LedgerControls extends StatelessWidget {
   });
 
   final List<Project> projects;
+  final Set<String> favoriteIds;
   final String? selectedProjectId;
   final bool showUncategorized;
   final _LedgerSort sort;
@@ -800,10 +864,25 @@ class _LedgerControls extends StatelessWidget {
                 color: AppColors.accent,
                 onTap: () => onProjectChanged(null),
               ),
-              for (final p in projects) ...[
+              if (favoriteIds.isNotEmpty) ...[
                 const SizedBox(width: AppSpacing.sm),
                 LzChip(
-                  label: p.name,
+                  label: '★ Favorites',
+                  dense: true,
+                  selected: selectedProjectId == _kFavoritesFilter,
+                  color: AppColors.accent,
+                  onTap: () => onProjectChanged(_kFavoritesFilter),
+                ),
+              ],
+              // Starred projects lead the per-project chips so the ones the
+              // user budgets against are one tap away, not a scroll away.
+              for (final p in [
+                ...projects.where((p) => favoriteIds.contains(p.id)),
+                ...projects.where((p) => !favoriteIds.contains(p.id)),
+              ]) ...[
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  label: favoriteIds.contains(p.id) ? '★ ${p.name}' : p.name,
                   dense: true,
                   selected: selectedProjectId == p.id,
                   color: AppColors.accent,

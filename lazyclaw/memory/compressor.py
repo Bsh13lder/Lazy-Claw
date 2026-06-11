@@ -19,6 +19,7 @@ from lazyclaw.db.connection import db_session
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.memory.classifier import classify_message
+from lazyclaw.memory.metadata_codec import decode_tool_metadata
 from lazyclaw.memory.summarizer import summarize_chunk
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,7 @@ async def compress_history(
             except Exception:
                 logger.warning("Failed to decrypt message %s, skipping", msg_id)
                 text = "[decryption error]"
+            metadata = decode_tool_metadata(metadata, key)
             decrypted.append({
                 "id": msg_id, "role": role, "content": text,
                 "tool_name": tool_name, "metadata": metadata,
@@ -185,6 +187,7 @@ async def compress_history(
         except Exception:
             logger.warning("Failed to decrypt message %s, skipping", msg_id)
             text = "[decryption error]"
+        metadata = decode_tool_metadata(metadata, key)
         decrypted.append({
             "id": msg_id, "role": role, "content": text,
             "tool_name": tool_name, "metadata": metadata,

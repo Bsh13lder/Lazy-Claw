@@ -167,6 +167,19 @@ async def lifespan(application: FastAPI):
                 logger.exception(
                     "typed-memory backfill failed in background (non-fatal)",
                 )
+            # Tool-metadata encryption backfill (2026-06-10 audit, Phase 2)
+            # — encrypt legacy plaintext tool-call arguments at rest.
+            # Idempotent + tolerant read path, so failure here is cosmetic.
+            try:
+                from lazyclaw.memory.metadata_backfill import (
+                    backfill_encrypt_tool_metadata,
+                )
+
+                await backfill_encrypt_tool_metadata(_config)
+            except Exception:
+                logger.exception(
+                    "tool-metadata backfill failed in background (non-fatal)",
+                )
 
         # Hold a reference so the task isn't GC'd mid-run. Stored on the
         # FastAPI app state so it lives as long as the server does.

@@ -59,6 +59,12 @@ const _kTools = <_PowerTool>[
     icon: Icons.psychology_outlined,
   ),
   _PowerTool(
+    key: 'brain',
+    label: 'Brain',
+    description: "The agent's knowledge graph — journal, notes & tags",
+    icon: Icons.hub_outlined,
+  ),
+  _PowerTool(
     key: 'jobs',
     label: 'Jobs',
     description: 'Gig pipeline and job matching',

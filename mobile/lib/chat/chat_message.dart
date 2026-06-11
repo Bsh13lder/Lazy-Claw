@@ -42,6 +42,10 @@ class AgentActivity {
   /// Tool names in call order — drives the "N tools" summary.
   final List<String> toolsUsed;
 
+  /// Tool executing RIGHT NOW (latest tool frame); null when the newest
+  /// frame carried no tool — i.e. the row is idle or between tools.
+  final String? currentTool;
+
   const AgentActivity({
     required this.kind,
     required this.subject,
@@ -50,10 +54,12 @@ class AgentActivity {
     this.failed = false,
     this.events = const [],
     this.toolsUsed = const [],
+    this.currentTool,
   });
 
   /// Fold a newer event for the same subject into this row: latest detail /
-  /// terminal flags win, histories concatenate. Returns a new instance.
+  /// terminal flags / currentTool win, histories concatenate (tools deduped).
+  /// Returns a new instance.
   AgentActivity merge(AgentActivity next) => AgentActivity(
         kind: kind,
         subject: subject,
@@ -61,7 +67,11 @@ class AgentActivity {
         done: next.done,
         failed: next.failed,
         events: [...events, ...next.events],
-        toolsUsed: [...toolsUsed, ...next.toolsUsed],
+        toolsUsed: [
+          ...toolsUsed,
+          ...next.toolsUsed.where((t) => !toolsUsed.contains(t)),
+        ],
+        currentTool: next.currentTool,
       );
 
   /// Copy with terminal flags forced (used when a background_done /
@@ -74,6 +84,7 @@ class AgentActivity {
         failed: !success,
         events: [...events, success ? 'finished' : 'failed'],
         toolsUsed: toolsUsed,
+        currentTool: null,
       );
 }
 
@@ -90,6 +101,13 @@ class BackgroundTaskResult {
   final List<String> events;
   final List<String> toolsUsed;
 
+  /// True when the reducer detected that [detail] substantially repeats a
+  /// recent assistant reply (heartbeat/scheduled tasks deliver the same text
+  /// as a consolidated message AND a background result). The card still
+  /// renders — the user sees the task settled — but header-only, without
+  /// repeating the wall of text.
+  final bool duplicateOfReply;
+
   const BackgroundTaskResult({
     required this.name,
     required this.success,
@@ -98,13 +116,25 @@ class BackgroundTaskResult {
     this.durationMs,
     this.events = const [],
     this.toolsUsed = const [],
+    this.duplicateOfReply = false,
   });
 }
+
+/// Delivery state of an outbound (user) message.
+///
+/// `sent` is the default — the socket wrote the frame immediately.
+/// `sending` means the socket was disconnected and the message sits in the
+/// pending outbox awaiting a reconnect (bubble shows a "Sending…" hint).
+/// `failed` means the outbox TTL expired before delivery (bubble shows a
+/// "Not delivered" hint; the user retries by resending).
+enum SendState { sent, sending, failed }
 
 class ChatMessage {
   final String role; // 'user' | 'assistant' | 'bg_task' | 'plan'
   final String content;
   final bool streaming;
+  // Outbound delivery state (meaningful for role == 'user' only).
+  final SendState sendState;
   final String? pendingApprovalId;
   final String? pendingApprovalSkill;
   // Tool activity chips shown under a streaming/done assistant bubble.
@@ -133,6 +163,7 @@ class ChatMessage {
     required this.role,
     required this.content,
     this.streaming = false,
+    this.sendState = SendState.sent,
     this.pendingApprovalId,
     this.pendingApprovalSkill,
     this.toolActivities = const [],
@@ -153,6 +184,7 @@ class ChatMessage {
   ChatMessage _clone({
     String? content,
     bool? streaming,
+    SendState? sendState,
     String? phase,
     bool? thinking,
     String? thinkingText,
@@ -168,6 +200,7 @@ class ChatMessage {
         role: role,
         content: content ?? this.content,
         streaming: streaming ?? this.streaming,
+        sendState: sendState ?? this.sendState,
         pendingApprovalId: clearApprovalFields
             ? null
             : (pendingApprovalId ?? this.pendingApprovalId),
@@ -190,6 +223,7 @@ class ChatMessage {
   ChatMessage copyWith({
     String? content,
     bool? streaming,
+    SendState? sendState,
     String? phase,
     bool? thinking,
     String? thinkingText,
@@ -199,6 +233,7 @@ class ChatMessage {
       _clone(
         content: content,
         streaming: streaming,
+        sendState: sendState,
         phase: phase,
         thinking: thinking,
         thinkingText: thinkingText,

@@ -7,6 +7,7 @@ import '../../screens/expenses_screen.dart';
 import '../../screens/home_screen.dart';
 import '../../screens/login_screen.dart';
 import '../../screens/more/audit_screen.dart';
+import '../../screens/more/brain_screen.dart';
 import '../../screens/more/jobs_screen.dart';
 import '../../screens/more/mcp_screen.dart';
 import '../../screens/more/memory_screen.dart';
@@ -93,6 +94,22 @@ class _ShellScaffold extends StatelessWidget {
   }
 }
 
+// ── Auth redirect (pure) ───────────────────────────────────────────────────
+
+/// The auth redirect decision, extracted from the [GoRouter] closure so it is
+/// unit-testable. `authenticatedOffline` counts as authed: a previously-
+/// logged-in user must reach the offline-first surfaces when the server is
+/// unreachable (the /login screen itself needs the server, so bouncing there
+/// would lock them out entirely).
+String? authRedirect(AuthStatus status, {required bool loggingIn}) {
+  if (status == AuthStatus.loading) return null;
+  final authed = status == AuthStatus.authenticated ||
+      status == AuthStatus.authenticatedOffline;
+  if (!authed && !loggingIn) return '/login';
+  if (authed && loggingIn) return '/home';
+  return null;
+}
+
 // ── Router provider ────────────────────────────────────────────────────────
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -110,11 +127,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final status = ref.read(authProvider).status;
       final loggingIn = state.matchedLocation == '/login' ||
           state.matchedLocation == '/register';
-      if (status == AuthStatus.loading) return null;
-      final authed = status == AuthStatus.authenticated;
-      if (!authed && !loggingIn) return '/login';
-      if (authed && loggingIn) return '/home';
-      return null;
+      return authRedirect(status, loggingIn: loggingIn);
     },
     routes: [
       // Auth routes — OUTSIDE the shell so they have no bottom nav bar.
@@ -140,6 +153,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/more/skills', builder: (ctx, _) => const SkillsScreen()),
       GoRoute(path: '/more/vault', builder: (ctx, _) => const VaultScreen()),
       GoRoute(path: '/more/memory', builder: (ctx, _) => const MemoryScreen()),
+      GoRoute(path: '/more/brain', builder: (ctx, _) => const BrainScreen()),
       GoRoute(path: '/more/jobs', builder: (ctx, _) => const JobsScreen()),
       GoRoute(path: '/more/watchers', builder: (ctx, _) => const WatchersScreen()),
       GoRoute(path: '/more/mcp', builder: (ctx, _) => const McpScreen()),

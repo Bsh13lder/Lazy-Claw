@@ -9,6 +9,24 @@ class ChatReducer {
   final List<ChatMessage> messages = [];
   final StringBuffer _buf = StringBuffer();
 
+  /// Terminal activity outcomes already shown this session, keyed by
+  /// `'$kind:$subject'` (AgentActivityFrame carries no task id). A WS
+  /// reconnect replays `task_completed` — a terminal frame whose key is here
+  /// AND has no live row to settle is a replay and gets dropped instead of
+  /// re-creating the card.
+  final Set<String> _seenTerminalActivityKeys = {};
+
+  /// Minimum normalized length before a bg result can be considered a
+  /// duplicate of a reply — tiny generic strings ("done", "ok") must never
+  /// collapse the card.
+  static const int _dupMinChars = 24;
+
+  /// Prefix length compared when neither text contains the other whole.
+  static const int _dupPrefixChars = 200;
+
+  /// How many recent (non-empty) assistant messages the duplicate check scans.
+  static const int _dupScanWindow = 3;
+
   /// Usage metrics from a standalone `usage` frame, attached when `done`
   /// arrives (the `done` payload's own usage wins when both exist).
   UsageInfo? _pendingUsage;
@@ -17,11 +35,40 @@ class ChatReducer {
   /// stop button.
   bool get isStreaming => messages.any((m) => m.streaming);
 
-  void onUserSend(String text) {
-    messages.add(ChatMessage(role: 'user', content: text));
+  /// Adds the user's bubble. When [delivered] is false the socket queued the
+  /// message in its offline outbox — the bubble renders a "sending…" hint and
+  /// NO assistant spinner starts until [onOutboxFlushed] confirms delivery.
+  void onUserSend(String text, {bool delivered = true}) {
+    messages.add(ChatMessage(
+      role: 'user',
+      content: text,
+      sendState: delivered ? SendState.sent : SendState.sending,
+    ));
+    if (delivered) _startAssistantTurn();
+  }
+
+  /// Queued messages went out on reconnect: clear their "sending…" marks and
+  /// start the assistant streaming bubble (the turn is genuinely live now).
+  void onOutboxFlushed(int count) {
+    if (count <= 0) return;
+    var remaining = count;
+    for (var i = 0; i < messages.length && remaining > 0; i++) {
+      final m = messages[i];
+      if (m.role == 'user' && m.sendState == SendState.sending) {
+        messages[i] = m.copyWith(sendState: SendState.sent);
+        remaining--;
+      }
+    }
+    // A queued user bubble may sit BELOW the in-flight assistant bubble, so
+    // check the whole list — not just messages.last — before spinning up.
+    if (!isStreaming) _startAssistantTurn();
+  }
+
+  void _startAssistantTurn() {
     _buf.clear();
     _pendingUsage = null;
-    messages.add(const ChatMessage(role: 'assistant', content: '', streaming: true));
+    messages.add(
+        const ChatMessage(role: 'assistant', content: '', streaming: true));
   }
 
   /// Seeds prior conversation loaded from the backend. Historical messages are
@@ -40,6 +87,17 @@ class ChatReducer {
         (messages.last.role != 'assistant' && messages.last.role != 'plan')) {
       messages.add(
           const ChatMessage(role: 'assistant', content: '', streaming: true));
+    }
+  }
+
+  /// Non-streaming counterpart of [_ensureStreamingBubble], used when a
+  /// terminal activity row must land somewhere: reuse the last assistant
+  /// bubble if there is one (its own streaming state is untouched), else
+  /// append a quiet, already-finished assistant message. Never flips
+  /// `streaming` on, so no phantom spinner can outlive a turn.
+  void _ensureSettledBubble() {
+    if (messages.isEmpty || messages.last.role != 'assistant') {
+      messages.add(const ChatMessage(role: 'assistant', content: ''));
     }
   }
 
@@ -72,8 +130,27 @@ class ChatReducer {
               role: 'assistant', content: '⚠️ $message'));
           return;
         }
+        if (messages.last.role == 'user') {
+          // No in-flight streaming bubble to finalize, and the user text must
+          // never be clobbered. A queued bubble keeps waiting — its failure is
+          // owned by the outbox TTL (SendFailedFrame), not a transient drop.
+          if (messages.last.sendState == SendState.sending) return;
+          messages.add(
+              ChatMessage(role: 'assistant', content: '⚠️ $message'));
+          return;
+        }
         _replaceLast(messages.last
             .copyWith(content: '⚠️ $message', streaming: false));
+
+      case SendFailedFrame(:final message):
+        // A queued outbound message expired/was evicted before delivery —
+        // mark the oldest waiting user bubble failed and surface the reason.
+        final idx = messages.indexWhere(
+            (m) => m.role == 'user' && m.sendState == SendState.sending);
+        if (idx != -1) {
+          messages[idx] = messages[idx].copyWith(sendState: SendState.failed);
+        }
+        messages.add(ChatMessage(role: 'assistant', content: '⚠️ $message'));
 
       case CancelledFrame():
         if (messages.isEmpty) return;
@@ -145,8 +222,7 @@ class ChatReducer {
           :final failed,
           :final tool
         ):
-        _ensureStreamingBubble();
-        _replaceLast(messages.last.withAgentActivity(AgentActivity(
+        final activity = AgentActivity(
           kind: kind,
           subject: subject,
           detail: detail,
@@ -154,7 +230,39 @@ class ChatReducer {
           failed: failed,
           events: [detail],
           toolsUsed: tool != null ? [tool] : const [],
-        )));
+          currentTool: tool,
+        );
+        if (done || failed) {
+          // Terminal frames settle an existing row in place — if the row
+          // lives on an EARLIER message (the turn already finished), it is
+          // settled there instead of touching the streaming bubble.
+          final key = '$kind:$subject';
+          final located = _findActivityRow(kind, subject);
+          if (located != null) {
+            _seenTerminalActivityKeys.add(key);
+            final (msgIdx, existing) = located;
+            // Already settled ⇒ a reconnect replay; merging again would only
+            // append duplicate event lines.
+            if (existing.done) return;
+            messages[msgIdx] = messages[msgIdx].withAgentActivity(activity);
+            return;
+          }
+          // No row: either a reconnect replay of an outcome we already
+          // surfaced (drop it) …
+          if (_seenTerminalActivityKeys.contains(key)) return;
+          _seenTerminalActivityKeys.add(key);
+          // … or the FIRST news of a task that finished while the chat was
+          // closed (the server never replays background_done). Surface it as
+          // a settled row so the completion isn't invisible. Mirrors the
+          // non-terminal attach below MINUS the streaming side effect of
+          // [_ensureStreamingBubble] — the row arrives done/failed and must
+          // render with no spinner and no phantom in-flight bubble.
+          _ensureSettledBubble();
+          _replaceLast(messages.last.withAgentActivity(activity));
+          return;
+        }
+        _ensureStreamingBubble();
+        _replaceLast(messages.last.withAgentActivity(activity));
 
       case PlanPendingFrame(:final plan, :final steps):
         messages.add(ChatMessage(
@@ -186,10 +294,26 @@ class ChatReducer {
   }
 
   /// Appends a bg_task card, folding in the activity timeline captured for
-  /// the same task name and settling that row's spinner.
+  /// the same task name and settling that row's spinner. The outcome key is
+  /// recorded so a replayed `task_completed` frame can't re-surface the same
+  /// completion as a settled activity row.
   void _addBgResult(BackgroundTaskResult card) {
-    final located = _findBgActivity(card.name);
-    var enriched = card;
+    _seenTerminalActivityKeys.add('bg:${card.name}');
+    final located = _findActivityRow('bg', card.name);
+    // Heartbeat/scheduled turns deliver the same text twice — consolidated
+    // assistant message + background result. Flag the echo so the card
+    // collapses to header-only instead of repeating the wall of text.
+    final duplicate = _duplicatesRecentReply(card.detail);
+    var enriched = BackgroundTaskResult(
+      name: card.name,
+      taskId: card.taskId,
+      success: card.success,
+      detail: card.detail,
+      durationMs: card.durationMs,
+      events: card.events,
+      toolsUsed: card.toolsUsed,
+      duplicateOfReply: duplicate,
+    );
     if (located != null) {
       final (msgIdx, activity) = located;
       enriched = BackgroundTaskResult(
@@ -200,6 +324,7 @@ class ChatReducer {
         durationMs: card.durationMs,
         events: activity.events,
         toolsUsed: activity.toolsUsed,
+        duplicateOfReply: duplicate,
       );
       if (!activity.done) {
         final updated =
@@ -218,14 +343,47 @@ class ChatReducer {
     ));
   }
 
-  /// Newest assistant message carrying a 'bg' activity row for [name],
-  /// returned with its message index.
-  (int, AgentActivity)? _findBgActivity(String name) {
+  /// True when [detail] substantially duplicates one of the last
+  /// [_dupScanWindow] non-empty assistant replies: after whitespace
+  /// normalization, one text contains the other or their first
+  /// [_dupPrefixChars] characters match. Deliberately deterministic — no
+  /// fuzzy scoring.
+  bool _duplicatesRecentReply(String? detail) {
+    if (detail == null) return false;
+    final d = _normalizeWs(detail);
+    if (d.length < _dupMinChars) return false;
+    var checked = 0;
+    for (var i = messages.length - 1;
+        i >= 0 && checked < _dupScanWindow;
+        i--) {
+      final m = messages[i];
+      if (m.role != 'assistant') continue;
+      final c = _normalizeWs(m.content);
+      if (c.isEmpty) continue;
+      checked++;
+      if (c.contains(d)) return true;
+      if (c.length >= _dupMinChars && d.contains(c)) return true;
+      if (d.length >= _dupPrefixChars &&
+          c.length >= _dupPrefixChars &&
+          d.substring(0, _dupPrefixChars) == c.substring(0, _dupPrefixChars)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static String _normalizeWs(String s) =>
+      s.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// Newest assistant message carrying an activity row for (kind, subject),
+  /// returned with its message index. Reverse scan so the most recent turn
+  /// wins when the same subject appeared in older turns too.
+  (int, AgentActivity)? _findActivityRow(String kind, String subject) {
     for (var i = messages.length - 1; i >= 0; i--) {
       final m = messages[i];
       if (m.role != 'assistant') continue;
       for (final a in m.agentActivities) {
-        if (a.kind == 'bg' && a.subject == name) return (i, a);
+        if (a.kind == kind && a.subject == subject) return (i, a);
       }
     }
     return null;
@@ -238,6 +396,7 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   final ChatSocket _socket;
   final ChatReducer _reducer = ChatReducer();
   late final StreamSubscription<ServerFrame> _frameSub;
+  late final StreamSubscription<int> _flushSub;
 
   // Callback for firing local notifications — injected externally so the
   // controller has no hard dependency on the notification plugin.
@@ -249,6 +408,10 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
     _frameSub = _socket.frames.listen((f) {
       _handleNotification(f);
       _reducer.onFrame(f);
+      state = List.unmodifiable(_reducer.messages);
+    });
+    _flushSub = _socket.outboxFlushed.listen((count) {
+      _reducer.onOutboxFlushed(count);
       state = List.unmodifiable(_reducer.messages);
     });
   }
@@ -289,9 +452,11 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   }
 
   void send(String text) {
-    _reducer.onUserSend(text);
+    // Hand the message to the socket FIRST so the bubble reflects whether it
+    // actually went out or sits queued in the offline outbox ("sending…").
+    final delivered = _socket.send(text);
+    _reducer.onUserSend(text, delivered: delivered);
     state = List.unmodifiable(_reducer.messages);
-    _socket.send(text);
   }
 
   /// True while an agent turn is streaming — used by the input bar to swap
@@ -315,6 +480,7 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   @override
   void dispose() {
     _frameSub.cancel();
+    _flushSub.cancel();
     super.dispose();
   }
 }

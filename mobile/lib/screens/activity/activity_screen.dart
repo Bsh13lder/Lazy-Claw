@@ -46,12 +46,58 @@ class _ActivityScreenState extends ConsumerState<ActivityScreen> {
 
   Future<void> _onRefresh() => ref.read(activityProvider.notifier).refresh();
 
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: AppColors.bgSurfaceElevated,
+      ),
+    );
+  }
+
+  Future<void> _cancelTask(AgentTask task) async {
+    final ok =
+        await ref.read(activityProvider.notifier).cancelTask(task.taskId);
+    _toast(ok
+        ? 'Cancelling "${task.name}"…'
+        : 'Could not cancel "${task.name}" — it may have already finished');
+  }
+
+  Future<void> _cancelAll() async {
+    final confirmed = await LzConfirm.show(
+      context,
+      title: 'Cancel all tasks?',
+      message: 'Every running foreground and background task will be stopped.',
+      confirmLabel: 'Cancel all',
+      cancelLabel: 'Keep running',
+      danger: true,
+    );
+    if (!confirmed) return;
+    final count = await ref.read(activityProvider.notifier).cancelAll();
+    _toast(count > 0
+        ? 'Cancelling $count task${count == 1 ? '' : 's'}…'
+        : 'Nothing was cancelled');
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(activityProvider);
+    final hasRunning = state.snapshot.running.isNotEmpty;
 
     return LzScaffold(
-      appBar: const LzAppBar(title: 'Activity'),
+      appBar: LzAppBar(
+        title: 'Activity',
+        actions: [
+          if (hasRunning)
+            LzIconButton(
+              icon: Icons.stop_circle_outlined,
+              color: AppColors.error,
+              tooltip: 'Cancel all running tasks',
+              onPressed: _cancelAll,
+            ),
+        ],
+      ),
       body: LzRefresh(
         onRefresh: _onRefresh,
         child: _buildBody(state),
@@ -119,6 +165,7 @@ class _ActivityScreenState extends ConsumerState<ActivityScreen> {
         child: ActivityRow(
           task: t,
           onTap: () => showActivityDetail(context, t),
+          onCancel: t.isRunning ? () => _cancelTask(t) : null,
         ),
       );
 }

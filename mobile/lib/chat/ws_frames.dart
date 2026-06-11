@@ -32,6 +32,16 @@ class ErrorFrame extends ServerFrame {
   const ErrorFrame(this.message);
 }
 
+/// Client-local frame — never parsed off the wire. Injected by [ChatSocket]
+/// when a queued outbound message could not be delivered (its outbox TTL
+/// expired before a reconnect, or it was evicted from a full outbox). The
+/// reducer marks the matching user bubble failed and surfaces [message] so
+/// the user knows to resend.
+class SendFailedFrame extends ServerFrame {
+  final String message;
+  const SendFailedFrame(this.message);
+}
+
 class CancelledFrame extends ServerFrame {
   const CancelledFrame();
 }

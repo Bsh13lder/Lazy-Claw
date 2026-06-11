@@ -70,6 +70,33 @@ class ActivityNotifier extends StateNotifier<ActivityState> {
       }
     }
   }
+
+  /// Cancel one running task, then refresh so the row flips to
+  /// cancelling/settled. Returns false when the cancel didn't fire (task
+  /// already settled, network error) so the UI can tell the user.
+  Future<bool> cancelTask(String taskId) async {
+    bool ok;
+    try {
+      ok = await _repo.cancelTask(taskId);
+    } catch (_) {
+      ok = false;
+    }
+    await refresh();
+    return ok;
+  }
+
+  /// Cancel everything running, then refresh. Returns the number of tasks
+  /// the server fired cancellations for (0 on failure).
+  Future<int> cancelAll() async {
+    int count;
+    try {
+      count = await _repo.cancelAll();
+    } catch (_) {
+      count = 0;
+    }
+    await refresh();
+    return count;
+  }
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────

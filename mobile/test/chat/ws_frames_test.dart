@@ -230,4 +230,187 @@ void main() {
         as AgentActivityFrame;
     expect(f.detail, 'llm_call');
   });
+
+  // ── Tool attribution on activity frames ────────────────────────────────────
+
+  test('specialist_tool and bg_tool_call carry the tool name', () {
+    final st = parseServerFrame(
+            '{"type":"specialist_tool","specialist":"research","tool":"web_search"}')
+        as AgentActivityFrame;
+    expect(st.tool, 'web_search');
+
+    final bg = parseServerFrame(
+            '{"type":"bg_tool_call","task_id":"t1","task_name":"job","name":"browser","args":{}}')
+        as AgentActivityFrame;
+    expect(bg.tool, 'browser');
+
+    // Results are completions, not new calls — no tool attribution.
+    final res = parseServerFrame(
+            '{"type":"bg_tool_result","task_id":"t1","task_name":"job","name":"browser","preview":"ok"}')
+        as AgentActivityFrame;
+    expect(res.tool, isNull);
+  });
+
+  // ── Plan question / approved ───────────────────────────────────────────────
+
+  test('parses plan_question frame', () {
+    final f = parseServerFrame(
+        '{"type":"plan_question","question":"Which account?"}');
+    expect(f, isA<PlanQuestionFrame>());
+    expect((f as PlanQuestionFrame).question, 'Which account?');
+  });
+
+  test('plan_question with missing question falls back to empty', () {
+    final f = parseServerFrame('{"type":"plan_question"}');
+    expect((f as PlanQuestionFrame).question, '');
+  });
+
+  test('parses plan_approved frame', () {
+    final f = parseServerFrame(
+        '{"type":"plan_approved","auto_approve_session":true}');
+    expect(f, isA<PlanApprovedFrame>());
+    expect((f as PlanApprovedFrame).autoApproveSession, isTrue);
+  });
+
+  test('plan_approved defaults auto_approve_session to false', () {
+    final f = parseServerFrame('{"type":"plan_approved"}');
+    expect((f as PlanApprovedFrame).autoApproveSession, isFalse);
+  });
+
+  // ── Usage ──────────────────────────────────────────────────────────────────
+
+  test('parses standalone usage frame', () {
+    final f = parseServerFrame(
+        '{"type":"usage","input_tokens":100,"output_tokens":50,"total_tokens":150,"cost":0.012,"model":"claude"}');
+    expect(f, isA<UsageFrame>());
+    final u = (f as UsageFrame).usage;
+    expect(u.inputTokens, 100);
+    expect(u.outputTokens, 50);
+    expect(u.totalTokens, 150);
+    expect(u.cost, 0.012);
+    expect(u.model, 'claude');
+  });
+
+  test('usage frame with no metrics still parses safely', () {
+    final f = parseServerFrame('{"type":"usage"}');
+    expect(f, isA<UsageFrame>());
+    expect((f as UsageFrame).usage.isEmpty, isTrue);
+  });
+
+  test('done frame carries usage from the WorkSummary payload shape', () {
+    final f = parseServerFrame(
+        '{"type":"done","content":"hi","usage":{"total_tokens":4200,"llm_calls":3,"duration_ms":5500,"total_cost":0.02}}');
+    final d = f as DoneFrame;
+    expect(d.usage, isNotNull);
+    expect(d.usage!.totalTokens, 4200);
+    expect(d.usage!.llmCalls, 3);
+    expect(d.usage!.durationMs, 5500);
+    expect(d.usage!.cost, 0.02);
+  });
+
+  test('done frame with malformed usage yields null usage', () {
+    final f =
+        parseServerFrame('{"type":"done","content":"hi","usage":"oops"}');
+    expect((f as DoneFrame).usage, isNull);
+  });
+
+  // ── TeamLead / TaskRunner lifecycle frames ─────────────────────────────────
+
+  test('parses background_started as a bg activity', () {
+    final f = parseServerFrame(
+            '{"type":"background_started","task_id":"t9","name":"scrape jobs"}')
+        as AgentActivityFrame;
+    expect(f.kind, 'bg');
+    expect(f.subject, 'scrape jobs');
+    expect(f.detail, 'started');
+    expect(f.done, isFalse);
+  });
+
+  test('parses task_started / task_step / task_phase', () {
+    final started = parseServerFrame(
+            '{"type":"task_started","task_id":"t9","name":"scrape jobs","lane":"background","description":"Scrape Upwork"}')
+        as AgentActivityFrame;
+    expect(started.subject, 'scrape jobs');
+    expect(started.detail, 'Scrape Upwork');
+
+    final step = parseServerFrame(
+            '{"type":"task_step","task_id":"t9","name":"scrape jobs","step":"reading inbox","step_count":3}')
+        as AgentActivityFrame;
+    expect(step.detail, 'reading inbox');
+
+    final phase = parseServerFrame(
+            '{"type":"task_phase","task_id":"t9","name":"scrape jobs","phase":"act"}')
+        as AgentActivityFrame;
+    expect(phase.detail, 'act');
+  });
+
+  test('task_completed maps status to terminal flags', () {
+    final done = parseServerFrame(
+            '{"type":"task_completed","task_id":"t9","name":"scrape jobs","status":"done"}')
+        as AgentActivityFrame;
+    expect(done.done, isTrue);
+    expect(done.failed, isFalse);
+
+    final failed = parseServerFrame(
+            '{"type":"task_completed","task_id":"t9","name":"scrape jobs","status":"failed"}')
+        as AgentActivityFrame;
+    expect(failed.done, isTrue);
+    expect(failed.failed, isTrue);
+  });
+
+  test('task frames tolerate missing fields', () {
+    final f = parseServerFrame('{"type":"task_step"}') as AgentActivityFrame;
+    expect(f.subject, 'task');
+    expect(f.detail, 'working…');
+
+    final c =
+        parseServerFrame('{"type":"task_completed"}') as AgentActivityFrame;
+    expect(c.done, isTrue);
+    expect(c.failed, isFalse);
+  });
+
+  // ── Browser events ─────────────────────────────────────────────────────────
+
+  test('browser_event maps to a one-line browser activity', () {
+    final f = parseServerFrame(
+            '{"type":"browser_event","kind":"action","action":"click","detail":"Clicked Sign in"}')
+        as AgentActivityFrame;
+    expect(f.kind, 'browser');
+    expect(f.subject, 'browser');
+    expect(f.detail, 'Clicked Sign in');
+    expect(f.done, isFalse);
+  });
+
+  test('browser_event without detail falls back to action then kind', () {
+    final byAction = parseServerFrame(
+            '{"type":"browser_event","kind":"navigate","action":"goto"}')
+        as AgentActivityFrame;
+    expect(byAction.detail, 'goto');
+
+    final byKind =
+        parseServerFrame('{"type":"browser_event","kind":"snapshot"}')
+            as AgentActivityFrame;
+    expect(byKind.detail, 'snapshot');
+  });
+
+  test('browser_event kind=done marks the row terminal', () {
+    final f = parseServerFrame(
+            '{"type":"browser_event","kind":"done","detail":"flow finished"}')
+        as AgentActivityFrame;
+    expect(f.done, isTrue);
+  });
+
+  test('lazybrain note events on the browser bus are dropped', () {
+    expect(
+        parseServerFrame(
+            '{"type":"browser_event","kind":"note_saved","detail":"saved"}'),
+        isA<UnknownFrame>());
+    expect(
+        parseServerFrame('{"type":"browser_event","kind":"note_deleted"}'),
+        isA<UnknownFrame>());
+  });
+
+  test('encodes a cancel frame', () {
+    expect(encodeCancel(), '{"type":"cancel"}');
+  });
 }

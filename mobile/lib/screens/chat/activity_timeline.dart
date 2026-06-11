@@ -6,6 +6,8 @@
 /// event log accumulated by the reducer. All styling from design tokens.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
@@ -45,7 +47,52 @@ class ActivityTimelineRow extends StatefulWidget {
 class _ActivityTimelineRowState extends State<ActivityTimelineRow> {
   bool _expanded = false;
 
+  /// A running row that received no updates for [_stallAfter] is likely a
+  /// stale replayed frame — swap its spinner for a muted schedule icon so it
+  /// doesn't read as live work forever.
+  bool _stalled = false;
+  Timer? _stallTimer;
+
+  static const Duration _stallAfter = Duration(minutes: 3);
+
   bool get _expandable => widget.activity.events.length > 1;
+
+  bool get _running => !widget.activity.done && !widget.activity.failed;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_running) _armStallTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant ActivityTimelineRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final a = widget.activity;
+    final o = oldWidget.activity;
+    final contentChanged = a.events.length != o.events.length ||
+        a.detail != o.detail ||
+        a.currentTool != o.currentTool ||
+        a.done != o.done ||
+        a.failed != o.failed;
+    if (!contentChanged) return;
+    // Fresh content — the row is alive again; restart the stall clock.
+    _stallTimer?.cancel();
+    _stalled = false;
+    if (_running) _armStallTimer();
+  }
+
+  void _armStallTimer() {
+    _stallTimer = Timer(_stallAfter, () {
+      if (mounted) setState(() => _stalled = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _stallTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +119,7 @@ class _ActivityTimelineRowState extends State<ActivityTimelineRow> {
               activity: a,
               expanded: _expanded,
               expandable: _expandable,
+              stalled: _stalled,
             ),
             if (_expanded) _EventLog(activity: a),
           ],
@@ -88,15 +136,21 @@ class _SummaryLine extends StatelessWidget {
     required this.activity,
     required this.expanded,
     required this.expandable,
+    required this.stalled,
   });
 
   final AgentActivity activity;
   final bool expanded;
   final bool expandable;
 
+  /// Running row with no updates for too long — render a muted schedule
+  /// icon instead of an ever-spinning progress indicator.
+  final bool stalled;
+
   @override
   Widget build(BuildContext context) {
     final a = activity;
+    final running = !a.done && !a.failed;
     final statusColor = a.failed
         ? AppColors.error
         : a.done
@@ -110,6 +164,9 @@ class _SummaryLine extends StatelessWidget {
     } else if (a.done) {
       statusIcon = const Icon(Icons.check_circle_outline,
           size: 12, color: AppColors.success);
+    } else if (stalled) {
+      statusIcon =
+          const Icon(Icons.schedule, size: 12, color: AppColors.textMuted);
     } else {
       statusIcon = const SizedBox(
         width: 12,
@@ -121,16 +178,33 @@ class _SummaryLine extends StatelessWidget {
       );
     }
 
+    final baseStyle = AppText.caption.copyWith(
+      color: a.done || a.failed ? statusColor : AppColors.textSecondary,
+      fontWeight: FontWeight.w600,
+    );
+
     final toolCount = a.toolsUsed.length;
-    final parts = <String>[
-      a.subject,
-      if (toolCount > 0) '$toolCount ${toolCount == 1 ? 'tool' : 'tools'}',
-      a.failed
-          ? 'failed'
-          : a.done
-              ? 'done'
-              : a.detail,
-    ];
+    final spans = <TextSpan>[TextSpan(text: a.subject)];
+    if (running) {
+      if (toolCount > 0) {
+        spans.add(TextSpan(
+            text: ' · $toolCount ${toolCount == 1 ? 'tool' : 'tools'}'));
+      }
+      if (a.currentTool != null) {
+        // Live tool segment — accent-tinted so the eye lands on it.
+        spans.add(TextSpan(
+          text: ' · using ${a.currentTool}…',
+          style: baseStyle.copyWith(color: AppColors.accent),
+        ));
+      } else {
+        spans.add(TextSpan(text: ' · ${a.detail}'));
+      }
+    } else {
+      if (toolCount > 0) {
+        spans.add(TextSpan(text: ' · ${_toolSummary(a.toolsUsed)}'));
+      }
+      spans.add(TextSpan(text: a.failed ? ' · failed' : ' · done'));
+    }
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -140,12 +214,8 @@ class _SummaryLine extends StatelessWidget {
         statusIcon,
         const SizedBox(width: AppSpacing.xs),
         Flexible(
-          child: Text(
-            parts.join(' · '),
-            style: AppText.caption.copyWith(
-              color: a.done || a.failed ? statusColor : AppColors.textSecondary,
-              fontWeight: FontWeight.w600,
-            ),
+          child: Text.rich(
+            TextSpan(style: baseStyle, children: spans),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
@@ -244,6 +314,14 @@ class ActivityEventList extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Up to five tool names joined with ', ', plus a ' +N' overflow suffix —
+/// replaces the bare "N tools" count once a row settles.
+String _toolSummary(List<String> tools) {
+  const cap = 5;
+  if (tools.length <= cap) return tools.join(', ');
+  return '${tools.take(cap).join(', ')} +${tools.length - cap}';
 }
 
 IconData _kindIcon(String kind) {

@@ -177,12 +177,13 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
     // resolved yet). The first `router.go('/tasks')` above can then be undone by
     // the auth redirect (→ `/login` → `/home`) before the destination screen
     // ever mounts, stranding a still-set pending action. When auth settles to
-    // `authenticated`, RE-DRIVE the navigation for any non-chat action that is
-    // still pending so the destination finally mounts and drains it. (`chat`
-    // self-clears above; a leftover non-chat action means it never landed.)
+    // an authed state (full OR offline), RE-DRIVE the navigation for any
+    // non-chat action that is still pending so the destination finally mounts
+    // and drains it. (`chat` self-clears above; a leftover non-chat action
+    // means it never landed.)
     ref.listen<AuthState>(authProvider, (prev, next) {
-      if (prev?.status == AuthStatus.authenticated) return;
-      if (next.status != AuthStatus.authenticated) return;
+      if (prev?.isAuthed == true) return;
+      if (!next.isAuthed) return;
       final pending = ref.read(pendingActionProvider);
       if (pending == null) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -191,6 +192,22 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
         final still = ref.read(pendingActionProvider);
         if (still != null) _navigateForAction(router, still);
       });
+    });
+
+    // SILENT UPGRADE: when the backend becomes reachable again (false→true
+    // edge) while the session is in offline mode, revalidate in the
+    // background. checkSession skips the `loading` flash for already-authed
+    // states, so the upgrade (→ authenticated) — or a revocation (→
+    // unauthenticated on a real 401) — happens without UI churn. This hook
+    // lives HERE (not in tasks_provider, which owns reachableProvider) because
+    // tasks_provider already imports auth_provider — wiring it there would
+    // create an import cycle. Covered by test/core/reconnect_upgrade_test.dart.
+    ref.listen<bool>(reachableProvider, (prev, next) {
+      if (prev != false || next != true) return;
+      if (ref.read(authProvider).status != AuthStatus.authenticatedOffline) {
+        return;
+      }
+      ref.read(authProvider.notifier).checkSession();
     });
 
     return MaterialApp.router(

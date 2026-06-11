@@ -9,6 +9,7 @@ import '../core/due_date.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../models/task.dart';
+import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../ui/ui.dart';
@@ -108,8 +109,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final tasksState = ref.watch(tasksProvider);
     final budgetsState = ref.watch(budgetsProvider);
     final messages = ref.watch(chatControllerProvider);
+    final auth = ref.watch(authProvider);
 
-    final syncState = !isReachable
+    // Offline MODE (session validated from the local cache, not the server)
+    // is a stronger signal than a mid-session reachability blip — surface it
+    // with a personalized banner so the user knows why online-only surfaces
+    // are degraded while Tasks/Notes/Budgets keep working.
+    final offlineSession = auth.status == AuthStatus.authenticatedOffline;
+    final offline = !isReachable || offlineSession;
+
+    final syncState = offline
         ? LzSyncState.offline
         : (tasksState.isLoading || budgetsState.isLoading)
             ? LzSyncState.syncing
@@ -127,7 +136,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ],
       ),
-      banner: isReachable ? null : const LzBanner.offline(safeAreaTop: false),
+      banner: !offline
+          ? null
+          : LzBanner.offline(
+              safeAreaTop: false,
+              message: offlineSession
+                  ? 'Offline mode — signed in as '
+                      '${auth.user?.displayName ?? auth.user?.username ?? 'you'}; '
+                      'changes will sync'
+                  : 'Computer offline — changes will sync',
+            ),
       body: LzRefresh(
         onRefresh: _onRefresh,
         child: ListView(

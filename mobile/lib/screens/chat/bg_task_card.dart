@@ -25,6 +25,10 @@ class _BgTaskCardState extends State<BgTaskCard> {
   @override
   Widget build(BuildContext context) {
     final result = widget.result;
+    // The result text already arrived as the consolidated assistant reply —
+    // render header-only (name + status icon + duration) so the user sees the
+    // task settled without the same wall of text twice.
+    final headerOnly = result.duplicateOfReply;
     final success = result.success;
     final accentColor = success ? AppColors.success : AppColors.error;
     final bgColor = accentColor.withValues(alpha: 0.10);
@@ -60,7 +64,8 @@ class _BgTaskCardState extends State<BgTaskCard> {
                         style: AppText.label.copyWith(color: accentColor),
                         overflow: TextOverflow.ellipsis,
                       ),
-                      if (result.detail != null &&
+                      if (!headerOnly &&
+                          result.detail != null &&
                           result.detail!.isNotEmpty) ...[
                         const SizedBox(height: AppSpacing.xs),
                         Text(
@@ -82,7 +87,7 @@ class _BgTaskCardState extends State<BgTaskCard> {
                           ),
                         ),
                       ],
-                      if (result.events.isNotEmpty) ...[
+                      if (!headerOnly && result.events.isNotEmpty) ...[
                         const SizedBox(height: AppSpacing.sm),
                         _activityToggle(),
                         if (_logExpanded) ...[

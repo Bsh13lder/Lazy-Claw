@@ -44,12 +44,22 @@ String relativeTime(String iso) {
 
 /// A single agent task row — status dot, name, lane badge, a one-line subtitle
 /// (current tool / phase while running, result preview once settled) and the
-/// elapsed / duration on the right. Tapping opens the detail sheet.
+/// elapsed / duration on the right. Tapping opens the detail sheet; running
+/// rows additionally show a stop button when [onCancel] is provided.
 class ActivityRow extends StatelessWidget {
-  const ActivityRow({super.key, required this.task, required this.onTap});
+  const ActivityRow({
+    super.key,
+    required this.task,
+    required this.onTap,
+    this.onCancel,
+  });
 
   final AgentTask task;
   final VoidCallback onTap;
+
+  /// Fires `POST /api/agents/cancel` for this task. Only rendered while the
+  /// task is running.
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -113,6 +123,16 @@ class ActivityRow extends StatelessWidget {
               ],
             ),
           ),
+          if (task.isRunning && onCancel != null) ...[
+            const SizedBox(width: AppSpacing.sm),
+            LzIconButton(
+              icon: Icons.stop_rounded,
+              color: AppColors.error,
+              filled: true,
+              tooltip: 'Cancel task',
+              onPressed: onCancel,
+            ),
+          ],
         ],
       ),
     );

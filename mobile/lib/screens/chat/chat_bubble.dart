@@ -106,6 +106,10 @@ class _BubbleContainer extends StatelessWidget {
             const SizedBox(height: AppSpacing.sm),
           ],
           _BubbleContent(m: m, isUser: isUser),
+          if (isUser && m.sendState != SendState.sent) ...[
+            const SizedBox(height: AppSpacing.xs),
+            _SendStateHint(state: m.sendState),
+          ],
           if (m.toolActivities.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
             Wrap(
@@ -189,6 +193,35 @@ class _BubbleContent extends StatelessWidget {
         h3: AppText.label.copyWith(color: AppColors.textPrimary),
         listBullet: AppText.body.copyWith(color: AppColors.accent),
       ),
+    );
+  }
+}
+
+/// Small delivery hint under a user bubble: "Sending…" while the message is
+/// queued in the socket's offline outbox, "Not delivered" once its TTL
+/// expired (the user retries by resending). Hidden for normal sent bubbles.
+class _SendStateHint extends StatelessWidget {
+  const _SendStateHint({required this.state});
+  final SendState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = state == SendState.failed;
+    final color = failed ? AppColors.error : AppColors.textMuted;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          failed ? Icons.error_outline : Icons.schedule,
+          size: 12,
+          color: color,
+        ),
+        const SizedBox(width: AppSpacing.xs),
+        Text(
+          failed ? 'Not delivered' : 'Sending…',
+          style: AppText.caption.copyWith(color: color),
+        ),
+      ],
     );
   }
 }

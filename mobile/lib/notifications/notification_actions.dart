@@ -64,9 +64,17 @@ Future<bool> completeTaskFromPayload(String? payload) async {
   // Resilient open: a transient lock (the foreground app or the sync isolate
   // briefly holds the file) is retried rather than degraded to a throwaway
   // in-memory DB — completing into an ephemeral DB would lose the mutation.
+  //
+  // DEDICATED connection (singleInstance: false): this runs in a background
+  // isolate on a killed-app action tap, but ALSO in the MAIN isolate on a
+  // foreground "Done" tap (LocalNotifications._onResponse). With sqflite's
+  // default singleInstance: true it would receive the very same handle as the
+  // foreground appDatabaseProvider connection (handles are keyed by PATH), and
+  // the close() in the finally below would kill the app's DB out from under it
+  // (DatabaseException(database_closed)). A dedicated handle is safe to close.
   AppDbResult? opened;
   try {
-    opened = await openAppDbWithFallback();
+    opened = await openAppDbWithFallback(singleInstance: false);
     final db = opened.db;
     final result = await TaskDao(db).applyLocalComplete(taskId);
     return result != null;

@@ -7,7 +7,10 @@ import 'package:lazyclaw_mobile/repositories/activity_repository.dart';
 
 class _FakeActivityTransport implements ActivityTransport {
   String? lastPath;
+  String? lastPostPath;
+  Map<String, dynamic>? lastPostBody;
   final Map<String, dynamic> response;
+  Map<String, dynamic> postResponse = const {'success': true};
   _FakeActivityTransport(this.response);
 
   @override
@@ -17,6 +20,16 @@ class _FakeActivityTransport implements ActivityTransport {
   }) async {
     lastPath = path;
     return response;
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
+    lastPostPath = path;
+    lastPostBody = body;
+    return postResponse;
   }
 }
 
@@ -29,6 +42,17 @@ class _ThrowingActivityTransport implements ActivityTransport {
   Future<Map<String, dynamic>> getJson(
     String path, {
     Map<String, dynamic>? queryParams,
+  }) async {
+    throw DioException(
+      requestOptions: RequestOptions(path: path),
+      error: ApiError(503, 'Service unavailable'),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
   }) async {
     throw DioException(
       requestOptions: RequestOptions(path: path),
@@ -168,6 +192,64 @@ void main() {
           isA<ApiError>(),
         )),
       );
+    });
+  });
+
+  group('ActivityRepository.cancelTask', () {
+    test('POSTs /api/agents/cancel with the task_id body', () async {
+      final t = _FakeActivityTransport({});
+      final ok = await ActivityRepository(t).cancelTask('t42');
+      expect(t.lastPostPath, '/api/agents/cancel');
+      expect(t.lastPostBody, {'task_id': 't42'});
+      expect(ok, isTrue);
+    });
+
+    test('returns false when the server reports failure', () async {
+      final t = _FakeActivityTransport({})
+        ..postResponse = {
+          'success': false,
+          'error': 'Task not found or not cancellable',
+        };
+      expect(await ActivityRepository(t).cancelTask('gone'), isFalse);
+    });
+
+    test('returns false on a malformed response', () async {
+      final t = _FakeActivityTransport({})..postResponse = {};
+      expect(await ActivityRepository(t).cancelTask('x'), isFalse);
+    });
+
+    test('propagates the production DioException(ApiError) shape', () async {
+      final repo = ActivityRepository(_ThrowingActivityTransport());
+      await expectLater(
+        repo.cancelTask('x'),
+        throwsA(isA<DioException>()
+            .having((e) => e.error, 'error', isA<ApiError>())),
+      );
+    });
+  });
+
+  group('ActivityRepository.cancelAll', () {
+    test('POSTs /api/agents/cancel-all and returns the count', () async {
+      final t = _FakeActivityTransport({})
+        ..postResponse = {
+          'success': true,
+          'data': {
+            'cancelled': [
+              {'task_id': 'a', 'name': 'A'},
+              {'task_id': 'b', 'name': 'B'},
+            ],
+            'count': 2,
+          },
+        };
+      final count = await ActivityRepository(t).cancelAll();
+      expect(t.lastPostPath, '/api/agents/cancel-all');
+      expect(t.lastPostBody, isNull);
+      expect(count, 2);
+    });
+
+    test('returns 0 on a malformed response', () async {
+      final t = _FakeActivityTransport({})..postResponse = {'success': true};
+      expect(await ActivityRepository(t).cancelAll(), 0);
     });
   });
 

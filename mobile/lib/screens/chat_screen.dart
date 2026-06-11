@@ -31,6 +31,7 @@ import '../repositories/chat_history_repository.dart';
 import '../ui/ui.dart';
 import 'chat/bg_task_card.dart';
 import 'chat/chat_bubble.dart';
+import 'chat/connect_error.dart';
 import 'chat/mode_switcher.dart';
 import 'chat/plan_card.dart';
 import 'inbox/inbox_screen.dart';
@@ -141,9 +142,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       // Catch up on any server notifications missed while the app was away.
       // Best-effort + self-cancelling on error — never blocks the chat UI.
       unawaited(pullNotificationsFeed(ref.read(apiClientProvider)));
-    } catch (e) {
+    } catch (e, stack) {
+      // Log the raw failure for diagnosis; the banner shows a short human
+      // message instead of a raw toString (which leaked internals like
+      // `DatabaseException(database_closed 1)` to the user).
+      debugPrint('ChatScreen._connect failed: $e');
+      debugPrintStack(stackTrace: stack, label: 'ChatScreen._connect');
       if (mounted) {
-        setState(() => _connectError = e.toString());
+        setState(() => _connectError = connectErrorMessage(e));
       }
     }
   }

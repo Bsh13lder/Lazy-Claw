@@ -18,4 +18,13 @@ class User {
         displayName: json['display_name'] as String?,
         role: (json['role'] as String?) ?? 'user',
       );
+
+  /// Mirror of [fromJson] (same field names) so the offline auth cache can
+  /// round-trip the signed-in user through secure storage.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'username': username,
+        'display_name': displayName,
+        'role': role,
+      };
 }

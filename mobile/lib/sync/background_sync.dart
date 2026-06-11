@@ -51,7 +51,14 @@ Future<void> runHeadlessSync() async {
   WidgetsFlutterBinding.ensureInitialized();
   final baseUrl = await ServerConfig.load();
   final client = ApiClient(baseUrl: baseUrl);
-  final db = await openAppDb();
+  // DEDICATED connection (singleInstance: false): with sqflite's default
+  // singleInstance: true, native handles are keyed by PATH — this background
+  // isolate would receive the SAME native handle as the foreground app's
+  // appDatabaseProvider connection, and the close() in the finally below would
+  // kill the app's DB out from under it (DatabaseException(database_closed) on
+  // the next foreground query). A dedicated handle is safe to close; WAL +
+  // busy_timeout (configureAppDb) already make the two connections coexist.
+  final db = await openAppDb(singleInstance: false);
   try {
     // Tasks
     try {

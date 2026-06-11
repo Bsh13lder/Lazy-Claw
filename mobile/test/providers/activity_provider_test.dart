@@ -9,6 +9,11 @@ class _Transport implements ActivityTransport {
   Object? throwError;
   int calls = 0;
 
+  Map<String, dynamic> postResponse = const {'success': true};
+  Object? postThrowError;
+  int postCalls = 0;
+  String? lastPostPath;
+
   @override
   Future<Map<String, dynamic>> getJson(
     String path, {
@@ -17,6 +22,17 @@ class _Transport implements ActivityTransport {
     calls++;
     if (throwError != null) throw throwError!;
     return next ?? const {};
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
+    postCalls++;
+    lastPostPath = path;
+    if (postThrowError != null) throw postThrowError!;
+    return postResponse;
   }
 }
 
@@ -72,6 +88,61 @@ void main() {
       await n.refresh();
       expect(n.state.isLoading, isFalse);
       expect(n.state.snapshot.running, hasLength(1));
+    });
+
+    test('cancelTask() fires the cancel and refreshes the snapshot', () async {
+      final t = _Transport()..next = _oneRunning();
+      final n = ActivityNotifier(ActivityRepository(t));
+      await n.load();
+      final fetchesBefore = t.calls;
+
+      final ok = await n.cancelTask('a1');
+
+      expect(ok, isTrue);
+      expect(t.postCalls, 1);
+      expect(t.lastPostPath, '/api/agents/cancel');
+      expect(t.calls, greaterThan(fetchesBefore),
+          reason: 'snapshot refreshed after cancel');
+    });
+
+    test('cancelTask() returns false on failure but still refreshes',
+        () async {
+      final t = _Transport()
+        ..next = _oneRunning()
+        ..postThrowError = StateError('boom');
+      final n = ActivityNotifier(ActivityRepository(t));
+      await n.load();
+      final fetchesBefore = t.calls;
+
+      final ok = await n.cancelTask('a1');
+
+      expect(ok, isFalse);
+      expect(n.state.hasData, isTrue, reason: 'state survives the failure');
+      expect(t.calls, greaterThan(fetchesBefore));
+    });
+
+    test('cancelAll() returns the server count and refreshes', () async {
+      final t = _Transport()
+        ..next = _oneRunning()
+        ..postResponse = {
+          'success': true,
+          'data': {'cancelled': [], 'count': 3},
+        };
+      final n = ActivityNotifier(ActivityRepository(t));
+      await n.load();
+
+      final count = await n.cancelAll();
+
+      expect(count, 3);
+      expect(t.lastPostPath, '/api/agents/cancel-all');
+    });
+
+    test('cancelAll() returns 0 on failure', () async {
+      final t = _Transport()
+        ..next = _oneRunning()
+        ..postThrowError = StateError('down');
+      final n = ActivityNotifier(ActivityRepository(t));
+      expect(await n.cancelAll(), 0);
     });
   });
 }

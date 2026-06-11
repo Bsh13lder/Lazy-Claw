@@ -291,24 +291,58 @@ String generateDbKey([Random? random]) {
   return base64Url.encode(bytes);
 }
 
+/// onCreate hook shared by every open variant: apply the full schema.
+Future<void> _onCreateAppDb(Database db, int version) =>
+    createAppDbSchema(db);
+
+/// Build the open options for the encrypted app DB — the ONE place that
+/// decides how a connection is opened (version, lifecycle callbacks, SQLCipher
+/// [password], and [singleInstance]).
+///
+/// [singleInstance] (default true — sqflite's own default) MUST be false for
+/// opens made from a BACKGROUND isolate (WorkManager sync, notification-action
+/// handler): sqflite keys native handles by PATH when singleInstance is true,
+/// so a background open of the same path returns the SAME native handle as the
+/// foreground app's long-lived connection — and the background isolate's
+/// `db.close()` then kills the foreground connection out from under it
+/// (`DatabaseException(database_closed)` on the next foreground query).
+/// With singleInstance false the caller gets a DEDICATED handle that is safe
+/// (and correct) to close when done.
+///
+/// Returns a NEW options object on every call. Pure — unit-tested directly.
+SqlCipherOpenDatabaseOptions buildAppDbOpenOptions({
+  required String password,
+  bool singleInstance = true,
+}) {
+  return SqlCipherOpenDatabaseOptions(
+    version: kAppDbVersion,
+    password: password,
+    onConfigure: configureAppDb,
+    onCreate: _onCreateAppDb,
+    onUpgrade: migrateAppDb,
+    singleInstance: singleInstance,
+  );
+}
+
 /// Open the encrypted on-device database. The passphrase is fetched from (or
 /// minted into) the platform keychain via [loadOrCreateDbKey]. Pass [pathOverride]
 /// in tests/tooling; production resolves the app documents directory.
+///
+/// Pass `singleInstance: false` from BACKGROUND isolates so the returned
+/// handle is dedicated and closing it cannot affect the foreground app's
+/// connection — see [buildAppDbOpenOptions] for the full rationale.
 Future<Database> openAppDb({
   FlutterSecureStorage? storage,
   String? pathOverride,
+  bool singleInstance = true,
 }) async {
   final key = await loadOrCreateDbKey(storage: storage);
   final dbPath = pathOverride ?? await _defaultDbPath();
-  return openDatabase(
+  // Same call the package's top-level openDatabase makes — routed through the
+  // tested options builder so every open variant shares ONE config source.
+  return databaseFactory.openDatabase(
     dbPath,
-    password: key,
-    version: kAppDbVersion,
-    onConfigure: configureAppDb,
-    onCreate: (db, version) async {
-      await createAppDbSchema(db);
-    },
-    onUpgrade: migrateAppDb,
+    options: buildAppDbOpenOptions(password: key, singleInstance: singleInstance),
   );
 }
 
@@ -392,15 +426,25 @@ bool isDatabaseLockedError(Object? e) {
 /// [openImpl] and [openInMemory] are test seams. By default [openImpl] calls
 /// [openAppDb] (the real encrypted file DB) and [openInMemory] opens an
 /// ephemeral [inMemoryDatabasePath] DB seeded with [createAppDbSchema].
+///
+/// [singleInstance] is forwarded to [openAppDb] — pass false from BACKGROUND
+/// isolates (see [buildAppDbOpenOptions]) so the handle is dedicated and safe
+/// to close. (The in-memory fallback needs no flag: sqflite never shares
+/// in-memory databases between opens.)
 Future<AppDbResult> openAppDbWithFallback({
   FlutterSecureStorage? storage,
   String? pathOverride,
   int retries = 2,
+  bool singleInstance = true,
   Future<Database> Function()? openImpl,
   Future<Database> Function()? openInMemory,
 }) async {
   final open = openImpl ??
-      () => openAppDb(storage: storage, pathOverride: pathOverride);
+      () => openAppDb(
+            storage: storage,
+            pathOverride: pathOverride,
+            singleInstance: singleInstance,
+          );
   final openMem = openInMemory ?? _openInMemoryAppDb;
 
   Object? lastError;

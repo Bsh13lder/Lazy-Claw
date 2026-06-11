@@ -47,6 +47,55 @@ def set_chat_ws_deps(lane_queue, registry, task_runner=None, team_lead=None) -> 
 # would crash send_json.
 _BG_META_DROP = frozenset({"bg_task_id", "bg_task_name", "summary"})
 
+# Event kinds that mark a task as finished: TaskRunner/dispatcher emit
+# background_done / background_failed; the TeamLead bridge emits
+# task_completed.
+_TASK_TERMINAL_KINDS = frozenset(
+    {"background_done", "background_failed", "task_completed"}
+)
+
+
+def _initial_paint_events(events, running_task_ids=None) -> list:
+    """Filter ring-buffer events down to what's safe to replay on (re)connect.
+
+    Relies on the task_event_bus ring-ordering invariant: terminal events
+    (``_TASK_TERMINAL_KINDS``) always publish AFTER their non-terminal
+    siblings into the same per-user ring — so a terminal sibling anywhere
+    in ``events`` proves the task already finished.
+
+    Rules:
+    - ``background_done`` / ``background_failed`` are never replayed (the
+      brain already incorporated them; re-painting duplicates completion
+      cards in chat).
+    - ``task_completed`` IS replayed (web Activity repaints from it).
+    - Non-terminal events whose task has a terminal sibling in the window
+      are dropped — replaying them alone mounts a spinner that never
+      settles.
+    - Lost-terminal guard: a lone ``background_started`` whose terminal
+      sibling aged out of the ring is dropped when ``running_task_ids``
+      says the task is no longer running. Applies ONLY to
+      ``background_started`` — TeamLead ``task_*`` ids aren't TaskRunner
+      ids. ``None`` means the runner is unwired/unknown → fail-open,
+      never false-drop.
+    """
+    finished_ids = frozenset(
+        e.task_id for e in events if e.kind in _TASK_TERMINAL_KINDS
+    )
+    out = []
+    for evt in events:
+        if evt.kind in ("background_done", "background_failed"):
+            continue
+        if evt.kind != "task_completed" and evt.task_id in finished_ids:
+            continue
+        if (
+            evt.kind == "background_started"
+            and running_task_ids is not None
+            and evt.task_id not in running_task_ids
+        ):
+            continue
+        out.append(evt)
+    return out
+
 
 def _safe_metadata(metadata) -> dict:
     """Return a JSON-safe copy of an event's metadata for client forwarding.
@@ -648,12 +697,25 @@ async def chat_websocket(ws: WebSocket):
         # events are NOT replayed — the brain has already incorporated
         # them (or will, via pending_subagent_notes), so re-painting them
         # would duplicate "✅ Background task completed" cards in chat.
+        # _initial_paint_events also drops non-terminal events of tasks
+        # that already finished (terminal sibling in the ring, or absent
+        # from the runner's running set) — replaying those alone mounted
+        # a spinner that never settled on mobile/web.
         try:
-            for evt in task_event_bus.recent_events(
+            running_ids = None
+            if _task_runner is not None:
+                try:
+                    running_ids = frozenset(
+                        t["id"] for t in _task_runner.list_running(user.id)
+                    )
+                except Exception:
+                    logger.debug(
+                        "list_running for initial paint failed", exc_info=True,
+                    )
+            events = task_event_bus.recent_events(
                 user.id, limit=10, max_age_s=300,
-            ):
-                if evt.kind in ("background_done", "background_failed"):
-                    continue
+            )
+            for evt in _initial_paint_events(events, running_ids):
                 payload = {"type": evt.kind, **evt.to_frame()}
                 if ws.client_state == WebSocketState.CONNECTED:
                     await ws.send_json(payload)

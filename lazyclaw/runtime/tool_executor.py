@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from lazyclaw.llm.providers.base import ToolCall
+from lazyclaw.permissions.audit import log_action
 from lazyclaw.permissions.models import ALLOW, DENY
 from lazyclaw.runtime.skill_lesson_auto import (
     outcome_from_result,
@@ -45,6 +46,23 @@ class ToolExecutor:
         # gates on config presence). Wired by agent.py at construction time.
         self._config = config
 
+    async def _audit(self, user_id: str, action: str, tool_call: ToolCall) -> None:
+        """Best-effort audit write (2026-06-10 audit, Phase 3).
+
+        ``log_action`` is itself fire-and-forget, but the wiring is also
+        wrapped so a bug here can never break tool execution.
+        """
+        if self._config is None:
+            return
+        try:
+            await log_action(
+                self._config, user_id, action,
+                skill_name=tool_call.name,
+                arguments=tool_call.arguments or None,
+            )
+        except Exception:
+            logger.debug("audit write swallowed for %s", tool_call.name, exc_info=True)
+
     async def execute(
         self,
         tool_call: ToolCall,
@@ -72,6 +90,7 @@ class ToolExecutor:
             resolved = await check_fn(user_id, tool_call.name)
             if resolved.level == DENY:
                 logger.info("Tool %s denied for user %s", tool_call.name, user_id)
+                await self._audit(user_id, "tool_denied", tool_call)
                 return f"Error: Tool '{tool_call.name}' is not permitted. The user has denied this action."
             if resolved.level != ALLOW:
                 # Requires approval — return marker for the agent loop
@@ -112,6 +131,7 @@ class ToolExecutor:
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
             )
+            await self._audit(user_id, "tool_executed", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
@@ -154,6 +174,7 @@ class ToolExecutor:
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
             )
+            await self._audit(user_id, "tool_approved", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout

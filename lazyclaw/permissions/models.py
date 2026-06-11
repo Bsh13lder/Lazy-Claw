@@ -96,9 +96,12 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     # safety is the scope guard, not the per-call approval prompt.
     "bounty": ALLOW,
     # ── Sensitive (ASK) — KEEP gated ─────────────────────────────────────
-    "vault": ASK,            # credentials / API keys
+    # NOTE: vault skills (vault_set/get/list/delete) live in the
+    # `security` category — there is deliberately no separate "vault"
+    # category (a dead `"vault": ASK` entry was removed 2026-06-10; no
+    # skill ever returned category="vault").
     "computer": ASK,         # shell / subprocess execution
-    "security": ASK,         # security operations
+    "security": ASK,         # security operations incl. credential vault
     "payment": ASK,          # money — always confirm
     "permissions": ASK,      # meta-op on permissions itself; gating prevents
                              # agent from silently widening its own access
@@ -107,6 +110,24 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
                              # Telegram, but gating the skill itself
                              # keeps the brain from spamming approvals
                              # during an unsupervised audit run.
+}
+
+# Skill-name overlay consulted AFTER user skill_overrides but BEFORE any
+# category default (user-set or global). Money-moving MCP tools live in
+# the blanket-ALLOW ``mcp`` category, so without this the brain can
+# accept a binding contract or start a payment-release timer with zero
+# ask-back (2026-06-10 security audit). Keys are BARE tool names — MCP
+# skills register as ``mcp_<server-uuid>_<tool>`` and are matched after
+# stripping that prefix. A user can still re-open one explicitly via a
+# per-skill override (``/allow upwork_accept_offer``); a blanket
+# category default must never do so silently.
+SENSITIVE_SKILL_DEFAULTS: dict[str, str] = {
+    "upwork_accept_offer": ASK,      # creates a binding contract
+    "upwork_submit_milestone": ASK,  # starts the 14-day payment-release timer
+    "payment": ASK,                  # card save/retrieve — category is already
+                                     # ASK; listing it here additionally routes
+                                     # it into Telegram's real ask-back (the
+                                     # callback auto-approved bare ASK levels)
 }
 
 
@@ -132,7 +153,7 @@ class ResolvedPermission:
 
     skill_name: str
     level: str  # allow | ask | deny
-    source: str  # category_default | skill_override
+    source: str  # category_default | skill_override | sensitive_default
 
 
 @dataclass(frozen=True)

@@ -88,6 +88,7 @@ async def apply_permission_change(
         await update_permission_settings(
             config, user_id, {"category_defaults": cat_defaults},
         )
+        await _audit_permission_change(config, user_id, target, level)
         return {"target": target, "kind": "category", "level": level}
 
     overrides = dict(settings.get("skill_overrides", {}))
@@ -95,7 +96,25 @@ async def apply_permission_change(
     await update_permission_settings(
         config, user_id, {"skill_overrides": overrides},
     )
+    await _audit_permission_change(config, user_id, target, level)
     return {"target": target, "kind": "skill", "level": level}
+
+
+async def _audit_permission_change(
+    config: Config, user_id: str, target: str, level: str,
+) -> None:
+    """Best-effort audit write — never breaks the permission change."""
+    try:
+        from lazyclaw.permissions.audit import log_action
+
+        await log_action(
+            config, user_id, "permission_changed",
+            skill_name=target,
+            arguments={"level": level},
+            source="channel",
+        )
+    except Exception:
+        logger.debug("permission-change audit swallowed", exc_info=True)
 
 
 async def update_permission_settings(

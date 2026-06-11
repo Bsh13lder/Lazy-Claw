@@ -95,6 +95,66 @@ class VaultListSkill(BaseSkill):
         return "Stored credentials:\n" + "\n".join(f"- {k}" for k in keys)
 
 
+class VaultGetSkill(BaseSkill):
+    """Gated retrieval — the missing read path (2026-06-10 audit, Phase 4).
+
+    Lives in the ``security`` category (default ASK) so the user approves
+    every secret read. The plaintext value necessarily enters the LLM
+    context after approval — that is the point of retrieval — but it is
+    never logged here, and persisted tool arguments are encrypted by the
+    metadata codec.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "security"
+
+    @property
+    def name(self) -> str:
+        return "vault_get"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Retrieve a secret from the encrypted vault by key (use "
+            "`vault_list` to see stored names). Requires user approval. "
+            "Use the value immediately for the task at hand — NEVER echo "
+            "it back to the user, save it to memory, or write it to a file."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Credential name (e.g., 'openai_api_key')",
+                },
+            },
+            "required": ["key"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Vault not configured"
+        params = params or {}
+        key = (params.get("key") or "").strip()
+        if not key:
+            return (
+                "Error: `key` is required. Call `vault_list` first to see "
+                "stored credential names."
+            )
+        from lazyclaw.crypto.vault import get_credential
+        value = await get_credential(self._config, user_id, key)
+        if value is None:
+            return f"Credential '{key}' not found. Call `vault_list` to see stored names."
+        return f"Credential '{key}': {value}"
+
+
 class VaultDeleteSkill(BaseSkill):
     def __init__(self, config=None):
         self._config = config

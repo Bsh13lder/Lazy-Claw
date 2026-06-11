@@ -212,7 +212,9 @@ async def test_permissions_get_category_defaults(perms_client) -> None:
     cats = r.json()["data"]["category_defaults"]
     # Spot-check defaults from DEFAULT_CATEGORY_PERMISSIONS
     assert cats.get("core") == "allow"
-    assert cats.get("vault") == "ask"
+    # vault skills live under `security` (the dead "vault" category was
+    # removed 2026-06-10 — no skill ever returned category="vault")
+    assert cats.get("security") == "ask"
     assert cats.get("computer") == "ask"
     assert cats.get("tasks") == "allow"
 

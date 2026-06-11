@@ -112,10 +112,12 @@ class SkillRegistry:
         self.register(SendEmailSkill(config=config, registry=self))
 
         from lazyclaw.skills.builtin.vault import (
-            VaultSetSkill, VaultListSkill, VaultDeleteSkill, SaveSiteLoginSkill,
+            VaultSetSkill, VaultGetSkill, VaultListSkill, VaultDeleteSkill,
+            SaveSiteLoginSkill,
         )
 
         self.register(VaultSetSkill(config=config))
+        self.register(VaultGetSkill(config=config))
         self.register(VaultListSkill(config=config))
         self.register(VaultDeleteSkill(config=config))
         self.register(SaveSiteLoginSkill(config=config))

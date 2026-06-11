@@ -27,9 +27,11 @@ from telegram.ext import (
 
 from lazyclaw.channels.base import ChannelAdapter, OutboundMessage
 from lazyclaw.config import Config
+from lazyclaw.permissions.models import SENSITIVE_SKILL_DEFAULTS
 from lazyclaw.runtime.agent import Agent
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime.session_resolver import get_primary_session_id
+from lazyclaw.skills.tool_namespace import bare_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,23 @@ def get_telegram_adapter() -> "TelegramAdapter | None":
 # Retry config for network-flaky Telegram sends
 _SEND_MAX_RETRIES = 3
 _SEND_RETRY_BASE_DELAY = 2.0  # seconds
+
+# Pending sensitive-tool approvals keyed by chat_id (2026-06-10 audit).
+# The lane queue runs one foreground turn per user, so at most one
+# approval is pending per chat; a new registration denies a stale one.
+_PENDING_TOOL_APPROVALS: dict[int, asyncio.Future] = {}
+_TOOL_APPROVAL_TIMEOUT = 300.0  # seconds — matches permissions approval expiry
+
+
+def resolve_tool_approval(chat_id: int, *, approved: bool) -> None:
+    """Resolve a pending sensitive-tool approval (inline-button tap).
+
+    No-op when nothing is pending for the chat — the button may be tapped
+    after the request already timed out fail-closed.
+    """
+    future = _PENDING_TOOL_APPROVALS.pop(chat_id, None)
+    if future is not None and not future.done():
+        future.set_result(approved)
 
 
 def _friendly_model_name(model: str | None) -> str:
@@ -441,13 +460,64 @@ class _TelegramCallback:
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
-        """Auto-approve safe skills in Telegram. Deny dangerous categories."""
+        """Deny dangerous prefixes, ask back on money movers, auto-approve the rest.
+
+        SENSITIVE_SKILL_DEFAULTS tools (binding contracts / payment
+        timers) get a real inline-keyboard prompt — without it the ASK
+        permission level was silently hollow on Telegram, the user's
+        primary channel (2026-06-10 audit).
+        """
         lower_name = skill_name.lower()
         for prefix in self._DANGEROUS_SKILL_PREFIXES:
             if lower_name.startswith(prefix):
                 logger.warning("Telegram auto-denied dangerous skill: %s", skill_name)
                 return False
+        if bare_tool_name(skill_name) in SENSITIVE_SKILL_DEFAULTS:
+            return await self._ask_sensitive_approval(skill_name, arguments)
         return True
+
+    async def _ask_sensitive_approval(
+        self, skill_name: str, arguments: dict
+    ) -> bool:
+        """Inline-keyboard ask-back for a sensitive tool. Fails CLOSED:
+        send failure, timeout, and cancellation all deny."""
+        bare = bare_tool_name(skill_name)
+        args_preview = "\n".join(
+            f"  • {key}: {str(value)[:120]}"
+            for key, value in list(arguments.items())[:5]
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data="apprv:yes"),
+            InlineKeyboardButton("\U0001f6ab Deny", callback_data="apprv:no"),
+        ]])
+        text = (
+            f"\U0001f510 Approval needed: {bare}\n{args_preview}\n\n"
+            "This action moves money or creates a binding commitment."
+        )
+        try:
+            await _telegram_send_with_retry(
+                lambda: self._bot.send_message(
+                    chat_id=self._chat_id, text=text, reply_markup=keyboard,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Sensitive-approval prompt failed, denying: %s", exc)
+            return False
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        stale = _PENDING_TOOL_APPROVALS.pop(self._chat_id, None)
+        if stale is not None and not stale.done():
+            stale.set_result(False)
+        _PENDING_TOOL_APPROVALS[self._chat_id] = future
+        try:
+            return bool(await asyncio.wait_for(future, _TOOL_APPROVAL_TIMEOUT))
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.warning("Sensitive approval for %s timed out — denied", bare)
+            return False
+        finally:
+            if _PENDING_TOOL_APPROVALS.get(self._chat_id) is future:
+                _PENDING_TOOL_APPROVALS.pop(self._chat_id, None)
 
     async def on_help_request(
         self, context: str, needs_browser: bool,
@@ -1011,6 +1081,13 @@ class TelegramAdapter(ChannelAdapter):
                 self._handle_task_callback, pattern=r"^task:",
             )
         )
+        # Sensitive-tool approval callbacks — Approve / Deny on the
+        # money-mover ask-back (SENSITIVE_SKILL_DEFAULTS, 2026-06-10).
+        self._app.add_handler(
+            CallbackQueryHandler(
+                self._handle_approval_callback, pattern=r"^apprv:",
+            )
+        )
         # Progress pulse callbacks — buttons on pulse messages and
         # stale-nudge prompts. Format: "progress:<kind>:<task_id>".
         self._app.add_handler(
@@ -1125,6 +1202,31 @@ class TelegramAdapter(ChannelAdapter):
                 ("\n\n\u274c _Rejected_" if released else "\n\n(no plan pending)"),
                 parse_mode="Markdown",
             )
+
+    async def _handle_approval_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle Approve/Deny taps on a sensitive-tool ask-back message."""
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()  # Stop the Telegram spinner immediately.
+
+        chat_id = query.message.chat_id if query.message else None
+        # Security: only authorized chats may approve money movers.
+        if chat_id is None or not self._is_allowed(str(chat_id)):
+            logger.warning("Unauthorized approval callback from chat %s", chat_id)
+            return
+
+        approved = (query.data or "") == "apprv:yes"
+        resolve_tool_approval(chat_id, approved=approved)
+        try:
+            await query.edit_message_text(
+                "✅ Approved — proceeding." if approved
+                else "\U0001f6ab Denied — action stopped.",
+            )
+        except Exception:
+            logger.debug("Approval message edit failed", exc_info=True)
 
     async def _handle_task_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,

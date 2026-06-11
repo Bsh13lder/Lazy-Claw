@@ -9,10 +9,12 @@ from lazyclaw.permissions.models import (
     ALLOW,
     ASK,
     DEFAULT_CATEGORY_PERMISSIONS,
+    SENSITIVE_SKILL_DEFAULTS,
     ResolvedPermission,
 )
 from lazyclaw.permissions.settings import get_permission_settings
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.skills.tool_namespace import bare_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -28,27 +30,42 @@ class PermissionChecker:
         """Resolve the permission level for a specific skill.
 
         Resolution order:
-        1. Skill-level override (highest priority)
-        2. Category default from user settings
-        3. Global category default from models.py
-        4. Fallback: 'ask'
+        1. Skill-level override (highest priority; matches the bare MCP
+           name too, so ``/allow upwork_accept_offer`` reaches the
+           dynamic ``mcp_<uuid>_upwork_accept_offer`` id)
+        2. Sensitive skill-level default (money movers — beats every
+           category default, including a user's blanket one)
+        3. Category default from user settings
+        4. Global category default from models.py
+        5. Fallback: 'ask'
         """
         settings = await get_permission_settings(self._config, user_id)
+        bare_name = bare_tool_name(skill_name)
 
-        # 1. Check skill-level override
+        # 1. Check skill-level override (exact id first, then bare name)
         overrides = settings.get("skill_overrides", {})
-        if skill_name in overrides:
+        for key in (skill_name, bare_name):
+            if key in overrides:
+                return ResolvedPermission(
+                    skill_name=skill_name,
+                    level=overrides[key],
+                    source="skill_override",
+                )
+
+        # 2. Sensitive skill-level defaults — only an explicit per-skill
+        # override above may re-open these.
+        if bare_name in SENSITIVE_SKILL_DEFAULTS:
             return ResolvedPermission(
                 skill_name=skill_name,
-                level=overrides[skill_name],
-                source="skill_override",
+                level=SENSITIVE_SKILL_DEFAULTS[bare_name],
+                source="sensitive_default",
             )
 
-        # 2. Determine category
+        # 3. Determine category
         skill = self._registry.get(skill_name)
         category = skill.category if skill else "unknown"
 
-        # 3. Check user's category defaults
+        # 4. Check user's category defaults
         cat_defaults = settings.get("category_defaults", {})
         if category in cat_defaults:
             return ResolvedPermission(
@@ -57,7 +74,7 @@ class PermissionChecker:
                 source="category_default",
             )
 
-        # 4. Check global category defaults
+        # 5. Check global category defaults
         if category in DEFAULT_CATEGORY_PERMISSIONS:
             return ResolvedPermission(
                 skill_name=skill_name,
@@ -65,7 +82,7 @@ class PermissionChecker:
                 source="category_default",
             )
 
-        # 5. Fallback
+        # 6. Fallback
         return ResolvedPermission(
             skill_name=skill_name,
             level=ASK,

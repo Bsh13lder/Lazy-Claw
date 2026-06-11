@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps"})
 
+# A task category is promoted to a first-class project once this many tasks
+# share it (casefold). Below the threshold it stays a phantom category.
+_PROJECT_MATERIALIZE_THRESHOLD = 3
+
 TASK_COLUMNS = [
     "id", "user_id", "title", "description", "category", "priority",
     "status", "owner", "due_date", "reminder_at", "reminder_job_id", "recurring",
@@ -351,6 +355,10 @@ async def create_task(
 
     logger.debug("Created task %s (%s) for user %s", task_id, owner, user_id)
 
+    # Promote the category to a real project once it's proven itself (≥N tasks).
+    # Guarded + best-effort — task creation never fails on PKM/budget problems.
+    await _maybe_materialize_project(config, user_id, category)
+
     return {
         "id": task_id, "user_id": user_id, "title": title,
         "description": description, "category": category,
@@ -537,6 +545,104 @@ async def get_nagging_tasks(
                 continue
         results.append(_row_to_dict(row, keys[owner_uid]))
     return results
+
+
+async def list_categories(config: Config, user_id: str) -> list[str]:
+    """Return the user's distinct task categories (decrypted), preserving the
+    first-seen casing. These are the "projects" auto-detected from tasks even
+    before a real ``projects`` row exists.
+
+    Tombstone-aware: ``list_tasks`` filters ``deleted_at IS NULL``, so
+    categories that only exist on soft-deleted tasks don't resurface.
+    """
+    tasks = await list_tasks(config, user_id, status="all")
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tasks:
+        cat = (t.get("category") or "").strip()
+        if not cat:
+            continue
+        key = cat.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cat)
+    return out
+
+
+async def count_tasks_in_category(
+    config: Config, user_id: str, category: str
+) -> int:
+    """Count the user's live tasks whose category matches ``category`` (casefold).
+
+    Categories are encrypted at rest, so this decrypts + matches in Python
+    rather than via a SQL ``WHERE``. Soft-deleted tasks are excluded by
+    ``list_tasks``'s tombstone filter.
+    """
+    target = (category or "").strip().casefold()
+    if not target:
+        return 0
+    tasks = await list_tasks(config, user_id, status="all")
+    return sum(
+        1 for t in tasks if (t.get("category") or "").strip().casefold() == target
+    )
+
+
+async def rename_category(
+    config: Config, user_id: str, old_name: str, new_name: str
+) -> int:
+    """Re-point every live task tagged with ``old_name`` to ``new_name``.
+
+    Categories are encrypted, so this can't be a single SQL UPDATE — we find
+    the matching tasks (casefold compare) and re-encrypt each. Keeps the
+    ``tasks.category`` ⇄ ``projects.name_key`` join consistent after a project
+    rename. Each re-point goes through ``update_task`` so the offline-sync
+    ``updated_at`` stamp is bumped and clients pick up the change on the next
+    delta pull. Returns the number of tasks updated. A no-op (returns 0) when
+    the names are equivalent or ``old_name`` has no tasks.
+    """
+    old_key = (old_name or "").strip().casefold()
+    new_clean = (new_name or "").strip()
+    if not old_key or not new_clean or old_key == new_clean.casefold():
+        return 0
+    tasks = await list_tasks(config, user_id, status="all")
+    updated = 0
+    for t in tasks:
+        if (t.get("category") or "").strip().casefold() == old_key:
+            await update_task(config, user_id, t["id"], category=new_clean)
+            updated += 1
+    return updated
+
+
+async def _maybe_materialize_project(
+    config: Config, user_id: str, category: str | None
+) -> None:
+    """Promote a task category to a first-class project once it crosses the
+    materialization threshold.
+
+    Fire-and-forget: never raises, never blocks task creation. No-op when the
+    category is empty, below threshold, or already backed by a ``projects`` row.
+    """
+    cat = (category or "").strip()
+    if not cat:
+        return
+    try:
+        from lazyclaw.budgets import store as budget_store
+
+        existing = await budget_store.get_project_by_name(config, user_id, cat)
+        if existing is not None:
+            return
+        count = await count_tasks_in_category(config, user_id, cat)
+        if count < _PROJECT_MATERIALIZE_THRESHOLD:
+            return
+        await budget_store.create_project(config, user_id, cat)
+        logger.debug(
+            "Materialized project %r for user %s (%d tasks)", cat, user_id, count
+        )
+    except Exception:
+        logger.debug(
+            "project materialization skipped for %r", category, exc_info=True
+        )
 
 
 async def update_task(

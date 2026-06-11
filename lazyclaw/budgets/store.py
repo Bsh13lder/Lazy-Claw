@@ -158,21 +158,31 @@ def _project_note_title(name: str) -> str:
 
 
 async def _ensure_project_note(
-    config: Config, user_id: str, name: str, budget: float, currency: str
+    config: Config, user_id: str, name: str, budget: float, currency: str,
+    description: str | None = None,
 ) -> str | None:
     """Create the ``<Name> Project`` note that wikilinks resolve to. Returns
-    the note id, or None on failure (never raises)."""
+    the note id, or None on failure (never raises).
+
+    The note body leads with the project's ``description`` (the human-readable
+    "what this project is") when present, so the wikilink target is a real page
+    — not just a budget line. Tasks and expenses wikilink back here.
+    """
     try:
         from lazyclaw.lazybrain import store as lb_store
 
+        lines = [f"# {name} Project", ""]
+        if description and description.strip():
+            lines += [description.strip(), ""]
+        lines += [
+            f"Budget: {budget} {currency}",
+            "",
+            "Tasks and expenses tagged with this project link here.",
+        ]
         note = await lb_store.save_note(
             config,
             user_id,
-            content=(
-                f"# {name} Project\n\n"
-                f"Budget: {budget} {currency}\n\n"
-                "Expenses link here."
-            ),
+            content="\n".join(lines),
             title=_project_note_title(name),
             tags=["project", f"project/{_name_key(name)}", "kind/budget"],
             importance=7,
@@ -319,6 +329,7 @@ async def create_project(
         if not existing.get("lazybrain_note_id"):
             note_id = await _ensure_project_note(
                 config, user_id, name, budget or existing.get("budget") or 0.0, currency,
+                description=description if description is not None else existing.get("description"),
             )
             if note_id:
                 updates["lazybrain_note_id"] = note_id
@@ -329,7 +340,9 @@ async def create_project(
 
     project_id = project_id or str(uuid4())
     now = _now()
-    note_id = await _ensure_project_note(config, user_id, name, budget, currency)
+    note_id = await _ensure_project_note(
+        config, user_id, name, budget, currency, description=description,
+    )
 
     favorite_int = _clean_favorite(is_favorite)
     async with db_session(config) as db:
@@ -513,6 +526,12 @@ async def update_project(
     params: list = []
 
     new_name = fields.get("name")
+    # Capture the old name BEFORE the UPDATE so we can re-point tasks.category
+    # (the join key) when the project is renamed.
+    old_name: str | None = None
+    if new_name:
+        prior = await get_project(config, user_id, project_id)
+        old_name = prior.get("name") if prior else None
     for col, value in fields.items():
         if col in ENCRYPTED_PROJECT_FIELDS and value is not None:
             value = encrypt(value, key)
@@ -550,6 +569,18 @@ async def update_project(
                 )
             except Exception:
                 logger.debug("project note rename skipped", exc_info=True)
+        # Re-point every task that referenced the old project name so the
+        # tasks.category ⇄ projects.name_key join survives the rename. Without
+        # this, renamed projects orphan all their tasks.
+        if old_name and old_name.strip().casefold() != new_name.strip().casefold():
+            try:
+                from lazyclaw.tasks import store as task_store
+
+                await task_store.rename_category(
+                    config, user_id, old_name, new_name,
+                )
+            except Exception:
+                logger.debug("task category re-point skipped", exc_info=True)
     return updated
 
 

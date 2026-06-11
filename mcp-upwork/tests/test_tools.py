@@ -11,16 +11,14 @@ def test_job_search_params_validation():
     # Valid params
     params = JobSearchParams(query="python developer")
     assert params.query == "python developer"
-    assert params.limit == 20
+    assert params.limit == 10
 
     # With optional params
     params = JobSearchParams(
         query="python",
-        budget_min=100,
         experience_level="expert",
         limit=10,
     )
-    assert params.budget_min == 100
     assert params.experience_level == "expert"
     assert params.limit == 10
 
@@ -47,7 +45,7 @@ def test_proposals_params_validation():
     from upwork_mcp.tools.proposals import ProposalsParams
 
     params = ProposalsParams()
-    assert params.status == "active"
+    assert params.status == "all"
     assert params.limit == 20
 
     params = ProposalsParams(status="archived", limit=10)

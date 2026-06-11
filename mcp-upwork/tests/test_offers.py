@@ -46,7 +46,9 @@ def test_offers_params_rejects_unknown_status():
 
 def test_accept_offer_params_defaults():
     p = AcceptOfferParams(offer_url="https://www.upwork.com/nx/offers/123")
-    assert p.draft_only is False
+    # Safe default since 2026-06-10: money movers stage the modal for a
+    # human final click unless the caller explicitly opts in.
+    assert p.draft_only is True
 
 
 # ── accept_offer pre-flight guards ──────────────────────────────────

@@ -23,7 +23,9 @@ def test_submit_milestone_params_defaults():
     assert p.message == ""
     assert p.milestone_id is None
     assert p.attachments is None
-    assert p.draft_only is False
+    # Safe default since 2026-06-10: money movers stage the modal for a
+    # human final click unless the caller explicitly opts in.
+    assert p.draft_only is True
 
 
 # ── URL validation guards ───────────────────────────────────────────

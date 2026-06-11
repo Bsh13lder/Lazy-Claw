@@ -126,6 +126,9 @@ async def test_is_logged_in_raises_typed_error_on_disconnect():
 
     b = UpworkBrowser()
     page = AsyncMock()
+    # Plain-string url so the cheap "already on upwork.com" path is skipped
+    # and is_logged_in reaches the goto that raises the disconnect.
+    page.url = "about:blank"
     page.goto = AsyncMock(side_effect=RuntimeError("Target closed"))
 
     with patch.object(b, "get_page", new=AsyncMock(return_value=page)):

@@ -160,12 +160,30 @@ async def test_build_gateway_read_thread():
     registry = _make_registry("whatsapp_read", json.dumps(messages_payload))
 
     gw = build_gateway(registry, user_id="u7")
-    msgs = await gw.read_thread("whatsapp", "Alice")
+    res = await gw.read_thread("whatsapp", "Alice")
 
     registry.get.assert_called_with("whatsapp_read")
-    assert len(msgs) == 1
-    assert msgs[0].sender == "Alice"
-    assert msgs[0].text == "hey"
+    assert res.ok is True
+    assert len(res.messages) == 1
+    assert res.messages[0].sender == "Alice"
+    assert res.messages[0].text == "hey"
+
+
+@pytest.mark.asyncio
+async def test_build_gateway_read_thread_unknown_tool_is_failure():
+    """The _call adapter returns {"status": "error", "error": "unknown tool: ..."}
+    (it never raises) when the registry has no matching skill — e.g. while the
+    MCP container is restarting. read_thread must surface that as ok=False,
+    not as an empty thread."""
+    registry = MagicMock()
+    registry.get = MagicMock(return_value=None)
+    registry.get_mcp_by_base_name = MagicMock(return_value=None)
+
+    gw = build_gateway(registry, user_id="u8")
+    res = await gw.read_thread("whatsapp", "Alice")
+
+    assert res.ok is False
+    assert "unknown tool" in (res.error or "")
 
 
 # ---------------------------------------------------------------------------

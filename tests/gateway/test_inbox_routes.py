@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from lazyclaw.config import Config
 from lazyclaw.comms import thread_store
-from lazyclaw.comms.models import Msg, SendResult
+from lazyclaw.comms.models import Msg, ReadResult, SendResult
 from lazyclaw.db.connection import db_session, init_db
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.gateway.routes.inbox import router as inbox_router
@@ -222,12 +222,12 @@ async def test_messages_404_for_unknown_thread(inbox_client) -> None:
 async def test_messages_returns_live_messages(inbox_client_with_thread) -> None:
     """GET /threads/{id}/messages calls the gateway and returns messages + thread."""
     client, thread, cfg = inbox_client_with_thread
-    fake_msgs = [
+    fake_msgs = (
         Msg(sender="Bob", text="Hello", timestamp="2026-01-01T10:00:00", is_mine=False),
         Msg(sender="alice", text="Hi!", timestamp="2026-01-01T10:01:00", is_mine=True),
-    ]
+    )
     fake_gw = MagicMock()
-    fake_gw.read_thread = AsyncMock(return_value=fake_msgs)
+    fake_gw.read_thread = AsyncMock(return_value=ReadResult(ok=True, messages=fake_msgs))
 
     with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=fake_gw):
         r = client.get(f"/api/inbox/threads/{thread['id']}/messages")
@@ -241,6 +241,48 @@ async def test_messages_returns_live_messages(inbox_client_with_thread) -> None:
     assert body["messages"][0]["text"] == "Hello"
     assert body["messages"][0]["is_mine"] is False
     assert body["thread"]["id"] == thread["id"]
+
+
+@pytest.mark.asyncio
+async def test_messages_genuinely_empty_returns_200_empty_list(
+    inbox_client_with_thread,
+) -> None:
+    """A successful read with zero messages stays 200 + [] — only FAILED
+    reads become 502."""
+    client, thread, _cfg = inbox_client_with_thread
+    fake_gw = MagicMock()
+    fake_gw.read_thread = AsyncMock(return_value=ReadResult(ok=True))
+
+    with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=fake_gw):
+        r = client.get(f"/api/inbox/threads/{thread['id']}/messages")
+
+    assert r.status_code == 200
+    assert r.json()["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_messages_read_failure_returns_generic_502(
+    inbox_client_with_thread,
+) -> None:
+    """When the channel read FAILED (dead MCP / restarting container), the
+    endpoint must return 502 with a GENERIC detail — never 200 + [] (the
+    silent-empty antipattern: user can't tell a dead channel from an empty
+    thread), and never the internal error string."""
+    client, thread, _cfg = inbox_client_with_thread
+    fake_gw = MagicMock()
+    fake_gw.read_thread = AsyncMock(return_value=ReadResult(
+        ok=False,
+        error="Traceback /internal/secret.py: MCP endpoint 10.0.0.5 refused",
+    ))
+
+    with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=fake_gw):
+        r = client.get(f"/api/inbox/threads/{thread['id']}/messages")
+
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert detail == "channel read failed"
+    assert "secret.py" not in r.text
+    assert "10.0.0.5" not in r.text
 
 
 # ── POST /api/inbox/threads/{id}/reply ─────────────────────────────────────────

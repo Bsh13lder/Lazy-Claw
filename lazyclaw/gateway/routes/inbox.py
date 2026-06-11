@@ -166,7 +166,17 @@ async def get_thread_messages(
 
     registry = _get_registry()
     gw = build_gateway(registry, user.id)
-    msgs = await gw.read_thread(thread["channel"], thread["contact_handle"])
+    res = await gw.read_thread(thread["channel"], thread["contact_handle"])
+    if not res.ok:
+        # Log the real error server-side; the client gets a generic message —
+        # raw MCP errors can carry internal paths/endpoints (same policy as
+        # reply sends). 502 lets the client render an error state instead of
+        # mistaking a dead channel for an empty thread.
+        logger.warning(
+            "inbox thread read failed (thread=%s channel=%s): %s",
+            thread_id, thread["channel"], res.error,
+        )
+        raise HTTPException(status_code=502, detail="channel read failed")
     return {
         "messages": [
             {
@@ -179,7 +189,7 @@ async def get_thread_messages(
                 "id": m.id,
                 "media": m.media,
             }
-            for m in msgs
+            for m in res.messages
         ],
         "thread": thread,
     }

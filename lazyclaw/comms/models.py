@@ -76,3 +76,15 @@ class Contact:
 class SendResult:
     ok: bool
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ReadResult:
+    """Outcome of a live thread read — distinguishes a genuinely-empty
+    thread (``ok=True, messages=()``) from a FAILED channel read
+    (``ok=False, error=...``). Mirrors :class:`SendResult` so callers never
+    have to guess whether ``[]`` means "no messages" or "the MCP is down"
+    (the silent-empty antipattern)."""
+    ok: bool
+    messages: tuple[Msg, ...] = ()
+    error: str | None = None

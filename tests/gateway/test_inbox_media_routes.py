@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.comms import thread_store
-from lazyclaw.comms.models import Msg
+from lazyclaw.comms.models import Msg, ReadResult
 from lazyclaw.db.connection import db_session, init_db
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.gateway.routes.inbox import router as inbox_router
@@ -86,7 +86,7 @@ async def test_messages_include_id_and_media(client_with_thread) -> None:
                "file_name": None, "size_bytes": 9001},
     )
     gw = MagicMock()
-    gw.read_thread = AsyncMock(return_value=[voice])
+    gw.read_thread = AsyncMock(return_value=ReadResult(ok=True, messages=(voice,)))
     with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=gw):
         r = client.get(f"/api/inbox/threads/{thread['id']}/messages")
     assert r.status_code == 200
@@ -100,9 +100,9 @@ async def test_messages_include_id_and_media(client_with_thread) -> None:
 async def test_text_messages_have_null_media(client_with_thread) -> None:
     client, thread, _cfg = client_with_thread
     gw = MagicMock()
-    gw.read_thread = AsyncMock(return_value=[
-        Msg(sender="Maria", text="hola", timestamp="10:01"),
-    ])
+    gw.read_thread = AsyncMock(return_value=ReadResult(
+        ok=True, messages=(Msg(sender="Maria", text="hola", timestamp="10:01"),),
+    ))
     with patch("lazyclaw.gateway.routes.inbox.build_gateway", return_value=gw):
         r = client.get(f"/api/inbox/threads/{thread['id']}/messages")
     m = r.json()["messages"][0]

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Awaitable, Callable
 
-from lazyclaw.comms.models import Msg, SendResult
+from lazyclaw.comms.models import Msg, ReadResult, SendResult
 from lazyclaw.runtime.tool_result import ToolResult
 
 McpCall = Callable[[str, dict], Awaitable[dict]]
@@ -53,20 +53,34 @@ class ChannelGateway:
     def __init__(self, mcp_call: McpCall):
         self._call = mcp_call
 
-    async def read_thread(self, channel: str, contact: str, *, limit: int = 30) -> list[Msg]:
-        """Live-read a thread via the per-channel read MCP tool.
+    async def read_thread(self, channel: str, contact: str, *, limit: int = 30) -> ReadResult:
+        """Live-read a thread via the per-channel read MCP tool. Never raises.
 
-        Returns an empty list for unknown channels or any MCP error — never raises.
+        Returns a :class:`ReadResult` so callers can tell a genuinely-empty
+        thread (``ok=True, messages=()``) from a FAILED read (``ok=False``).
+        Unknown channels stay ``ok=True`` + empty — that's a caller bug, not
+        a dead channel.
         """
         spec = _DISPATCH.get(channel)
         if not spec:
-            return []
+            return ReadResult(ok=True)
         read_tool = spec[0]
         try:
             result = await self._call(read_tool, {"contact": contact, "limit": limit})
-        except Exception:
-            return []
-        return _parse_messages(result)
+        except Exception as e:  # surface as typed failure, never raise
+            return ReadResult(ok=False, error=str(e))
+        # The _call adapter (and some MCP tools) report failures as an error
+        # dict instead of raising — e.g. {"status": "error", "error":
+        # "unknown tool: whatsapp_read"} while the MCP container restarts.
+        # Treating that as an empty thread made dead channels render as
+        # "No messages yet" (same defense as send()).
+        if isinstance(result, dict):
+            status = str(result.get("status", "")).lower()
+            if status in ("blocked", "error", "failed"):
+                return ReadResult(ok=False, error=str(result))
+            if result.get("error"):
+                return ReadResult(ok=False, error=str(result.get("error")))
+        return ReadResult(ok=True, messages=tuple(_parse_messages(result)))
 
     async def send(self, channel: str, contact: str, text: str) -> SendResult:
         """Dispatch a send via the per-channel MCP tool. Never raises; returns ok=False on any failure."""

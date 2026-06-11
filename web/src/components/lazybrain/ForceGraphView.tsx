@@ -134,6 +134,18 @@ export function ForceGraphView({
     };
   }, [dimPredicate, hiddenCategories]);
 
+  // How many nodes the active filters (categories / importance / owner /
+  // telemetry) currently dim. Purely informational — surfaces in the
+  // top-left HUD so a sparse-looking graph is never a silent mystery.
+  const hiddenCount = useMemo(() => {
+    if (!combinedDim) return 0;
+    let n = 0;
+    for (const node of graph.nodes) {
+      if (combinedDim(notesById?.[node.id])) n++;
+    }
+    return n;
+  }, [combinedDim, graph.nodes, notesById]);
+
   return (
     <div
       className="relative w-full h-full overflow-hidden lb-graph-canvas"
@@ -264,6 +276,15 @@ export function ForceGraphView({
         >
           Unpin all
         </button>
+
+        {hiddenCount > 0 && (
+          <span
+            className="flex items-center px-2.5 h-8 rounded-md backdrop-blur-md text-[11px] tracking-tight border border-border bg-bg-secondary/70 text-text-muted tabular-nums"
+            title={`${hiddenCount} node${hiddenCount === 1 ? "" : "s"} dimmed by category / importance / owner filters`}
+          >
+            {hiddenCount} hidden by filters
+          </span>
+        )}
       </div>
 
       {/* Bottom-left mini legend — category chips */}

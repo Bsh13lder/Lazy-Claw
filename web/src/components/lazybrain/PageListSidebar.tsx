@@ -1071,9 +1071,20 @@ export function PageListSidebar({
               </span>
             </div>
             {recent.filter((n) => !deletedIds.has(n.id)).length === 0 ? (
-              <div className="px-4 py-6 text-[11px] text-text-muted italic text-center leading-relaxed">
-                No results for "{searchQuery}".<br />
-                Try a different word or clear search.
+              <div className="px-4 py-6 flex flex-col items-center gap-1.5 text-[11px] text-text-muted italic text-center leading-relaxed">
+                <span className="truncate max-w-full">
+                  No results for "{searchQuery}"
+                </span>
+                {onClearSearch && (
+                  <button
+                    onClick={onClearSearch}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded not-italic hover:bg-bg-hover hover:text-text-primary transition-colors"
+                    title="Clear search"
+                  >
+                    <X size={11} strokeWidth={2} />
+                    <span>Clear search</span>
+                  </button>
+                )}
               </div>
             ) : (
               recent

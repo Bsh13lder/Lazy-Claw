@@ -36,6 +36,7 @@ import {
 import { CommandModal, type CommandAction } from "../components/lazybrain/CommandModal";
 import { OutlinePane } from "../components/lazybrain/OutlinePane";
 import { AIResultModal } from "../components/lazybrain/AIResultModal";
+import { ShortcutsModal } from "../components/lazybrain/ShortcutsModal";
 import { AutolinkResultModal } from "../components/lazybrain/AutolinkResultModal";
 import { Canvas } from "../components/lazybrain/Canvas";
 import { motion, AnimatePresence } from "framer-motion";
@@ -129,6 +130,9 @@ export default function LazyBrain() {
 
   // Command modal (⌘K palette / ⌘O quick switcher)
   const [cmdkOpen, setCmdkOpen] = useState<null | "palette" | "switcher">(null);
+
+  // Keyboard-shortcuts help modal (⌘/ or palette action)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   // Semantic search toggle (search bar ~ 🔍 Semantic)
   const [semanticMode, setSemanticMode] = useState(false);
@@ -360,16 +364,22 @@ export default function LazyBrain() {
 
   // Fetch graph when graph view is active. Re-fetches when graphLimit
   // grows (after the user clicks "Load more") so the graph stays in sync
-  // with the sidebar's pool.
+  // with the sidebar's pool. isGraphLoading drives the "Loading graph…"
+  // indicator shown over the canvas before the first nodes arrive.
+  const [isGraphLoading, setIsGraphLoading] = useState(false);
   useEffect(() => {
     if (viewMode !== "graph") return;
     let cancelled = false;
+    setIsGraphLoading(true);
     api
       .getLazyBrainGraph({ limit: graphLimit, include_rolled_up: showRolledUp })
       .then((g) => {
         if (!cancelled) setGraph(g);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsGraphLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -380,6 +390,7 @@ export default function LazyBrain() {
   //   ⌘O    → quick switcher
   //   ⌘⇧F   → focus search
   //   ⌘N    → new note
+  //   ⌘/    → keyboard shortcuts help
   //   Esc   → exit graph / close modal
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -396,7 +407,10 @@ export default function LazyBrain() {
       } else if (meta && e.key.toLowerCase() === "n") {
         e.preventDefault();
         handleNew();
-      } else if (e.key === "Escape" && viewMode === "graph" && !cmdkOpen) {
+      } else if (meta && e.key === "/") {
+        e.preventDefault();
+        setShortcutsOpen(true);
+      } else if (e.key === "Escape" && viewMode === "graph" && !cmdkOpen && !shortcutsOpen) {
         setViewMode("notes");
       }
     };
@@ -796,6 +810,14 @@ export default function LazyBrain() {
         keywords: "switch open jump",
         run: () => setCmdkOpen("switcher"),
       },
+      {
+        id: "keyboard-shortcuts",
+        label: "Keyboard shortcuts",
+        hint: "⌘/",
+        Icon: CommandIcon,
+        keywords: "help keys hotkeys bindings shortcuts",
+        run: () => setShortcutsOpen(true),
+      },
     ];
     if (selected) {
       out.push(
@@ -1160,6 +1182,16 @@ export default function LazyBrain() {
               onSetHiddenCategories={setHiddenCategories}
               categoryCounts={categoryCounts}
             />
+            {/* Loading indicator — shown over the canvas while the first
+                graph fetch is in flight so the user never stares at an
+                unexplained blank view. */}
+            {isGraphLoading && graph.nodes.length === 0 && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                <span className="text-sm text-text-muted animate-pulse">
+                  Loading graph…
+                </span>
+              </div>
+            )}
             {/* Importance slider — parked bottom-right to avoid colliding
                 with GraphView's top-left stats HUD + top-right zoom stack. */}
             <div className="absolute bottom-3 right-[120px] z-10 bg-bg-secondary/80 backdrop-blur px-3 py-1.5 rounded border border-border flex items-center gap-2 text-[11px] text-text-muted">
@@ -1241,6 +1273,12 @@ export default function LazyBrain() {
         onLinkClick={handleLinkClick}
         onTagClick={handleTagClick}
         resolveLink={resolveLink}
+      />
+
+      {/* Keyboard shortcuts help — ⌘/ or palette action */}
+      <ShortcutsModal
+        open={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
       />
 
       {/* Structured autolink modal — per-row Accept/Skip + Accept-all. */}

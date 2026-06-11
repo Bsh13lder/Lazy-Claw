@@ -142,7 +142,7 @@ All user content encrypted before storage. Server never sees plaintext.
 - Storage format: `enc:v1:<base64-nonce>:<base64-ciphertext>`
 - Server-side key for daemon ops: `PBKDF2(SERVER_SECRET + user_id, fixed_salt, 600k)`
 - **Recovery phrase**: BIP-39 mnemonic generated at registration — user can re-derive their key
-- **Encrypted**: conversations, memory, skills, vault, jobs, channel configs
+- **Encrypted**: conversations, memory, skills, vault, jobs, channel configs, tool-call arguments (`memory/metadata_codec.py`, tolerant read + backfill, 2026-06-10)
 - **Plaintext** (needed for queries): IDs, timestamps, status, cron expressions, domains
 
 ## Key Patterns
@@ -203,7 +203,8 @@ These are non-obvious architectural decisions that apply everywhere. For dated c
 ### Channels & Security
 - **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Exponential backoff retry on network errors.
 - **CancellationToken**: Cooperative cancellation from CLI → agent → specialists.
-- **Default permissions**: `core`, `orchestration`, `browser_management`, `tasks` default to `allow`. Telegram `/allow`, `/deny`, `/permissions` gate skills.
+- **Default permissions**: 32 categories `allow`, 5 sensitive `ask` — canonical map in `permissions/models.py:DEFAULT_CATEGORY_PERMISSIONS`. Telegram `/allow` `/deny` `/permissions` gate skills.
+- **Money-mover ask-back (2026-06-10)**: `SENSITIVE_SKILL_DEFAULTS` in `permissions/models.py` → `upwork_accept_offer`/`upwork_submit_milestone`/`payment` ASK despite blanket-ALLOW `mcp`; Telegram got a real fail-closed inline ask-back (was auto-approving every bare ASK); mcp-upwork `draft_only` defaults True; audit log wired; `vault_get` added. DOCS.md → "Money-mover hardening".
 - **Quiet scheduled pushes**: `TelegramNotifier(verbose=False)` for cron/reminder/watcher — drops stats footer + tools-used line so scheduled messages read as normal text.
 
 ### Search & Extraction

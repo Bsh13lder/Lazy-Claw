@@ -138,7 +138,7 @@ Brain = always-free team lead: answers / does ≤1 quick action / else delegates
 - [x] **P.2 Permission Settings** — `lazyclaw/permissions/settings.py`: CRUD from users.settings JSON (follows eco_settings pattern).
 - [x] **P.3 Permission Checker** — `lazyclaw/permissions/checker.py`: Resolves skill → allow/ask/deny (overrides → category → hint → fallback).
 - [x] **P.4 Approval System** — `lazyclaw/permissions/approvals.py`: Create/approve/deny/expire requests, encrypted arguments.
-- [x] **P.5 Audit Log** — `lazyclaw/permissions/audit.py`: Fire-and-forget logger, query, cleanup (90-day retention).
+- [x] **P.5 Audit Log** — `lazyclaw/permissions/audit.py`: Fire-and-forget logger, query, cleanup (90-day retention). NOTE: until 2026-06-10 only the storage+query half existed — nothing called `log_action` from the execution path. Now wired: tool_executed/tool_approved/tool_denied in `tool_executor.py`, user-denial in `agent.py`, permission_changed in `settings.py`.
 - [x] **P.6 Permissions API** — `lazyclaw/gateway/routes/permissions.py`: 8 REST endpoints (settings, skills, approvals, audit).
 - [x] **P.7 DB Schema** — Added `role` column to users, `approval_requests` + `audit_log` tables.
 - [x] **P.8 Admin Role** — First registered user = admin. `require_admin()` dependency.

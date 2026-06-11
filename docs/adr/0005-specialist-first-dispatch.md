@@ -200,6 +200,19 @@ the row); `startup_specialist_self_check(registry)` wired into both cli startup
 paths (bare-MCP-suffix aware); the ModeSwitch/`PlanModeToggle` reconciliation is
 obsolete (the legacy toggle no longer exists).
 
+**Phase 5a flag shipped 2026-06-10**: `LAZYCLAW_SPECIALIST_FIRST_BRAIN=1`
+(the ADR's `SPECIALIST_FIRST_BRAIN` flag, repo-convention env name). The
+brain's toolset is filtered to meta tools + read-only inspections
+(`_is_readonly_inspection`, hoisted to module level) on EVERY iteration
+including iteration 0 — mutating/domain tools are never offered inline and
+must go through `delegate`/`dispatch_subagents`. The late-inject-from-
+registry door applies the same filter; AUTO-PROMOTE is excluded under the
+flag (same as thin-router); composes with the thin-router cap (filter
+first, cap after); one router-guidance system line injected per turn.
+Default off = zero behavior change. Soaking in prod alongside
+`LAZYCLAW_THIN_ROUTER=1`. The Phase 5 teardown (deleting AUTO-PROMOTE /
+dedup / keyword-gating) stays DEFERRED — no defense was removed.
+
 **Thin-router soak**: `LAZYCLAW_THIN_ROUTER=1` is live in prod since 2026-06-08.
 First soak finding (2026-06-10 00:33): the brain delegated a raw upwork read to
 the freelance specialist whose allowlist lacked the tools its own prompt

@@ -26,6 +26,30 @@ _config = load_config()
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
+def _extract_tool_calls(metadata_raw: str | None) -> list | None:
+    """Parse stored message metadata into a tool-call list, fail-soft.
+
+    Two shapes exist on disk: the 2026-06-10 metadata-encryption pass
+    stores the tool-call list directly (``[...]``); older rows wrap it
+    as ``{"tool_calls": [...]}``. Anything unparseable (including the
+    ``[encrypted]`` decrypt fallback sentinel) returns None — a bad row
+    must never take down the whole history response.
+    """
+    if not metadata_raw:
+        return None
+    try:
+        meta = json.loads(metadata_raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("Failed to parse message metadata JSON", exc_info=True)
+        return None
+    if isinstance(meta, list):
+        return meta
+    if isinstance(meta, dict):
+        tool_calls = meta.get("tool_calls")
+        return tool_calls if isinstance(tool_calls, list) else None
+    return None
+
+
 class CreateSessionRequest(BaseModel):
     title: str = Field(default="New Chat", max_length=200)
 
@@ -193,7 +217,17 @@ async def get_session_messages(
     before: str | None = None,
     user: User = Depends(get_current_user),
 ):
-    """Load decrypted messages for a chat session (paginated)."""
+    """Load decrypted messages for a chat session (paginated).
+
+    Clients seed their chat screens from this endpoint, so the default page
+    is the NEWEST `limit` messages; `before=<message_id>` pages upward
+    through older history. Both pages are returned oldest-first, ready to
+    render top-to-bottom.
+
+    Turns are batch-persisted with one shared created_at (agent.py
+    post-loop), so ordering and the `before` anchor use (created_at, rowid)
+    — created_at alone would skip or reshuffle same-timestamp siblings.
+    """
     key = await get_user_dek(_config, user.id)
 
     async with db_session(_config) as db:
@@ -210,8 +244,9 @@ async def get_session_messages(
                 "SELECT id, role, content, tool_name, metadata, created_at "
                 "FROM agent_messages "
                 "WHERE user_id = ? AND chat_session_id = ? "
-                "AND created_at < (SELECT created_at FROM agent_messages WHERE id = ?) "
-                "ORDER BY created_at ASC "
+                "AND (created_at, rowid) < "
+                "(SELECT created_at, rowid FROM agent_messages WHERE id = ?) "
+                "ORDER BY created_at DESC, rowid DESC "
                 "LIMIT ?",
                 (user.id, session_id, before, limit),
             )
@@ -220,23 +255,17 @@ async def get_session_messages(
                 "SELECT id, role, content, tool_name, metadata, created_at "
                 "FROM agent_messages "
                 "WHERE user_id = ? AND chat_session_id = ? "
-                "ORDER BY created_at ASC "
+                "ORDER BY created_at DESC, rowid DESC "
                 "LIMIT ?",
                 (user.id, session_id, limit),
             )
 
         messages = []
-        for r in await rows.fetchall():
+        for r in reversed(list(await rows.fetchall())):
             content = decrypt_field(r[2], key) or ""
             metadata_raw = decrypt_field(r[4], key) if r[4] else None
 
-            tool_calls = None
-            if metadata_raw:
-                try:
-                    meta = json.loads(metadata_raw)
-                    tool_calls = meta.get("tool_calls")
-                except (json.JSONDecodeError, TypeError):
-                    logger.debug("Failed to parse message metadata JSON", exc_info=True)
+            tool_calls = _extract_tool_calls(metadata_raw)
 
             messages.append({
                 "id": r[0],

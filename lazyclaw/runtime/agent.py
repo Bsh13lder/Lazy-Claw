@@ -183,6 +183,25 @@ _META_TOOLS = frozenset({
     "get_agent_status",
 })
 
+# Specialist-first brain (ADR-0005 Phase 5a): behind this flag the brain
+# only ever sees meta tools + read-only inspections — every iteration,
+# including iteration 0. Quick reads ("check my upwork messages") stay
+# fast and inline; mutating/domain tools (sends, submits, edits, browser)
+# are never offered and MUST be reached via delegate/dispatch_subagents.
+# Default off → zero behavior change. Composes with LAZYCLAW_THIN_ROUTER
+# (filter first, cap after); teardown of AUTO-PROMOTE et al. stays
+# DEFERRED — no defense is deleted here.
+_SPECIALIST_FIRST_BRAIN_ENV = "LAZYCLAW_SPECIALIST_FIRST_BRAIN"
+
+# One short router note injected at turn start when the flag is on —
+# mirrors the cap's system-message mechanism (plain system LLMMessage).
+_SPECIALIST_FIRST_GUIDANCE = (
+    "[SPECIALIST-FIRST] You are a router. Your toolset contains only "
+    "meta tools and quick read-only inspections — domain actions (sends, "
+    "submits, edits, browser work) are NOT in your toolset and must be "
+    "delegated to a specialist via `delegate` or `dispatch_subagents`."
+)
+
 
 def _trim_tools_for_minimax(
     tools: list[dict],
@@ -1053,6 +1072,156 @@ def _is_channel_read_tool_name(tool_name: str | None) -> bool:
         return False
     lowered = tool_name.lower()
     return any(pat in lowered for pat in _CHANNEL_READ_TOOL_NAME_PATTERNS)
+
+
+def _is_readonly_inspection(name: str) -> bool:
+    """True iff ``name`` is a quick read-only inspection.
+
+    Used by the AUTO-PROMOTE exemption (a brain paging through info to
+    reply inline must not be force-promoted to background) and by the
+    specialist-first filter (read-only fetches stay inline; mutating
+    tools must be delegated). Hoisted from the AUTO-PROMOTE block
+    (2026-06-10, ADR-0005 Phase 5a) so both call sites share one
+    predicate — behavior unchanged.
+    """
+    if not name:
+        return False
+    n = name.lower()
+    if n.startswith("mcp_"):
+        parts = n.split("_", 2)
+        if len(parts) == 3:
+            n = parts[2]
+    if n in {
+        "recall_memories", "search_tools", "save_memory",
+        "list_tasks", "list_jobs", "list_watchers",
+        "work_todos", "daily_briefing", "vault_get",
+        # Deterministic read-only NL skills whose names
+        # don't fit the get_*/list_*/search_* shape but
+        # which are pure fetches that should NOT trigger
+        # AUTO-PROMOTE. Without this, asking
+        # "find out what James wants on Upwork" called
+        # `upwork_last_conversation` (correct!) and the
+        # brain was IMMEDIATELY force-promoted to
+        # run_background before it could synthesize a
+        # reply from the fetched data. Observed
+        # 2026-05-17 19:17:41.
+        "upwork_last_conversation",
+        "upwork_inbox_check",
+        "upwork_contract_poll",
+        # Job/proposal READS — "find me 5 upwork jobs" is a
+        # pure fetch. Without these, a web job search that
+        # reached for the raw MCP tool got AUTO-PROMOTE'd to a
+        # Telegram-bound background task instead of answering
+        # inline (2026-06-03). The `search_jobs` NL skill is
+        # already covered by the startswith("search_") rule.
+        "upwork_search_jobs",
+        "upwork_get_job_details",
+        "upwork_get_offers",
+        "find_contact",
+        "list_contacts",
+        "list_memories",
+        "lookup_project_asset",
+        # Budget reads — a Web UI "show me nima's expenses" /
+        # "expense report" must answer INLINE, not get
+        # AUTO-PROMOTE'd to a Telegram-bound background task.
+        "list_expenses",
+        "expense_report",
+        "list_projects",
+        "get_project",
+    }:
+        return True
+    # Quick single-shot budget writes stay inline too — see
+    # _QUICK_INLINE_BUDGET_WRITES (2026-05-28 latency incident).
+    if n in _QUICK_INLINE_BUDGET_WRITES:
+        return True
+    # Channel reads (whatsapp_read/list_chats, email_read,
+    # instagram_read_dms, etc.) are pure fetches — a Web UI
+    # "check my whatsapp" must answer INLINE, not get
+    # AUTO-PROMOTE'd to a background task whose result lands
+    # on Telegram (2026-05-26 incident). `_is_channel_read_
+    # tool_name` already curates the channel-read surface.
+    if _is_channel_read_tool_name(name):
+        return True
+    return (
+        "_get_" in n
+        # `search_jobs` matches startswith; `upwork_search_jobs`
+        # and other `<service>_search_*` reads need the
+        # mid-string form (the name starts with the service,
+        # not "search_").
+        or "_search_" in n
+        # Document/sheet READS — `read_sheet`, `read_doc`,
+        # `read_pdf` (native skills) and `<mcp>_read_sheet_
+        # values` are pure fetches. Without these a Web-UI
+        # "check sheet what we have there" that paged through
+        # read_sheet_values got AUTO-PROMOTE'd to a background
+        # task whose consolidated reply then vanished on web
+        # (2026-06-04). Mirrors the get_/list_/search_ rules.
+        or "_read_" in n
+        or n.startswith("get_")
+        or n.startswith("list_")
+        or n.startswith("search_")
+        or n.startswith("read_")
+        or n.startswith("recall_")
+        or n.endswith("_get_messages")
+        or n.endswith("_get_conversation")
+    )
+
+
+def _specialist_first_enabled(raw: str | None) -> bool:
+    """Parse the LAZYCLAW_SPECIALIST_FIRST_BRAIN env value.
+
+    Same accepted truthy set as LAZYCLAW_THIN_ROUTER; anything else —
+    unset, "", "0", "false", garbage — means OFF = zero behavior change
+    (every specialist-first code path is gated on this boolean).
+    """
+    return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _specialist_first_tool_allowed(name: str | None) -> bool:
+    """SPECIALIST-FIRST (ADR-0005 Phase 5a): may this tool be offered
+    to the brain inline?
+
+    Meta tools (routing/dispatch/memory) and read-only inspections pass;
+    every mutating/domain tool (sends, submits, edits, browser, …) is
+    filtered out so the brain must delegate it to a specialist. Applied
+    to the sent tool list on every iteration AND to the late-inject-
+    from-registry door (history-remembered tools get the same filter).
+    """
+    if not name:
+        return False
+    if name in _META_TOOLS:
+        return True
+    # _QUICK_INLINE_BUDGET_WRITES are MUTATIONS that ride the readonly
+    # predicate only to dodge AUTO-PROMOTE latency (2026-05-28 expense
+    # incident) — they are NOT reads, so specialist-first must not offer
+    # them inline. _is_readonly_inspection itself stays untouched
+    # (AUTO-PROMOTE behavior identical). Same mcp_<uuid>_ normalization
+    # as the readonly predicate.
+    n = name.lower()
+    if n.startswith("mcp_"):
+        parts = n.split("_", 2)
+        if len(parts) == 3:
+            n = parts[2]
+    if n in _QUICK_INLINE_BUDGET_WRITES:
+        return False
+    return _is_readonly_inspection(name)
+
+
+def _specialist_first_filter_pass(
+    name: str | None,
+    exempt: set[str] | frozenset[str],
+) -> bool:
+    """Filter decision including the turn-scoped fallback exemption.
+
+    Deliberate failure-recovery injections (browser fallback after 2
+    channel-MCP failures) register the lifted tool names in the
+    turn-scoped exempt set — those MUST win over the specialist-first
+    filter, otherwise the [FALLBACK] guidance advertises a tool the
+    next iteration silently strips again.
+    """
+    if name and name in exempt:
+        return True
+    return _specialist_first_tool_allowed(name)
 
 
 # ── Browser fallback after repeated channel-MCP failures ────────────────
@@ -3521,6 +3690,23 @@ class Agent:
             _os.environ.get("LAZYCLAW_THIN_ROUTER", "").strip().lower()
             in ("1", "true", "yes", "on")
         )
+        # Specialist-first brain (ADR-0005 Phase 5a): the brain only ever
+        # sees meta tools + read-only inspections (every iteration, incl.
+        # iteration 0) — mutating/domain tools must be reached through
+        # delegate/dispatch_subagents. Default off → zero behavior change.
+        # Composes with the thin-router cap (filter first, cap after).
+        _specialist_first = _specialist_first_enabled(
+            _os.environ.get(_SPECIALIST_FIRST_BRAIN_ENV),
+        )
+        if _specialist_first and needs_tools and tools:
+            # One short router note at turn start — same plain-system-
+            # message mechanism the cap/AUTO-PROMOTE guidance uses.
+            # Injected here (before the loop) so it fires exactly ONCE
+            # per turn, not once per iteration.
+            messages.append(LLMMessage(
+                role="system", content=_SPECIALIST_FIRST_GUIDANCE,
+            ))
+            logger.info("SPECIALIST-FIRST: router guidance injected")
         _promote_iter: int | None = None
         # Thin-router cap engagement tracking — mirrors AUTO-PROMOTE's
         # (_force_dispatch_only, _promote_iter) pair. The cap only narrows
@@ -3532,6 +3718,20 @@ class Agent:
         # delegate (guarantees the chat never freezes to max_iterations).
         _thin_router_capped = False
         _cap_iter: int | None = None
+        # Specialist-first stall anchor — SPECIALIST_FIRST=1 with
+        # THIN_ROUTER=0 skips AUTO-PROMOTE and never engages the cap, so
+        # nothing would arm the cap-aware failsafe below: a brain that
+        # pages read-only tools forever would hold the foreground lane to
+        # max_iterations. The anchor mirrors the cap engagement exactly
+        # (set at the top of the iteration after the first non-meta call)
+        # and arms the SAME failsafe; tools are NOT narrowed further.
+        _sf_stall_iter: int | None = None
+        # Turn-scoped specialist-first exemptions — deliberate failure-
+        # recovery injections (browser fallback after 2 channel-MCP
+        # failures) register the lifted tool names here so the filter
+        # and the late-inject gate let them through. Recovery wins over
+        # the filter; everything else stays filtered.
+        _specialist_first_exempt: set[str] = set()
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
         # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
@@ -3734,6 +3934,55 @@ class Agent:
                             "TAOR Plan phase injected (effort=%s, retry=%s)",
                             _effort, _taor_retry_context is not None,
                         )
+
+                # SPECIALIST-FIRST: filter the toolset to meta + read-only
+                # inspections on EVERY iteration (incl. iteration 0). Quick
+                # reads stay fast and inline; mutating/domain tools are never
+                # offered — the brain must delegate them. Filter first; the
+                # thin-router cap below then applies to what's left.
+                if _specialist_first and tools:
+                    _sf_kept = [
+                        t for t in tools
+                        if _specialist_first_filter_pass(
+                            t.get("function", {}).get("name"),
+                            _specialist_first_exempt,
+                        )
+                    ]
+                    if len(_sf_kept) != len(tools):
+                        # Suppress the removed names so the late-inject
+                        # path can't resurrect them from history memory
+                        # (same pattern as the cap / AUTO-PROMOTE blocks).
+                        _sf_removed = {
+                            t.get("function", {}).get("name")
+                            for t in tools
+                            if not _specialist_first_filter_pass(
+                                t.get("function", {}).get("name"),
+                                _specialist_first_exempt,
+                            )
+                        }
+                        _sf_removed.discard(None)
+                        _suppressed_tool_names |= _sf_removed  # type: ignore[arg-type]
+                        logger.info(
+                            "SPECIALIST-FIRST: tools filtered %d → %d "
+                            "(meta+readonly only) — domain work must be "
+                            "delegated",
+                            len(tools), len(_sf_kept),
+                        )
+                        tools = _sf_kept
+
+                # SPECIALIST-FIRST stall anchor: arm the cap-aware failsafe
+                # (below, shared with the thin-router cap) once the brain has
+                # made a non-meta call. Mirrors the cap engagement — same
+                # top-of-iteration timing, same one-grace-iteration semantics
+                # — but does NOT narrow tools (read-only paging stays
+                # allowed). A final text answer exits the loop before the
+                # failsafe block, so this only matters on a genuine stall.
+                if (
+                    _specialist_first
+                    and _sf_stall_iter is None
+                    and any(n not in _META_TOOLS for n in _called_tool_names)
+                ):
+                    _sf_stall_iter = iteration
 
                 # THIN-ROUTER: at most ONE inline domain (non-meta) tool call
                 # per turn; once made, narrow to meta-only so a 2nd domain call
@@ -4173,6 +4422,19 @@ class Agent:
                                 # upwork_inbox_check on 2026-06-10 16:20)
                                 # would otherwise re-enter through this
                                 # late-inject door and bypass the cap.
+                                _resurrect_blocked.append(tc.name)
+                                continue
+                            if (
+                                _specialist_first
+                                and not _specialist_first_filter_pass(
+                                    tc.name, _specialist_first_exempt,
+                                )
+                            ):
+                                # SPECIALIST-FIRST: mutating/domain tools the
+                                # LLM remembers from history get the SAME
+                                # filter the sent list went through — only
+                                # meta + read-only + fallback-exempt names
+                                # may re-enter via the late-inject door.
                                 _resurrect_blocked.append(tc.name)
                                 continue
                             _schema = self.registry.get_tool_schema(tc.name)
@@ -5889,6 +6151,11 @@ class Agent:
                     _browser_fallback_pending = None
                     _browser_fallback_injected = True
                     _suppressed_tool_names -= {"browser", "use_host_browser"}
+                    # SPECIALIST-FIRST: the lifted names must also survive
+                    # the next-iteration filter + late-inject gate, or the
+                    # [FALLBACK] guidance below advertises a tool that gets
+                    # silently stripped again. Recovery wins over the filter.
+                    _specialist_first_exempt |= {"browser", "use_host_browser"}
                     try:
                         _fb_existing = {
                             t.get("function", {}).get("name") for t in tools
@@ -6056,89 +6323,10 @@ class Agent:
                     for t in (tools or [])
                 )
 
-                def _is_readonly_inspection(name: str) -> bool:
-                    if not name:
-                        return False
-                    n = name.lower()
-                    if n.startswith("mcp_"):
-                        parts = n.split("_", 2)
-                        if len(parts) == 3:
-                            n = parts[2]
-                    if n in {
-                        "recall_memories", "search_tools", "save_memory",
-                        "list_tasks", "list_jobs", "list_watchers",
-                        "work_todos", "daily_briefing", "vault_get",
-                        # Deterministic read-only NL skills whose names
-                        # don't fit the get_*/list_*/search_* shape but
-                        # which are pure fetches that should NOT trigger
-                        # AUTO-PROMOTE. Without this, asking
-                        # "find out what James wants on Upwork" called
-                        # `upwork_last_conversation` (correct!) and the
-                        # brain was IMMEDIATELY force-promoted to
-                        # run_background before it could synthesize a
-                        # reply from the fetched data. Observed
-                        # 2026-05-17 19:17:41.
-                        "upwork_last_conversation",
-                        "upwork_inbox_check",
-                        "upwork_contract_poll",
-                        # Job/proposal READS — "find me 5 upwork jobs" is a
-                        # pure fetch. Without these, a web job search that
-                        # reached for the raw MCP tool got AUTO-PROMOTE'd to a
-                        # Telegram-bound background task instead of answering
-                        # inline (2026-06-03). The `search_jobs` NL skill is
-                        # already covered by the startswith("search_") rule.
-                        "upwork_search_jobs",
-                        "upwork_get_job_details",
-                        "upwork_get_offers",
-                        "find_contact",
-                        "list_contacts",
-                        "list_memories",
-                        "lookup_project_asset",
-                        # Budget reads — a Web UI "show me nima's expenses" /
-                        # "expense report" must answer INLINE, not get
-                        # AUTO-PROMOTE'd to a Telegram-bound background task.
-                        "list_expenses",
-                        "expense_report",
-                        "list_projects",
-                        "get_project",
-                    }:
-                        return True
-                    # Quick single-shot budget writes stay inline too — see
-                    # _QUICK_INLINE_BUDGET_WRITES (2026-05-28 latency incident).
-                    if n in _QUICK_INLINE_BUDGET_WRITES:
-                        return True
-                    # Channel reads (whatsapp_read/list_chats, email_read,
-                    # instagram_read_dms, etc.) are pure fetches — a Web UI
-                    # "check my whatsapp" must answer INLINE, not get
-                    # AUTO-PROMOTE'd to a background task whose result lands
-                    # on Telegram (2026-05-26 incident). `_is_channel_read_
-                    # tool_name` already curates the channel-read surface.
-                    if _is_channel_read_tool_name(name):
-                        return True
-                    return (
-                        "_get_" in n
-                        # `search_jobs` matches startswith; `upwork_search_jobs`
-                        # and other `<service>_search_*` reads need the
-                        # mid-string form (the name starts with the service,
-                        # not "search_").
-                        or "_search_" in n
-                        # Document/sheet READS — `read_sheet`, `read_doc`,
-                        # `read_pdf` (native skills) and `<mcp>_read_sheet_
-                        # values` are pure fetches. Without these a Web-UI
-                        # "check sheet what we have there" that paged through
-                        # read_sheet_values got AUTO-PROMOTE'd to a background
-                        # task whose consolidated reply then vanished on web
-                        # (2026-06-04). Mirrors the get_/list_/search_ rules.
-                        or "_read_" in n
-                        or n.startswith("get_")
-                        or n.startswith("list_")
-                        or n.startswith("search_")
-                        or n.startswith("read_")
-                        or n.startswith("recall_")
-                        or n.endswith("_get_messages")
-                        or n.endswith("_get_conversation")
-                    )
-
+                # _is_readonly_inspection lives at module level (hoisted
+                # 2026-06-10 so the specialist-first filter and the late-
+                # inject gate share the exact same predicate — see ADR-0005
+                # Phase 5a). Behavior here is unchanged.
                 _only_readonly_so_far = bool(_called_tool_names) and all(
                     _is_readonly_inspection(nm) for nm in _called_tool_names
                 )
@@ -6168,6 +6356,10 @@ class Agent:
                     # THIN-ROUTER replaces AUTO-PROMOTE with the earlier
                     # 1-inline-action cap; don't double-handle under the flag.
                     and not _thin_router
+                    # SPECIALIST-FIRST likewise supersedes AUTO-PROMOTE: the
+                    # filter already keeps mutating work out of the inline
+                    # path, so promotion would only strand read-only paging.
+                    and not _specialist_first
                 ):
                     _promoted_to_bg = True
                     _force_dispatch_only = True
@@ -6249,22 +6441,34 @@ class Agent:
                             "AUTO-PROMOTE failsafe failed; continuing inline",
                         )
 
-                # Cap-aware responsiveness failsafe (THIN-ROUTER path): the
-                # cap only narrows `tools` to meta-only — it never sets
-                # _force_dispatch_only, so the AUTO-PROMOTE failsafes above
-                # never fire under the flag. Without this, a brain that
-                # ignores the narrowed list and keeps iterating without
-                # delegating runs to max_iterations (frozen chat). Mirrors the
-                # AUTO-PROMOTE failsafe exactly, but keys on the cap flags:
-                # one iter AFTER the cap engaged, if the brain still hasn't
-                # called any dispatch tool, auto-submit the original message
-                # to task_runner. The brain gets one capped iteration first to
-                # actually delegate (iteration > _cap_iter).
-                if (
+                # Cap-aware responsiveness failsafe (THIN-ROUTER and
+                # SPECIALIST-FIRST paths): the cap only narrows `tools` to
+                # meta-only — it never sets _force_dispatch_only, so the
+                # AUTO-PROMOTE failsafes above never fire under the flag.
+                # Without this, a brain that ignores the narrowed list and
+                # keeps iterating without delegating runs to max_iterations
+                # (frozen chat). Mirrors the AUTO-PROMOTE failsafe exactly,
+                # but keys on the stall anchors: one iter AFTER the anchor
+                # engaged, if the brain still hasn't called any dispatch
+                # tool, auto-submit the original message to task_runner. The
+                # brain gets one anchored iteration first to actually
+                # delegate (iteration > anchor). SPECIALIST-FIRST alone
+                # (THIN_ROUTER=0) arms the same mechanics via _sf_stall_iter
+                # — AUTO-PROMOTE is skipped under that flag and the cap
+                # never engages, so this is its only stall exit.
+                _cap_stalled = (
                     _thin_router
                     and _thin_router_capped
                     and _cap_iter is not None
                     and iteration > _cap_iter
+                )
+                _sf_stalled = (
+                    _specialist_first
+                    and _sf_stall_iter is not None
+                    and iteration > _sf_stall_iter
+                )
+                if (
+                    (_cap_stalled or _sf_stalled)
                     and not getattr(self, "is_background", False)
                     and self._task_runner is not None
                     and user_id is not None
@@ -6273,11 +6477,14 @@ class Agent:
                         for d in ("delegate", "dispatch_subagents", "run_background")
                     )
                 ):
+                    _stall_anchor = _cap_iter if _cap_stalled else _sf_stall_iter
                     logger.warning(
                         "THIN-ROUTER failsafe: brain refused to delegate even "
-                        "with meta-only tool list at iter=%d (cap_iter=%d) — "
+                        "with %s tool list at iter=%d (anchor_iter=%s) — "
                         "runtime auto-submitting original message to task_runner",
-                        iteration, _cap_iter,
+                        "meta-only" if _cap_stalled
+                        else "meta+readonly (specialist-first)",
+                        iteration, _stall_anchor,
                     )
                     try:
                         from lazyclaw.runtime.agent_settings import get_agent_settings
@@ -6773,25 +6980,15 @@ class Agent:
         # ── Post-loop: persist + cleanup (guarded by finally) ─────────
         content = ""
         try:
-            # Resolve chat session
+            # Resolve chat session — channel turns with no explicit session
+            # (Telegram, heartbeat jobs, CLI) belong in the user's PRIMARY
+            # session, the shared cross-channel bucket. Picking "newest
+            # created session" here made channel history drift into whatever
+            # session the web UI spawned last, leaving the primary stale.
             if not chat_session_id:
-                async with db_session(self.config) as db:
-                    row = await db.execute(
-                        "SELECT id FROM agent_chat_sessions "
-                        "WHERE user_id = ? AND archived_at IS NULL "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        (user_id,),
-                    )
-                    existing = await row.fetchone()
-                    if existing:
-                        chat_session_id = existing[0]
-                    else:
-                        chat_session_id = str(uuid4())
-                        await db.execute(
-                            "INSERT INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
-                            (chat_session_id, user_id),
-                        )
-                        await db.commit()
+                from lazyclaw.runtime.session_resolver import get_primary_session_id
+
+                chat_session_id = await get_primary_session_id(self.config, user_id)
 
             # Store ALL messages (user, assistant, tool calls, tool results) encrypted
             rows = []

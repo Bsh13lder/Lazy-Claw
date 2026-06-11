@@ -76,6 +76,22 @@ def _install_fake(monkeypatch) -> _FakeLBStore:
         real_events, "publish_note_saved", lambda *a, **kw: None,
     )
 
+    # Since 2cd2655 the dedup lookup no longer goes through find_by_title —
+    # it's a direct SELECT on notes.title_key via mod._find_note_by_title_key.
+    # Patch that seam to consult the fake store so the dedup contract stays
+    # testable without a real DB.
+    from lazyclaw.lazybrain.store import _title_key
+
+    async def fake_find_by_title_key(config, user_id, title_key):
+        if not title_key:
+            return None
+        for n in reversed(store.notes):
+            if n["user_id"] == user_id and _title_key(n["title"]) == title_key:
+                return dict(n)
+        return None
+
+    monkeypatch.setattr(mod, "_find_note_by_title_key", fake_find_by_title_key)
+
     # personal.save_memory writes to the personal_memory DB table; we
     # don't care about that path here so stub it out entirely.
     async def fake_save_memory(*a, **kw):
@@ -103,34 +119,28 @@ def test_three_identical_lessons_produce_one_note(monkeypatch):
 
 
 def test_evolved_correction_updates_existing_note(monkeypatch):
-    """When a user refines the SAME correction with more detail — same
-    first 60 chars → same canonical title — the existing note's content
-    + tags + importance update; no new row gets created.
+    """Re-stating the SAME correction (modulo whitespace/case drift) with
+    a higher importance updates the existing note in place — no new row.
 
-    The contract is intentionally lenient: the first 60 chars are the
-    dedup handle, so rewording the lesson tail (which is common when a
-    user adds nuance) merges into the same card. Total rewrites land
-    as a new card (covered by `test_different_content_does_not_dedup`).
+    Updated for 2cd2655 ("content-addressable dedup"): the dedup handle is
+    now a sha256 of the FULL normalized content (whitespace-collapsed +
+    lowercased), deliberately replacing the old lenient first-60-chars
+    slice. A reworded tail therefore lands as a NEW card by design
+    (covered by `test_different_content_does_not_dedup`); only formatting
+    drift of the same fact merges into the existing card.
     """
     store = _install_fake(monkeypatch)
 
-    # base has to be ≥60 chars so the canonical title (content[:60])
-    # is identical between first + refined. Below it, the two contents
-    # only diverge in the tail beyond char 60 — exactly the case the
-    # dedup is meant to catch.
-    base = (
-        "Use vault_get for retrieving stored API keys; the memory-recall "
-        "layer never has key values"
-    )
-    assert len(base) >= 60
     first = Lesson(
-        content=base + " (short note).",
+        content="Use vault_get for API keys; memory recall never has key values.",
         lesson_type="preference",
         domain=None,
         importance=5,
     )
+    # Same fact, trivial formatting drift (case + whitespace) → same
+    # normalized-content hash → upsert into the existing card.
     refined = Lesson(
-        content=base + " — only the key NAME, never the value. Use vault.",
+        content="  Use  VAULT_GET for API keys;\nmemory recall never has key values. ",
         lesson_type="preference",
         domain=None,
         importance=7,
@@ -140,7 +150,7 @@ def test_evolved_correction_updates_existing_note(monkeypatch):
 
     assert len(store.notes) == 1
     body = store.notes[0]["content"]
-    assert "only the key NAME" in body
+    assert "VAULT_GET" in body  # content refreshed to the latest statement
     assert store.notes[0]["importance"] == 7
 
 

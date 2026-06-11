@@ -47,6 +47,11 @@ async def test_concurrent_upserts_for_same_note_do_not_interleave():
     with (
         patch.object(embeddings, "db_session", fake_session),
         patch.object(embeddings, "_vec_available", vec_ok),
+        # Fresh lock per test: the module-global asyncio.Lock binds to the
+        # first event loop that CONTENDS it. In a full-suite run an earlier
+        # test (own pytest-asyncio loop) may have bound it, making our
+        # contended acquire raise "bound to a different event loop".
+        patch.object(embeddings, "_VEC_UPSERT_LOCK", asyncio.Lock()),
     ):
         vec = [0.0] * embeddings.EMBED_DIM
         config = None  # fake session ignores it

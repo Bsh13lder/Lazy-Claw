@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../local/document_cache_dao.dart';
 import '../../providers/documents_provider.dart';
@@ -16,7 +17,18 @@ import 'sheet_grid.dart';
 import 'sheet_selection.dart';
 import 'sheet_toolbar.dart';
 import 'univer_model.dart';
+import 'univer_ops.dart';
 import 'univer_parse.dart';
+
+// ── URL / markdown detection (mirrors univer_ops regexes) ────────────────────
+
+/// Bare URL: the entire trimmed value is a URL (trailing punctuation stripped).
+final _kBareUrlRe = RegExp(r'^https?://[^\s<>"]+$');
+
+/// Markdown link: `[display](url)`.
+final _kMdLinkRe = RegExp(r'^\[([^\]]+)\]\((https?://[^\s)]+)\)$');
+
+const _kTrailChars = '.,;:!?)';
 
 /// Full native editor for a single sheet: tap a cell to load it into the formula
 /// bar, edit the value or `=formula`, and commit. Formulas recompute on the
@@ -228,6 +240,31 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     var next = isFormula
         ? sheet.setCell(r, c, formula: raw.trim())
         : sheet.setCell(r, c, value: raw);
+
+    // ── Auto-convert bare URLs and markdown links typed into the formula bar ──
+    if (!isFormula) {
+      final trimmed = raw.trim();
+
+      // Markdown [display](url)
+      final mdMatch = _kMdLinkRe.firstMatch(trimmed);
+      if (mdMatch != null) {
+        final display = mdMatch.group(1)!;
+        final url = mdMatch.group(2)!;
+        next = next.setCell(r, c, value: display);
+        next = next.setLink(r, c, url, display: display);
+      } else {
+        // Bare URL (strip trailing punctuation)
+        var candidate = trimmed;
+        while (candidate.isNotEmpty &&
+            _kTrailChars.contains(candidate[candidate.length - 1])) {
+          candidate = candidate.substring(0, candidate.length - 1);
+        }
+        if (_kBareUrlRe.hasMatch(candidate)) {
+          next = next.setLink(r, c, candidate);
+        }
+      }
+    }
+
     setState(() => _sheet = next);
 
     if (isFormula) {
@@ -270,6 +307,70 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         _applyStylePatch({'ht': _anchorStyle.hAlign == 2 ? null : 2});
       case SheetToolbarAction.alignRight:
         _applyStylePatch({'ht': _anchorStyle.hAlign == 3 ? null : 3});
+      case SheetToolbarAction.insertLink:
+        _showLinkDialog();
+    }
+  }
+
+  // ── Link dialog ──────────────────────────────────────────────────────────────
+
+  /// Open the insert/edit-link bottom sheet for the anchor cell.
+  Future<void> _showLinkDialog() async {
+    final sheet = _sheet;
+    final sel = _sel;
+    if (sheet == null || sel == null) return;
+    final r = sel.anchorRow;
+    final c = sel.anchorCol;
+
+    final existingUrl = sheet.linkAt(r, c);
+    final existingDisplay = sheet.cellAt(r, c).display;
+
+    await LzBottomSheet.show<void>(
+      context,
+      title: existingUrl != null ? 'Edit link' : 'Insert link',
+      builder: (_) => _LinkDialogBody(
+        initialDisplay: existingDisplay,
+        initialUrl: existingUrl ?? '',
+        onSave: (display, url) {
+          _pushUndo();
+          var next = _sheet!;
+          next = next.setLink(r, c, url,
+              display: display.trim().isEmpty ? null : display.trim());
+          setState(() => _sheet = next);
+          _scheduleSave();
+        },
+      ),
+    );
+  }
+
+  // ── Bulk convert ─────────────────────────────────────────────────────────────
+
+  Future<void> _bulkConvertLinks() async {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    setState(() => _saving = true);
+    try {
+      final repo = ref.read(documentsRepositoryProvider);
+      final result = await repo.convertLinks(widget.id);
+      if (!mounted) return;
+      if (result.converted == 0) {
+        _snack('No plain URLs found.');
+      } else {
+        _pushUndo();
+        setState(() {
+          _sheet = UniverSheet.fromWorkbook(
+            result.snapshot,
+            active: sheet.activeIndex,
+          );
+        });
+        await _cacheWorkbook(result.snapshot, widget.name);
+        _snack('Converted ${result.converted} link${result.converted == 1 ? '' : 's'}.');
+      }
+    } catch (_) {
+      if (!mounted) return;
+      _snack('Convert failed. Try again.', error: true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -448,11 +549,18 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
                 _export('xlsx', 'xlsx', _xlsxMime);
               } else if (v == 'csv') {
                 _export('csv', 'csv', 'text/csv');
+              } else if (v == 'convert_links') {
+                _bulkConvertLinks();
               }
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'xlsx', child: Text('Export as Excel (.xlsx)')),
               PopupMenuItem(value: 'csv', child: Text('Export as CSV (.csv)')),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'convert_links',
+                child: Text('Convert URLs to links'),
+              ),
             ],
           ),
           LzIconButton(
@@ -479,6 +587,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
                   onFillColor: _applyFillColor,
                   onNumberFormat: _applyNumberFormat,
                 ),
+              if (sheet != null && _sel != null && _sel!.isSingle)
+                _linkChip(sheet),
               if (sheet != null) _formulaBar(),
               if (suggestions.isNotEmpty) _formulaHelper(suggestions),
               Expanded(child: _buildBody()),
@@ -510,6 +620,105 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
                 }),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  // ── Link chip ─────────────────────────────────────────────────────────────────
+
+  /// Compact action strip shown when the anchor cell has a hyperlink.
+  /// Renders: "🔗 {host}" + Open / Edit / Remove buttons.
+  Widget _linkChip(UniverSheet sheet) {
+    final sel = _sel;
+    if (sel == null) return const SizedBox.shrink();
+    final url = sheet.linkAt(sel.anchorRow, sel.anchorCol);
+    if (url == null) return const SizedBox.shrink();
+
+    String hostLabel;
+    try {
+      hostLabel = Uri.parse(url).host.isNotEmpty ? Uri.parse(url).host : url;
+    } catch (_) {
+      hostLabel = url;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: 4,
+      ),
+      decoration: const BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          const Text('🔗 ', style: TextStyle(fontSize: 12)),
+          Expanded(
+            child: Text(
+              hostLabel,
+              style: AppText.caption.copyWith(color: AppColors.accent),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // Open
+          TextButton(
+            style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: () async {
+              try {
+                await launchUrl(
+                  Uri.parse(url),
+                  mode: LaunchMode.externalApplication,
+                );
+              } catch (_) {
+                if (mounted) _snack('Could not open link.', error: true);
+              }
+            },
+            child: Text(
+              'Open',
+              style: AppText.caption.copyWith(color: AppColors.accent),
+            ),
+          ),
+          // Edit
+          TextButton(
+            style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: _showLinkDialog,
+            child: Text(
+              'Edit',
+              style: AppText.caption.copyWith(color: AppColors.textSecondary),
+            ),
+          ),
+          // Remove
+          TextButton(
+            style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: () {
+              if (_sel == null || _sheet == null) return;
+              _pushUndo();
+              setState(() {
+                _sheet = _sheet!.removeLink(
+                  _sel!.anchorRow,
+                  _sel!.anchorCol,
+                );
+              });
+              _scheduleSave();
+            },
+            child: Text(
+              'Remove',
+              style: AppText.caption.copyWith(color: AppColors.error),
+            ),
+          ),
         ],
       ),
     );
@@ -622,5 +831,117 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         );
       },
     );
+  }
+}
+
+// ── _LinkDialogBody ───────────────────────────────────────────────────────────
+
+/// Content for the insert/edit-link bottom sheet.
+///
+/// Two fields: display text (optional) and URL (required, must start http(s)://).
+/// Calls [onSave] when the user taps Save with a valid URL.
+class _LinkDialogBody extends StatefulWidget {
+  const _LinkDialogBody({
+    required this.initialDisplay,
+    required this.initialUrl,
+    required this.onSave,
+  });
+
+  final String initialDisplay;
+  final String initialUrl;
+  final void Function(String display, String url) onSave;
+
+  @override
+  State<_LinkDialogBody> createState() => _LinkDialogBodyState();
+}
+
+class _LinkDialogBodyState extends State<_LinkDialogBody> {
+  late final TextEditingController _displayCtrl;
+  late final TextEditingController _urlCtrl;
+  String? _urlError;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayCtrl = TextEditingController(text: widget.initialDisplay);
+    _urlCtrl = TextEditingController(text: widget.initialUrl);
+  }
+
+  @override
+  void dispose() {
+    _displayCtrl.dispose();
+    _urlCtrl.dispose();
+    super.dispose();
+  }
+
+  bool _validate() {
+    final url = _urlCtrl.text.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      setState(() => _urlError = 'URL must start with http:// or https://');
+      return false;
+    }
+    setState(() => _urlError = null);
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _displayCtrl,
+          decoration: InputDecoration(
+            labelText: 'Display text (optional)',
+            labelStyle: AppText.caption.copyWith(color: AppColors.textMuted),
+            border: OutlineInputBorder(
+              borderRadius: AppRadii.rSm,
+              borderSide: const BorderSide(color: AppColors.borderDefault),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: AppRadii.rSm,
+              borderSide: const BorderSide(color: AppColors.borderDefault),
+            ),
+          ),
+          style: AppText.body,
+          textInputAction: TextInputAction.next,
+        ),
+        const SizedBox(height: AppSpacing.md),
+        TextField(
+          controller: _urlCtrl,
+          decoration: InputDecoration(
+            labelText: 'URL',
+            labelStyle: AppText.caption.copyWith(color: AppColors.textMuted),
+            errorText: _urlError,
+            border: OutlineInputBorder(
+              borderRadius: AppRadii.rSm,
+              borderSide: const BorderSide(color: AppColors.borderDefault),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: AppRadii.rSm,
+              borderSide: const BorderSide(color: AppColors.borderDefault),
+            ),
+          ),
+          style: AppText.body,
+          keyboardType: TextInputType.url,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        LzButton(
+          label: 'Save',
+          onPressed: _submit,
+        ),
+      ],
+    );
+  }
+
+  void _submit() {
+    if (!_validate()) return;
+    final url = _urlCtrl.text.trim();
+    final display = _displayCtrl.text;
+    Navigator.of(context).pop();
+    widget.onSave(display, url);
   }
 }

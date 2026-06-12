@@ -26,6 +26,8 @@ enum SheetToolbarAction {
   alignRight,
   undo,
   redo,
+  /// Insert / edit a hyperlink on the anchor cell.
+  insertLink,
 }
 
 // ── Color swatch palette ──────────────────────────────────────────────────────
@@ -188,6 +190,14 @@ class SheetToolbar extends StatelessWidget {
             _NumFmtBtn(
               currentPattern: anchorStyle.numFmt,
               onPick: onNumberFormat,
+            ),
+            _divider(),
+            // ── Insert link ──────────────────────────────────────────────────
+            _IconToggleBtn(
+              icon: Icons.link,
+              tooltip: 'Insert link',
+              active: false,
+              onTap: () => onAction(SheetToolbarAction.insertLink),
             ),
             _divider(),
             // ── Undo / Redo ──────────────────────────────────────────────────

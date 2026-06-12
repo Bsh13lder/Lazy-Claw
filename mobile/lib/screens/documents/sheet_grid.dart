@@ -27,6 +27,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import 'sheet_selection.dart';
 import 'univer_model.dart';
+import 'univer_ops.dart';
 import 'univer_parse.dart';
 
 /// Public grid widget consumed by [SheetEditorScreen].
@@ -349,10 +350,15 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
               )
             : Border.all(color: AppColors.borderSubtle, width: 0.5);
 
-    // Text color.
-    final textColor = style.color != null
-        ? (_parseHex(style.color!) ?? AppColors.textPrimary)
-        : AppColors.textPrimary;
+    // Check for hyperlink on this cell — linked cells override text color.
+    final hasLink = widget.sheet.linkAt(r, c) != null;
+
+    // Text color: link overrides style color.
+    final textColor = hasLink
+        ? AppColors.accent
+        : style.color != null
+            ? (_parseHex(style.color!) ?? AppColors.textPrimary)
+            : AppColors.textPrimary;
 
     // Alignment.
     Alignment alignment;
@@ -379,7 +385,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
       fontWeight: style.bold ? FontWeight.w700 : FontWeight.w400,
       fontStyle: style.italic ? FontStyle.italic : FontStyle.normal,
       decoration: TextDecoration.combine([
-        if (style.underline) TextDecoration.underline,
+        if (style.underline || hasLink) TextDecoration.underline,
         if (style.strike) TextDecoration.lineThrough,
       ]),
       decorationColor: textColor,

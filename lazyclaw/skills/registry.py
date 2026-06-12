@@ -228,8 +228,9 @@ class SkillRegistry:
         # Sheets — private encrypted spreadsheets (Univer web editor +
         # agent-editable). Same local-encrypted-store profile as budgets/tasks.
         from lazyclaw.skills.builtin.sheets import (
-            CreateSheetSkill, ListSheetsSkill, ReadSheetSkill,
-            RecalcSheetSkill, SendSheetSkill, SetCellsSkill, SetFormulaSkill,
+            ConvertSheetLinksSkill, CreateSheetSkill, ListSheetsSkill,
+            ReadSheetSkill, RecalcSheetSkill, SendSheetSkill, SetCellsSkill,
+            SetFormulaSkill,
         )
         self.register(CreateSheetSkill(config=config))
         self.register(ListSheetsSkill(config=config))
@@ -238,6 +239,7 @@ class SkillRegistry:
         self.register(SetFormulaSkill(config=config))
         self.register(RecalcSheetSkill(config=config))
         self.register(SendSheetSkill(config=config))
+        self.register(ConvertSheetLinksSkill(config=config))
 
         # Docs — private encrypted word-processor documents (Univer Docs
         # editor + agent edits). Same encrypted-blob profile as sheets.

@@ -80,6 +80,27 @@ def test_skill_categories_non_empty(registry: SkillRegistry) -> None:
         )
 
 
+def test_sheet_skills_all_registered(registry: SkillRegistry) -> None:
+    """All 8 sheet skills — including convert_sheet_links — must be registered.
+
+    This prevents the 'defined but not registered' class: adding a skill to
+    sheets.py without wiring it into registry.register_defaults() makes it
+    dead code at runtime (the agent can never discover or call it).
+    """
+    expected = {
+        "create_sheet",
+        "list_sheets",
+        "read_sheet",
+        "set_cells",
+        "set_formula",
+        "recalc_sheet",
+        "send_sheet",
+        "convert_sheet_links",
+    }
+    missing = expected - set(registry._skills.keys())
+    assert not missing, f"sheet skills missing from registry: {missing}"
+
+
 def test_search_tools_returns_results(registry: SkillRegistry) -> None:
     """The meta-tool the LLM uses for discovery must actually find things."""
     import asyncio

@@ -1,15 +1,28 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 
+// ── Pure filter helper (top-level so tests can import it directly) ────────────
+
+/// Returns docs that have ALL [selectedTags] present (AND semantics).
+/// When [selectedTags] is empty, returns [docs] unchanged.
+List<DocMeta> filterByTags(List<DocMeta> docs, Set<String> selectedTags) {
+  if (selectedTags.isEmpty) return docs;
+  return docs
+      .where((d) => selectedTags.every((t) => d.tags.contains(t)))
+      .toList();
+}
+
 /// The list for one [DocKind] sub-tab: skeleton / error / empty / cards.
 ///
 /// Network-only (the office suite is decrypted server-side per request), so this
 /// shows loading + error states from the kit. Tapping a card calls [onOpen];
 /// the empty-state action calls [onCreate]; per-card delete confirms first.
+/// Long-pressing a card opens the tag editor sheet.
 class DocumentsListView extends ConsumerStatefulWidget {
   const DocumentsListView({
     super.key,
@@ -27,6 +40,9 @@ class DocumentsListView extends ConsumerStatefulWidget {
 }
 
 class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
+  /// Tags currently selected for filtering (AND semantics).
+  Set<String> _selectedTags = {};
+
   @override
   void initState() {
     super.initState();
@@ -45,6 +61,72 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
     );
     if (!ok || !mounted) return;
     await ref.read(documentsListProvider(widget.kind).notifier).delete(meta.id);
+  }
+
+  /// Opens the tag editor bottom-sheet for [meta]. Handles save routing:
+  /// PDFs → setPdfTags; sheets/docs → fetch-then-save with CAS protection.
+  Future<void> _editTags(DocMeta meta) async {
+    final allKnownTags = ref
+        .read(documentsListProvider(widget.kind))
+        .items
+        .expand((d) => d.tags)
+        .toSet();
+
+    final newTags = await _TagEditorSheet.show(
+      context,
+      current: meta.tags,
+      knownTags: allKnownTags,
+    );
+    if (newTags == null || !mounted) return;
+
+    final repo = ref.read(documentsRepositoryProvider);
+
+    try {
+      if (widget.kind == DocKind.pdf) {
+        await repo.setPdfTags(meta.id, newTags);
+      } else {
+        await _saveTagsForDoc(repo, meta, newTags);
+      }
+      if (mounted) {
+        ref.read(documentsListProvider(widget.kind).notifier).refresh();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bgSurfaceElevated,
+            content: Text(
+              "Couldn't save tags",
+              style: AppText.body.copyWith(color: AppColors.error),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Fetch-then-save for sheets/docs (keeps CAS safety). Retries once on
+  /// [DocConflictException] with the server's current payload.
+  Future<void> _saveTagsForDoc(
+    DocumentsRepository repo,
+    DocMeta meta,
+    List<String> tags,
+  ) async {
+    Future<void> attempt(DocPayload detail) => repo.save(
+          widget.kind,
+          meta.id,
+          detail.payload,
+          tags: tags,
+          baseUpdatedAt: detail.updatedAt,
+        );
+
+    final detail = await repo.getPayload(widget.kind, meta.id);
+    try {
+      await attempt(detail);
+    } on DocConflictException catch (conflict) {
+      // Retry once with the server's current version.
+      await attempt(conflict.current);
+    }
   }
 
   @override
@@ -94,28 +176,66 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
       );
     }
 
+    // Compute distinct sorted tags and filtered items.
+    final allTags = state.items
+        .expand((d) => d.tags)
+        .toSet()
+        .toList()
+      ..sort();
+    final filtered = filterByTags(state.items, _selectedTags);
+    final hasAnyTags = allTags.isNotEmpty;
+
     return LzRefresh(
       onRefresh: notifier.refresh,
-      child: ListView.separated(
-        padding: const EdgeInsets.fromLTRB(
-          AppSpacing.lg,
-          AppSpacing.md,
-          AppSpacing.lg,
-          AppSpacing.xxxl,
-        ),
-        itemCount: state.items.length,
-        separatorBuilder: (context, index) =>
-            const SizedBox(height: AppSpacing.sm),
-        itemBuilder: (context, i) {
-          final meta = state.items[i];
-          return _DocCard(
-            meta: meta,
-            kind: widget.kind,
-            deleting: state.deletingId == meta.id,
-            onTap: () => widget.onOpen(meta),
-            onDelete: () => _confirmDelete(meta),
-          );
-        },
+      child: CustomScrollView(
+        slivers: [
+          // ── Tag filter row ─────────────────────────────────────────────────
+          if (hasAnyTags)
+            SliverToBoxAdapter(
+              child: _TagFilterRow(
+                tags: allTags,
+                selected: _selectedTags,
+                onToggle: (tag) {
+                  setState(() {
+                    if (tag == null) {
+                      _selectedTags = {};
+                    } else if (_selectedTags.contains(tag)) {
+                      _selectedTags = _selectedTags
+                          .where((t) => t != tag)
+                          .toSet();
+                    } else {
+                      _selectedTags = {..._selectedTags, tag};
+                    }
+                  });
+                },
+              ),
+            ),
+          // ── Document list ──────────────────────────────────────────────────
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              hasAnyTags ? AppSpacing.sm : AppSpacing.md,
+              AppSpacing.lg,
+              AppSpacing.xxxl,
+            ),
+            sliver: SliverList.separated(
+              itemCount: filtered.length,
+              separatorBuilder: (context, index) =>
+                  const SizedBox(height: AppSpacing.sm),
+              itemBuilder: (context, i) {
+                final meta = filtered[i];
+                return _DocCard(
+                  meta: meta,
+                  kind: widget.kind,
+                  deleting: state.deletingId == meta.id,
+                  onTap: () => widget.onOpen(meta),
+                  onDelete: () => _confirmDelete(meta),
+                  onLongPress: () => _editTags(meta),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -157,7 +277,56 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
   }
 }
 
-// ── Card ─────────────────────────────────────────────────────────────────────
+// ── Tag filter row ─────────────────────────────────────────────────────────────
+
+class _TagFilterRow extends StatelessWidget {
+  const _TagFilterRow({
+    required this.tags,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  /// All distinct tags across the current list (sorted).
+  final List<String> tags;
+
+  /// Currently selected tags (AND filter).
+  final Set<String> selected;
+
+  /// Called with null to clear ("All"), or with a tag name to toggle it.
+  final void Function(String? tag) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 40,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+        children: [
+          // "All" chip clears the filter.
+          LzChip(
+            key: const Key('tag-filter-all'),
+            label: 'All',
+            selected: selected.isEmpty,
+            onTap: () => onToggle(null),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          for (final tag in tags) ...[
+            LzChip(
+              key: Key('tag-filter-$tag'),
+              label: tag,
+              selected: selected.contains(tag),
+              onTap: () => onToggle(tag),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ── Card ───────────────────────────────────────────────────────────────────────
 
 class _DocCard extends StatelessWidget {
   const _DocCard({
@@ -166,6 +335,7 @@ class _DocCard extends StatelessWidget {
     required this.deleting,
     required this.onTap,
     required this.onDelete,
+    required this.onLongPress,
   });
 
   final DocMeta meta;
@@ -173,6 +343,9 @@ class _DocCard extends StatelessWidget {
   final bool deleting;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+  final VoidCallback onLongPress;
+
+  static const int _maxVisibleTags = 3;
 
   IconData get _icon {
     switch (kind) {
@@ -197,7 +370,13 @@ class _DocCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LzCard(
+    final visibleTags = meta.tags.take(_maxVisibleTags).toList();
+    final overflow = meta.tags.length - visibleTags.length;
+    final hasTags = meta.tags.isNotEmpty;
+
+    // LzCard doesn't expose onLongPress, so we layer a GestureDetector for the
+    // long-press and pass the tap through to LzCard normally.
+    final card = LzCard(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.md,
         vertical: AppSpacing.sm,
@@ -231,6 +410,19 @@ class _DocCard extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(_subtitle, style: AppText.caption),
                 ],
+                if (hasTags) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  Wrap(
+                    spacing: AppSpacing.xs,
+                    runSpacing: AppSpacing.xs,
+                    children: [
+                      for (final tag in visibleTags)
+                        _TagChip(tag: tag),
+                      if (overflow > 0)
+                        _TagChip(tag: '+$overflow', muted: true),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -258,6 +450,308 @@ class _DocCard extends StatelessWidget {
               onPressed: onDelete,
             ),
         ],
+      ),
+    );
+
+    if (deleting) return card;
+
+    return GestureDetector(
+      onLongPress: onLongPress,
+      child: card,
+    );
+  }
+}
+
+// ── Tag chip (display-only, accent-tinted) ────────────────────────────────────
+
+/// Small display chip for a tag on a document card (up to 3 + "+N" overflow).
+class _TagChip extends StatelessWidget {
+  const _TagChip({required this.tag, this.muted = false});
+
+  final String tag;
+
+  /// When true, uses [AppColors.textMuted] tint (used for "+N" overflow chip).
+  final bool muted;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = muted ? AppColors.textMuted : AppColors.accent;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: 2,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: AppRadii.rPill,
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Text(
+        tag,
+        style: AppText.caption.copyWith(
+          color: color,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+// ── Tag editor bottom-sheet ────────────────────────────────────────────────────
+
+class _TagEditorSheet extends StatefulWidget {
+  const _TagEditorSheet({
+    required this.current,
+    required this.knownTags,
+  });
+
+  final List<String> current;
+  final Set<String> knownTags;
+
+  /// Shows the sheet and returns the new tag list, or null when dismissed.
+  static Future<List<String>?> show(
+    BuildContext context, {
+    required List<String> current,
+    required Set<String> knownTags,
+  }) {
+    return LzBottomSheet.show<List<String>>(
+      context,
+      title: 'Tags',
+      builder: (ctx) => _TagEditorSheet(
+        current: current,
+        knownTags: knownTags,
+      ),
+    );
+  }
+
+  @override
+  State<_TagEditorSheet> createState() => _TagEditorSheetState();
+}
+
+class _TagEditorSheetState extends State<_TagEditorSheet> {
+  late List<String> _tags;
+  final TextEditingController _ctrl = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+
+  static const int _maxTagLength = 40;
+
+  @override
+  void initState() {
+    super.initState();
+    _tags = List<String>.from(widget.current);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _addTag(String raw) {
+    final tag = raw.trim();
+    if (tag.isEmpty) return;
+    final clamped =
+        tag.length > _maxTagLength ? tag.substring(0, _maxTagLength) : tag;
+    if (_tags.contains(clamped)) {
+      _ctrl.clear();
+      return;
+    }
+    setState(() {
+      _tags = [..._tags, clamped];
+    });
+    _ctrl.clear();
+  }
+
+  void _removeTag(String tag) {
+    setState(() {
+      _tags = _tags.where((t) => t != tag).toList();
+    });
+  }
+
+  void _save() {
+    if (_ctrl.text.trim().isNotEmpty) _addTag(_ctrl.text);
+    Navigator.of(context).pop(List<String>.unmodifiable(_tags));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Suggestions: known tags not yet on this document.
+    final suggestions = widget.knownTags
+        .where((t) => !_tags.contains(t))
+        .toList()
+      ..sort();
+
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Current tags ────────────────────────────────────────────────────
+          if (_tags.isNotEmpty) ...[
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: [
+                for (final tag in _tags)
+                  _DeletableTagChip(
+                    tag: tag,
+                    onDelete: () => _removeTag(tag),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.md),
+          ],
+          // ── Text field ──────────────────────────────────────────────────────
+          Text(
+            'Add tag',
+            style: AppText.label.copyWith(color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(
+            controller: _ctrl,
+            focusNode: _focusNode,
+            style: AppText.body,
+            cursorColor: AppColors.accent,
+            textInputAction: TextInputAction.done,
+            inputFormatters: [
+              LengthLimitingTextInputFormatter(_maxTagLength),
+            ],
+            onSubmitted: _addTag,
+            decoration: const InputDecoration(
+              hintText: 'e.g. finance, Q3, draft',
+            ),
+          ),
+          // ── Suggestions ─────────────────────────────────────────────────────
+          if (suggestions.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'Suggested',
+              style: AppText.caption.copyWith(color: AppColors.textMuted),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: [
+                for (final tag in suggestions)
+                  _SuggestionChip(
+                    tag: tag,
+                    onTap: () => _addTag(tag),
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: AppSpacing.lg),
+          // ── Actions ─────────────────────────────────────────────────────────
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              LzButton.ghost(
+                label: 'Cancel',
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              LzButton.primary(
+                label: 'Save',
+                onPressed: _save,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Deletable tag chip (inside the tag editor) ────────────────────────────────
+
+class _DeletableTagChip extends StatelessWidget {
+  const _DeletableTagChip({required this.tag, required this.onDelete});
+
+  final String tag;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AppRadii.rPill,
+      child: InkWell(
+        borderRadius: AppRadii.rPill,
+        onTap: onDelete,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md,
+            AppSpacing.xs,
+            AppSpacing.xs,
+            AppSpacing.xs,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.accent.withValues(alpha: 0.14),
+            borderRadius: AppRadii.rPill,
+            border: Border.all(
+              color: AppColors.accent.withValues(alpha: 0.35),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                tag,
+                style: AppText.caption.copyWith(
+                  color: AppColors.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.xs),
+              Icon(
+                Icons.close_rounded,
+                size: 14,
+                color: AppColors.accent.withValues(alpha: 0.7),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Suggestion chip ────────────────────────────────────────────────────────────
+
+class _SuggestionChip extends StatelessWidget {
+  const _SuggestionChip({required this.tag, required this.onTap});
+
+  final String tag;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AppRadii.rPill,
+      child: InkWell(
+        borderRadius: AppRadii.rPill,
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.xs,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rPill,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: Text(
+            tag,
+            style: AppText.caption.copyWith(
+              color: AppColors.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
       ),
     );
   }

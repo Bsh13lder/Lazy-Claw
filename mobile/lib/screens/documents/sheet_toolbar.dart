@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:lazyclaw_mobile/screens/documents/sheet_selection.dart';
 import 'package:lazyclaw_mobile/screens/documents/univer_model.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
@@ -386,7 +387,7 @@ class _ColorSwatchBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final preview = _parseHex(currentColor);
+    final preview = parseHex(currentColor);
     return Tooltip(
       message: tooltip,
       child: InkWell(
@@ -432,7 +433,7 @@ class _ColorSwatchBtn extends StatelessWidget {
         PopupMenuItem<String?>(
           enabled: false,
           child: _SwatchGrid(onPick: (hex) {
-            Navigator.of(context).pop(hex);
+            if (context.mounted) Navigator.of(context).pop(hex);
           }),
         ),
       ],
@@ -440,6 +441,7 @@ class _ColorSwatchBtn extends StatelessWidget {
     // `chosen` is null if dismissed without selecting.
     // The swatch grid pops with either a hex string or the sentinel '' for
     // "remove color".
+    if (!context.mounted) return;
     if (chosen != null) {
       onPick(chosen.isEmpty ? null : chosen);
     }
@@ -456,14 +458,6 @@ class _ColorSwatchBtn extends StatelessWidget {
       pos.dx + size.width,
       pos.dy + size.height + 4,
     );
-  }
-
-  Color? _parseHex(String? hex) {
-    if (hex == null || hex.isEmpty) return null;
-    final clean = hex.replaceFirst('#', '');
-    final val = int.tryParse(clean, radix: 16);
-    if (val == null) return null;
-    return Color(0xFF000000 | val);
   }
 }
 

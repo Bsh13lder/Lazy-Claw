@@ -208,9 +208,11 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     final sel = _sel;
     if (sel == null) return;
     final (rows, cols) = _gridDims();
-    setState(() {
-      _sel = sel.extendTo(row.clamp(0, rows - 1), col.clamp(0, cols - 1));
-    });
+    final next = sel.extendTo(row.clamp(0, rows - 1), col.clamp(0, cols - 1));
+    // Skip the setState when the clamped extend produces the same selection —
+    // this avoids per-pixel full-screen rebuilds during handle drags.
+    if (next == _sel) return;
+    setState(() => _sel = next);
   }
 
   void _startSelectionFrom(int row, int col) {
@@ -434,8 +436,9 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
           .save(DocKind.sheets, widget.id, workbook, name: widget.name);
       await _cacheWorkbook(workbook, widget.name);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
-    } catch (_) {
+    } catch (e) {
       // Autosave is best-effort; the next edit reschedules another save.
+      debugPrint('sheet autosave failed: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }

@@ -5,7 +5,7 @@
 /// for translating between pixel space and grid space.
 library;
 
-import 'dart:ui' show Offset;
+import 'dart:ui' show Color, Offset;
 
 import 'package:lazyclaw_mobile/screens/documents/univer_model.dart';
 
@@ -60,6 +60,21 @@ class SheetSelection {
   @override
   String toString() =>
       'SheetSelection(anchor:$anchorRow,$anchorCol focus:$focusRow,$focusCol)';
+}
+
+// ── Hit-test helper ───────────────────────────────────────────────────────────
+
+// ── Shared color helper ───────────────────────────────────────────────────────
+
+/// Parse a CSS hex color string (`"#RRGGBB"` or `"RRGGBB"`) into a [Color].
+///
+/// Returns `null` when [hex] is null, empty, or unparseable.
+Color? parseHex(String? hex) {
+  if (hex == null || hex.isEmpty) return null;
+  final clean = hex.replaceFirst('#', '');
+  final val = int.tryParse(clean, radix: 16);
+  if (val == null) return null;
+  return Color(0xFF000000 | val);
 }
 
 // ── Hit-test helper ───────────────────────────────────────────────────────────

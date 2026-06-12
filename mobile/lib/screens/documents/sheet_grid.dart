@@ -70,6 +70,32 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
   // Whether we are currently in a drag-to-extend gesture.
   bool _draggingHandle = false;
 
+  // Last cell emitted during a handle drag — used to skip redundant callbacks.
+  int _dragLastRow = -1;
+  int _dragLastCol = -1;
+
+  // Stable gesture recognizer map — created once, never rebuilt per-frame.
+  // The initializer lambdas are called once; `this`-bound handler methods
+  // stay up-to-date because they are looked up via the live instance.
+  late final Map<Type, GestureRecognizerFactory> _gestures = {
+    PanGestureRecognizer:
+        GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+      () => PanGestureRecognizer(),
+      (i) => i
+        ..onStart = _onPanStart
+        ..onUpdate = _onPanUpdate
+        ..onEnd = _onPanEnd,
+    ),
+    LongPressGestureRecognizer:
+        GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+      () => LongPressGestureRecognizer(
+          duration: const Duration(milliseconds: 400)),
+      (i) => i
+        ..onLongPressStart = _onLongPressStart
+        ..onLongPressMoveUpdate = _onLongPressMoveUpdate,
+    ),
+  };
+
   double get _colW {
     final avail = widget.viewportWidth - _gutterW;
     final fit = avail / widget.cols;
@@ -109,12 +135,21 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
       rowH: _rowH,
     );
     if (row >= 0 && col >= 0) {
+      // Only fire the callback when the pointer has moved to a different cell.
+      // This avoids per-pixel setState rebuilds of the entire editor at ~60 Hz.
+      if (row == _dragLastRow && col == _dragLastCol) return;
+      _dragLastRow = row;
+      _dragLastCol = col;
       widget.onExtendSelection(row, col);
     }
   }
 
   void _onPanEnd(DragEndDetails _) {
-    if (_draggingHandle) setState(() => _draggingHandle = false);
+    if (_draggingHandle) {
+      _dragLastRow = -1;
+      _dragLastCol = -1;
+      setState(() => _draggingHandle = false);
+    }
   }
 
   // ── Long-press to start range ────────────────────────────────────────────────
@@ -176,30 +211,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
       maxScale: 3.0,
       constrained: false,
       child: RawGestureDetector(
-        gestures: {
-          // Handle drag (starts on corner dot → extends selection).
-          PanGestureRecognizer:
-              GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
-            () => PanGestureRecognizer(),
-            (instance) {
-              instance
-                ..onStart = _onPanStart
-                ..onUpdate = _onPanUpdate
-                ..onEnd = _onPanEnd;
-            },
-          ),
-          // Long-press → start range selection.
-          LongPressGestureRecognizer:
-              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
-            () => LongPressGestureRecognizer(
-                duration: const Duration(milliseconds: 400)),
-            (instance) {
-              instance
-                ..onLongPressStart = _onLongPressStart
-                ..onLongPressMoveUpdate = _onLongPressMoveUpdate;
-            },
-          ),
-        },
+        gestures: _gestures,
         child: SingleChildScrollView(
           scrollDirection: Axis.vertical,
           child: SingleChildScrollView(
@@ -332,7 +344,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     // Background: fill color > selection tint > default surface.
     Color bgColor;
     if (style.bgColor != null) {
-      bgColor = _parseHex(style.bgColor!) ?? AppColors.bgSurface;
+      bgColor = parseHex(style.bgColor!) ?? AppColors.bgSurface;
     } else if (inRange) {
       bgColor = AppColors.accent.withValues(alpha: 0.16);
     } else {
@@ -357,7 +369,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     final textColor = hasLink
         ? AppColors.accent
         : style.color != null
-            ? (_parseHex(style.color!) ?? AppColors.textPrimary)
+            ? (parseHex(style.color!) ?? AppColors.textPrimary)
             : AppColors.textPrimary;
 
     // Alignment.
@@ -419,12 +431,4 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     );
   }
 
-  // ── Color helper ─────────────────────────────────────────────────────────────
-
-  static Color? _parseHex(String hex) {
-    final clean = hex.replaceFirst('#', '');
-    final val = int.tryParse(clean, radix: 16);
-    if (val == null) return null;
-    return Color(0xFF000000 | val);
-  }
 }

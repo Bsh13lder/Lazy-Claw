@@ -81,8 +81,14 @@ export default function Sheets() {
   const dirtyRef = useRef(false);
   const nameRef = useRef("");
   const updatedAtRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   // Lets the ✨ AI popover flush pending edits before the agent reads the sheet.
   const flushHandleRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Keep the latest name available to the autosave closure without
   // re-initialising Univer on every rename.
@@ -293,17 +299,40 @@ export default function Sheets() {
         setSaveState("saved");
         setSheets((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
       })
-      .catch(() => setSaveState("error"));
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        if (err instanceof ConflictError) {
+          const reload = window.confirm(
+            "This sheet changed on the server. Reload the latest version? (Cancel keeps your copy and overwrites.)"
+          );
+          if (reload) {
+            setReloadToken((t) => t + 1);
+          } else {
+            dirtyRef.current = true;
+            saveSheet(id, name, snapshot, null)
+              .then((row) => {
+                updatedAtRef.current = row.updated_at;
+                setSaveState("saved");
+                setSheets((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+              })
+              .catch(() => setSaveState("error"));
+          }
+        } else {
+          setSaveState("error");
+        }
+      });
   }
 
   async function handleConvertLinks() {
     if (!activeId) return;
     try {
       const res = await convertSheetLinks(activeId);
+      // Re-base the ref BEFORE alerting or triggering a reload so that a
+      // ConflictError from any concurrent autosave doesn't clobber the new base.
       updatedAtRef.current = res.updated_at;
       dirtyRef.current = false;
-      setReloadToken((t) => t + 1);
       window.alert(`Converted ${res.converted} URL${res.converted === 1 ? "" : "s"} to hyperlinks.`);
+      setReloadToken((t) => t + 1);
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Conversion failed");
     }
@@ -348,7 +377,32 @@ export default function Sheets() {
             prev.map((s) => (s.id === id ? { ...s, tags: row.tags ?? newTags } : s))
           );
         })
-        .catch(() => setSaveState("error"));
+        .catch((err) => {
+          if (!mountedRef.current) return;
+          if (err instanceof ConflictError) {
+            const reload = window.confirm(
+              "This sheet changed on the server. Reload the latest version? (Cancel keeps your copy and overwrites.)"
+            );
+            if (reload) {
+              setReloadToken((t) => t + 1);
+            } else {
+              dirtyRef.current = true;
+              saveSheet(id, nameRef.current, snapshot!, null, newTags)
+                .then((row) => {
+                  updatedAtRef.current = row.updated_at;
+                  setSaveState("saved");
+                  setSheets((prev) =>
+                    prev.map((s) => (s.id === id ? { ...s, tags: row.tags ?? newTags } : s))
+                  );
+                })
+                .catch(() => setSaveState("error"));
+            }
+          } else {
+            setSaveState("error");
+          }
+        });
+    } else {
+      window.alert("Editor still loading — try again in a second.");
     }
   }
 

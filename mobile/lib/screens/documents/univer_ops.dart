@@ -45,6 +45,43 @@ class _SortRow {
   final dynamic keyVal;
 }
 
+// ── Auto-link detection ──────────────────────────────────────────────────────
+
+/// Shared link regexes — single source of truth.
+final _kMdLinkRe = RegExp(r'^\[([^\]]+)\]\((https?://[^\s)]+)\)$');
+final _kBareUrlRe = RegExp(r'^https?://[^\s<>"]+$');
+const _kTrailChars = '.,;:!?)';
+
+/// Detect whether [rawText] is a bare URL or a Markdown link `[display](url)`.
+///
+/// Returns `{url, display?}` when [rawText] should auto-convert to a link.
+/// Mirrors the exact semantics used by [convertUrlsToLinks]:
+///   - Markdown: `^\[([^\]]+)\]\(https?://...\)$` — capture display + url.
+///   - Bare URL: entire trimmed value IS a URL (trailing punctuation stripped).
+///   - Anything else: returns null (mixed text, plain text, formulas).
+({String url, String? display})? detectAutoLink(String rawText) {
+  final trimmed = rawText.trim();
+  if (trimmed.isEmpty) return null;
+
+  // Markdown [display](url)
+  final mdMatch = _kMdLinkRe.firstMatch(trimmed);
+  if (mdMatch != null) {
+    return (url: mdMatch.group(2)!, display: mdMatch.group(1)!);
+  }
+
+  // Bare URL: strip trailing punctuation until the whole string is a URL.
+  var candidate = trimmed;
+  while (candidate.isNotEmpty &&
+      _kTrailChars.contains(candidate[candidate.length - 1])) {
+    candidate = candidate.substring(0, candidate.length - 1);
+  }
+  if (_kBareUrlRe.hasMatch(candidate)) {
+    return (url: candidate, display: null);
+  }
+
+  return null;
+}
+
 // ── Free helpers ─────────────────────────────────────────────────────────────
 
 /// Return true if [sheet] has at least one formula cell on any worksheet.
@@ -169,9 +206,9 @@ extension UniverOps on UniverSheet {
     final cellData = _sm(sheet['cellData']);
     var count = 0;
 
-    final mdRe = RegExp(r'^\[([^\]]+)\]\((https?://[^\s)]+)\)$');
+    final mdRe = _kMdLinkRe;
     final bareUrlRe = RegExp(r'https?://[^\s<>"]+');
-    const trailChars = '.,;:!?)';
+    const trailChars = _kTrailChars;
 
     cellData.forEach((rKey, rowVal) {
       final r = int.tryParse(rKey);

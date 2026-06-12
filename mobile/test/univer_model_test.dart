@@ -1032,6 +1032,59 @@ void main() {
   });
 
   // ──────────────────────────────────────────────────────────────────────────
+  // detectAutoLink
+  // ──────────────────────────────────────────────────────────────────────────
+  group('detectAutoLink', () {
+    test('markdown [display](url) returns url + display', () {
+      final result = detectAutoLink('[Docs](https://docs.example.com)');
+      expect(result, isNotNull);
+      expect(result!.url, 'https://docs.example.com');
+      expect(result.display, 'Docs');
+    });
+
+    test('bare URL returns url with null display', () {
+      final result = detectAutoLink('https://example.com');
+      expect(result, isNotNull);
+      expect(result!.url, 'https://example.com');
+      expect(result.display, isNull);
+    });
+
+    test('bare URL with trailing punctuation strips trailing chars', () {
+      final result = detectAutoLink('https://example.com.');
+      expect(result, isNotNull);
+      expect(result!.url, 'https://example.com');
+      expect(result.display, isNull);
+    });
+
+    test('mixed text (url in sentence) returns null', () {
+      final result = detectAutoLink('click here https://example.com for info');
+      expect(result, isNull);
+    });
+
+    test('plain text returns null', () {
+      final result = detectAutoLink('Hello World');
+      expect(result, isNull);
+    });
+
+    test('empty string returns null', () {
+      final result = detectAutoLink('');
+      expect(result, isNull);
+    });
+
+    test('http:// bare URL is detected', () {
+      final result = detectAutoLink('http://insecure.example.com');
+      expect(result, isNotNull);
+      expect(result!.url, 'http://insecure.example.com');
+    });
+
+    test('bare URL with multiple trailing punct chars stripped', () {
+      final result = detectAutoLink('https://example.com...');
+      expect(result, isNotNull);
+      expect(result!.url, 'https://example.com');
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
   // rawWorkbook — zero-copy read-path tests
   // ──────────────────────────────────────────────────────────────────────────
   group('rawWorkbook zero-copy read path', () {

@@ -22,16 +22,6 @@ import 'univer_model.dart';
 import 'univer_ops.dart';
 import 'univer_parse.dart';
 
-// ── URL / markdown detection (mirrors univer_ops regexes) ────────────────────
-
-/// Bare URL: the entire trimmed value is a URL (trailing punctuation stripped).
-final _kBareUrlRe = RegExp(r'^https?://[^\s<>"]+$');
-
-/// Markdown link: `[display](url)`.
-final _kMdLinkRe = RegExp(r'^\[([^\]]+)\]\((https?://[^\s)]+)\)$');
-
-const _kTrailChars = '.,;:!?)';
-
 /// Full native editor for a single Univer sheet (formula bar, toolbar, undo/redo,
 /// row/col ops, TSV copy/paste, sort, freeze). Formulas recompute server-side.
 /// UI helpers extracted to sheet_formula_bar.dart, sheet_link_ui.dart.
@@ -215,24 +205,19 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
 
     // ── Auto-convert bare URLs and markdown links typed into the formula bar ──
     if (!isFormula) {
-      final trimmed = raw.trim();
-
-      // Markdown [display](url)
-      final mdMatch = _kMdLinkRe.firstMatch(trimmed);
-      if (mdMatch != null) {
-        final display = mdMatch.group(1)!;
-        final url = mdMatch.group(2)!;
-        next = next.setCell(r, c, value: display);
-        next = next.setLink(r, c, url, display: display);
-      } else {
-        // Bare URL (strip trailing punctuation)
-        var candidate = trimmed;
-        while (candidate.isNotEmpty &&
-            _kTrailChars.contains(candidate[candidate.length - 1])) {
-          candidate = candidate.substring(0, candidate.length - 1);
-        }
-        if (_kBareUrlRe.hasMatch(candidate)) {
-          next = next.setLink(r, c, candidate);
+      final link = detectAutoLink(raw);
+      if (link != null) {
+        if (link.display != null) {
+          // Markdown branch: update display text + refresh formula bar.
+          next = next.setCell(r, c, value: link.display);
+          next = next.setLink(r, c, link.url, display: link.display);
+          _formulaCtrl.text = link.display!;
+          _formulaCtrl.selection = TextSelection.collapsed(
+            offset: link.display!.length,
+          );
+        } else {
+          // Bare URL branch.
+          next = next.setLink(r, c, link.url);
         }
       }
     }
@@ -479,6 +464,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
           );
         });
         await _cacheWorkbook(result.snapshot, widget.name);
+        if (!mounted) return;
         _snack('Converted ${result.converted} link${result.converted == 1 ? '' : 's'}.');
       }
     } catch (_) {

@@ -91,7 +91,7 @@ class LinkChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.md,
-        vertical: 4,
+        vertical: AppSpacing.xs,
       ),
       decoration: const BoxDecoration(
         color: AppColors.bgSurfaceElevated,
@@ -99,7 +99,7 @@ class LinkChip extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Text('🔗 ', style: TextStyle(fontSize: 12)),
+          Text('🔗 ', style: AppText.caption),
           Expanded(
             child: Text(
               hostLabel,
@@ -111,7 +111,7 @@ class LinkChip extends StatelessWidget {
           TextButton(
             style: TextButton.styleFrom(
               minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
             onPressed: () async {
@@ -133,7 +133,7 @@ class LinkChip extends StatelessWidget {
           TextButton(
             style: TextButton.styleFrom(
               minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
             onPressed: onEdit,
@@ -146,7 +146,7 @@ class LinkChip extends StatelessWidget {
           TextButton(
             style: TextButton.styleFrom(
               minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
             onPressed: onRemove,

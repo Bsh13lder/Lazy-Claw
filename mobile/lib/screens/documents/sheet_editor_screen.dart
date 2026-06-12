@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../local/document_cache_dao.dart';
 import '../../providers/documents_provider.dart';
@@ -14,6 +14,8 @@ import 'doc_share.dart';
 import 'export_password_dialog.dart';
 import 'formula_helper.dart';
 import 'sheet_grid.dart';
+import 'sheet_formula_bar.dart';
+import 'sheet_link_ui.dart';
 import 'sheet_selection.dart';
 import 'sheet_toolbar.dart';
 import 'univer_model.dart';
@@ -30,19 +32,9 @@ final _kMdLinkRe = RegExp(r'^\[([^\]]+)\]\((https?://[^\s)]+)\)$');
 
 const _kTrailChars = '.,;:!?)';
 
-/// Full native editor for a single sheet: tap a cell to load it into the formula
-/// bar, edit the value or `=formula`, and commit. Formulas recompute on the
-/// server (the phone has no JS engine) and the workbook autosaves. Multi-sheet
-/// tabs, fit-to-width + pinch-zoom, and the ✨ AI box round it out.
-///
-/// New in this pass:
-///   - Range selection ([SheetSelection]) with drag-to-extend handle
-///   - Formatting toolbar ([SheetToolbar]) wired to [applyStyle]
-///   - Undo/redo (50-step history cap)
-///
-/// Grid library decision: a custom `Table`-in-`InteractiveViewer` (not
-/// pluto_grid) — we need fit-to-width sizing, a shared formula bar/helper, and
-/// Univer cell fidelity, which the custom grid gives us directly.
+/// Full native editor for a single Univer sheet (formula bar, toolbar, undo/redo,
+/// row/col ops, TSV copy/paste, sort, freeze). Formulas recompute server-side.
+/// UI helpers extracted to sheet_formula_bar.dart, sheet_link_ui.dart.
 class SheetEditorScreen extends ConsumerStatefulWidget {
   const SheetEditorScreen({super.key, required this.id, required this.name});
 
@@ -124,44 +116,22 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
 
   Future<void> _load() async {
     final cache = ref.read(documentCacheDaoProvider);
-    // 1. Paint the cached copy instantly (no spinner) if we have one.
     CachedDoc? cached;
     if (cache != null) {
       cached = await cache.getDoc(DocKind.sheets.api, widget.id);
       if (cached != null && mounted) {
-        setState(() {
-          _sheet = UniverSheet.fromWorkbook(cached!.payload);
-          _loading = false;
-          _error = null;
-        });
+        setState(() { _sheet = UniverSheet.fromWorkbook(cached!.payload); _loading = false; _error = null; });
       }
     }
-    if (cached == null) {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-    }
-    // 2. Revalidate over the network; refresh the view + cache when it lands.
+    if (cached == null) setState(() { _loading = true; _error = null; });
     try {
-      final repo = ref.read(documentsRepositoryProvider);
-      final detail = await repo.getPayload(DocKind.sheets, widget.id);
+      final detail = await ref.read(documentsRepositoryProvider).getPayload(DocKind.sheets, widget.id);
       if (!mounted) return;
-      setState(() {
-        _sheet = UniverSheet.fromWorkbook(detail.payload);
-        _loading = false;
-        _error = null;
-      });
+      setState(() { _sheet = UniverSheet.fromWorkbook(detail.payload); _loading = false; _error = null; });
       await _cacheWorkbook(detail.payload, detail.name);
     } catch (_) {
       if (!mounted) return;
-      // Keep showing the cached copy when offline; only error on a cold miss.
-      if (cached == null) {
-        setState(() {
-          _error = 'Could not open this sheet. Pull to retry.';
-          _loading = false;
-        });
-      }
+      if (cached == null) setState(() { _error = 'Could not open this sheet. Pull to retry.'; _loading = false; });
     }
   }
 
@@ -311,6 +281,12 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         _applyStylePatch({'ht': _anchorStyle.hAlign == 3 ? null : 3});
       case SheetToolbarAction.insertLink:
         _showLinkDialog();
+      case SheetToolbarAction.copy:
+        _copySelection();
+      case SheetToolbarAction.paste:
+        _pasteFromClipboard();
+      case SheetToolbarAction.freezeToggle:
+        _toggleFreeze();
     }
   }
 
@@ -330,7 +306,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     await LzBottomSheet.show<void>(
       context,
       title: existingUrl != null ? 'Edit link' : 'Insert link',
-      builder: (_) => _LinkDialogBody(
+      builder: (_) => LinkDialogBody(
         initialDisplay: existingDisplay,
         initialUrl: existingUrl ?? '',
         onSave: (display, url) {
@@ -343,6 +319,143 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         },
       ),
     );
+  }
+
+  // ── Header context menu actions ───────────────────────────────────────────────
+
+  /// Recalc server-side if the workbook has any formula — best-effort.
+  Future<void> _recalcIfFormulas(UniverSheet s) async {
+    if (!sheetHasAnyFormula(s)) return;
+    try {
+      final r = await ref.read(documentsRepositoryProvider)
+          .recalc(widget.id, s.toWorkbook());
+      if (mounted) {
+        setState(() => _sheet = UniverSheet.fromWorkbook(r, active: s.activeIndex));
+      }
+    } catch (_) {}
+  }
+
+  /// Handle column/row header context menu actions from [SheetEditorGrid].
+  Future<void> _onHeaderAction(SheetHeaderAction action, int index) async {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    _pushUndo();
+    final (rows, cols) = _gridDims();
+    UniverSheet? next;
+    bool clearSel = false;
+    switch (action) {
+      case SheetHeaderAction.insertLeft:
+        next = sheet.insertCol(index); clearSel = true;
+      case SheetHeaderAction.insertRight:
+        next = sheet.insertCol(index + 1); clearSel = true;
+      case SheetHeaderAction.deleteCol:
+        next = sheet.deleteCol(index); clearSel = true;
+      case SheetHeaderAction.clearCol:
+        next = sheet.clearRange(SelRange(0, index, rows - 1, index));
+      case SheetHeaderAction.sortAsc:
+        await _sortByCol(sheet, index, asc: true); return;
+      case SheetHeaderAction.sortDesc:
+        await _sortByCol(sheet, index, asc: false); return;
+      case SheetHeaderAction.colWidth:
+        await _showColWidthDialog(sheet, index); return;
+      case SheetHeaderAction.insertAbove:
+        next = sheet.insertRow(index); clearSel = true;
+      case SheetHeaderAction.insertBelow:
+        next = sheet.insertRow(index + 1); clearSel = true;
+      case SheetHeaderAction.deleteRow:
+        next = sheet.deleteRow(index); clearSel = true;
+      case SheetHeaderAction.clearRow:
+        next = sheet.clearRange(SelRange(index, 0, index, cols - 1));
+    }
+    // next is always set by the non-early-return cases above.
+    setState(() { _sheet = next!; if (clearSel) _sel = null; });
+    _scheduleSave();
+    await _recalcIfFormulas(_sheet!);
+  }
+
+  /// Sort the full used range by [col]. hasHeader=true: row 0 is always preserved.
+  Future<void> _sortByCol(UniverSheet sheet, int col, {required bool asc}) async {
+    final (maxRow, maxCol) = sheet.usedBounds();
+    if (maxRow < 0 || maxCol < 0) return;
+    final next = sheet.sortRange(SelRange(0, 0, maxRow, maxCol), col,
+        asc: asc, hasHeader: true);
+    setState(() => _sheet = next);
+    _scheduleSave();
+    await _recalcIfFormulas(next);
+  }
+
+  /// Column width dialog: reads current width from columnData (fallback 88),
+  /// shows slider via [promptColWidth], applies on confirm.
+  Future<void> _showColWidthDialog(UniverSheet sheet, int col) async {
+    // Read current width from columnData, fallback to default 88.
+    final wb = sheet.rawWorkbook;
+    final sheetsMap = wb['sheets'];
+    double currentW = 88.0;
+    if (sheetsMap is Map) {
+      final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList()
+          ?? (sheetsMap).keys.cast<String>().toList();
+      final idx = sheet.activeIndex.clamp(0, order.isEmpty ? 0 : order.length - 1);
+      final sheetId = order.isEmpty ? '' : order[idx];
+      final sheetData = sheetsMap[sheetId];
+      if (sheetData is Map) {
+        final colData = sheetData['columnData'];
+        if (colData is Map) {
+          final entry = colData[col.toString()];
+          if (entry is Map && entry['w'] is num) {
+            currentW = (entry['w'] as num).toDouble();
+          }
+        }
+      }
+    }
+
+    if (!mounted) return;
+    final chosen = await promptColWidth(context, currentW);
+    if (chosen == null || !mounted) return;
+    _pushUndo();
+    final next = _sheet!.setColWidth(col, chosen);
+    setState(() => _sheet = next);
+    _scheduleSave();
+  }
+
+  // ── Copy / Paste ──────────────────────────────────────────────────────────────
+
+  void _copySelection() {
+    final sheet = _sheet;
+    final sel = _sel;
+    if (sheet == null || sel == null) return;
+    final tsv = sheet.rangeToTsv(sel.range);
+    Clipboard.setData(ClipboardData(text: tsv));
+    final rows = sel.range.rowCount;
+    final cols = sel.range.colCount;
+    _snack('Copied ${rows}x$cols cells');
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final sheet = _sheet;
+    final sel = _sel;
+    if (sheet == null || sel == null) return;
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text;
+    if (text == null || text.isEmpty) {
+      _snack('Clipboard is empty.', error: true);
+      return;
+    }
+    _pushUndo();
+    final next = sheet.pasteTsv(sel.anchorRow, sel.anchorCol, text);
+    setState(() => _sheet = next);
+    _scheduleSave();
+    await _recalcIfFormulas(next);
+  }
+
+  // ── Freeze toggle ─────────────────────────────────────────────────────────────
+
+  void _toggleFreeze() {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    _pushUndo();
+    final next = sheet.toggleFreeze();
+    setState(() => _sheet = next);
+    _scheduleSave();
   }
 
   // ── Bulk convert ─────────────────────────────────────────────────────────────
@@ -579,21 +692,62 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
           Column(
             children: [
               if (sheet != null && sheet.sheetNames.length > 1)
-                _sheetTabs(sheet),
+                SheetTabs(
+                  sheetNames: sheet.sheetNames,
+                  activeIndex: sheet.activeIndex,
+                  onSelect: (i) => setState(() {
+                    _sheet = sheet.withActiveIndex(i);
+                    _sel = null;
+                    _formulaCtrl.clear();
+                  }),
+                ),
               if (sheet != null && _sel != null)
                 SheetToolbar(
                   anchorStyle: _anchorStyle,
                   canUndo: _undo.isNotEmpty,
                   canRedo: _redo.isNotEmpty,
+                  frozen: sheet.frozen,
+                  hasSelection: _sel != null,
                   onAction: _handleToolbarAction,
                   onTextColor: _applyTextColor,
                   onFillColor: _applyFillColor,
                   onNumberFormat: _applyNumberFormat,
                 ),
               if (sheet != null && _sel != null && _sel!.isSingle)
-                _linkChip(sheet),
-              if (sheet != null) _formulaBar(),
-              if (suggestions.isNotEmpty) _formulaHelper(suggestions),
+                LinkChip(
+                  sheet: sheet,
+                  sel: _sel!,
+                  onEdit: _showLinkDialog,
+                  onRemove: () {
+                    if (_sel == null || _sheet == null) return;
+                    _pushUndo();
+                    setState(() {
+                      _sheet = _sheet!.removeLink(
+                        _sel!.anchorRow,
+                        _sel!.anchorCol,
+                      );
+                    });
+                    _scheduleSave();
+                  },
+                  onSnack: _snack,
+                ),
+              if (sheet != null)
+                SheetFormulaBar(
+                  cellRef: _sel != null
+                      ? '${colToLetter(_sel!.anchorCol)}${_sel!.anchorRow + 1}'
+                      : '—',
+                  controller: _formulaCtrl,
+                  focusNode: _formulaFocus,
+                  hasSel: _sel != null,
+                  onChanged: () => setState(() {}),
+                  onSubmitted: _commit,
+                  onApply: _commit,
+                ),
+              if (suggestions.isNotEmpty)
+                SheetFormulaHelper(
+                  suggestions: suggestions,
+                  onTap: _insertFunction,
+                ),
               Expanded(child: _buildBody()),
             ],
           ),
@@ -603,208 +757,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     );
   }
 
-  Widget _sheetTabs(UniverSheet sheet) {
-    return SizedBox(
-      height: 40,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-        children: [
-          for (var i = 0; i < sheet.sheetNames.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(right: AppSpacing.xs),
-              child: ChoiceChip(
-                label: Text(sheet.sheetNames[i]),
-                selected: i == sheet.activeIndex,
-                onSelected: (_) => setState(() {
-                  _sheet = sheet.withActiveIndex(i);
-                  _sel = null;
-                  _formulaCtrl.clear();
-                }),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  // ── Link chip ─────────────────────────────────────────────────────────────────
-
-  /// Compact action strip shown when the anchor cell has a hyperlink.
-  /// Renders: "🔗 {host}" + Open / Edit / Remove buttons.
-  Widget _linkChip(UniverSheet sheet) {
-    final sel = _sel;
-    if (sel == null) return const SizedBox.shrink();
-    final url = sheet.linkAt(sel.anchorRow, sel.anchorCol);
-    if (url == null) return const SizedBox.shrink();
-
-    String hostLabel;
-    try {
-      hostLabel = Uri.parse(url).host.isNotEmpty ? Uri.parse(url).host : url;
-    } catch (_) {
-      hostLabel = url;
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.md,
-        vertical: 4,
-      ),
-      decoration: const BoxDecoration(
-        color: AppColors.bgSurfaceElevated,
-        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
-      ),
-      child: Row(
-        children: [
-          const Text('🔗 ', style: TextStyle(fontSize: 12)),
-          Expanded(
-            child: Text(
-              hostLabel,
-              style: AppText.caption.copyWith(color: AppColors.accent),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          // Open
-          TextButton(
-            style: TextButton.styleFrom(
-              minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            onPressed: () async {
-              try {
-                await launchUrl(
-                  Uri.parse(url),
-                  mode: LaunchMode.externalApplication,
-                );
-              } catch (_) {
-                if (mounted) _snack('Could not open link.', error: true);
-              }
-            },
-            child: Text(
-              'Open',
-              style: AppText.caption.copyWith(color: AppColors.accent),
-            ),
-          ),
-          // Edit
-          TextButton(
-            style: TextButton.styleFrom(
-              minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            onPressed: _showLinkDialog,
-            child: Text(
-              'Edit',
-              style: AppText.caption.copyWith(color: AppColors.textSecondary),
-            ),
-          ),
-          // Remove
-          TextButton(
-            style: TextButton.styleFrom(
-              minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            onPressed: () {
-              if (_sel == null || _sheet == null) return;
-              _pushUndo();
-              setState(() {
-                _sheet = _sheet!.removeLink(
-                  _sel!.anchorRow,
-                  _sel!.anchorCol,
-                );
-              });
-              _scheduleSave();
-            },
-            child: Text(
-              'Remove',
-              style: AppText.caption.copyWith(color: AppColors.error),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _formulaBar() {
-    final hasSel = _sel != null;
-    final cellRef = hasSel
-        ? '${colToLetter(_sel!.anchorCol)}${_sel!.anchorRow + 1}'
-        : '—';
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.md,
-        vertical: AppSpacing.xs,
-      ),
-      decoration: const BoxDecoration(
-        color: AppColors.bgSurfaceElevated,
-        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 48,
-            child: Text(
-              cellRef,
-              style: AppText.caption.copyWith(
-                color: AppColors.textMuted,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          const Text('ƒx  ', style: TextStyle(color: AppColors.textMuted)),
-          Expanded(
-            child: TextField(
-              controller: _formulaCtrl,
-              focusNode: _formulaFocus,
-              enabled: hasSel,
-              onChanged: (_) => setState(() {}), // refresh formula helper
-              onSubmitted: (_) => _commit(),
-              textInputAction: TextInputAction.done,
-              style: AppText.body.copyWith(fontSize: 14),
-              decoration: InputDecoration(
-                isDense: true,
-                border: InputBorder.none,
-                hintText: hasSel ? 'Value or =formula' : 'Tap a cell to edit',
-                hintStyle: AppText.body.copyWith(color: AppColors.textMuted),
-              ),
-            ),
-          ),
-          if (hasSel)
-            LzIconButton(
-              icon: Icons.check,
-              tooltip: 'Apply',
-              onPressed: _commit,
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _formulaHelper(List<FormulaFn> suggestions) {
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 168),
-      color: AppColors.bgSurface,
-      child: ListView.builder(
-        shrinkWrap: true,
-        itemCount: suggestions.length,
-        itemBuilder: (_, i) {
-          final f = suggestions[i];
-          return ListTile(
-            dense: true,
-            title: Text(f.signature, style: AppText.body.copyWith(fontSize: 13)),
-            subtitle: Text(f.help, style: AppText.caption),
-            onTap: () => _insertFunction(f),
-          );
-        },
-      ),
-    );
-  }
-
   void _insertFunction(FormulaFn f) {
     final text = _formulaCtrl.text;
-    // Replace the trailing partial token with the function + "(".
     final replaced = text.replaceFirst(RegExp(r'[A-Za-z]*$'), '${f.name}(');
     final next = replaced.startsWith('=') ? replaced : '=$replaced';
     setState(() {
@@ -831,120 +785,10 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
           onTapCell: _selectCell,
           onExtendSelection: _extendSelectionTo,
           onStartSelection: _startSelectionFrom,
+          onHeaderAction: _onHeaderAction,
         );
       },
     );
   }
 }
 
-// ── _LinkDialogBody ───────────────────────────────────────────────────────────
-
-/// Content for the insert/edit-link bottom sheet.
-///
-/// Two fields: display text (optional) and URL (required, must start http(s)://).
-/// Calls [onSave] when the user taps Save with a valid URL.
-class _LinkDialogBody extends StatefulWidget {
-  const _LinkDialogBody({
-    required this.initialDisplay,
-    required this.initialUrl,
-    required this.onSave,
-  });
-
-  final String initialDisplay;
-  final String initialUrl;
-  final void Function(String display, String url) onSave;
-
-  @override
-  State<_LinkDialogBody> createState() => _LinkDialogBodyState();
-}
-
-class _LinkDialogBodyState extends State<_LinkDialogBody> {
-  late final TextEditingController _displayCtrl;
-  late final TextEditingController _urlCtrl;
-  String? _urlError;
-
-  @override
-  void initState() {
-    super.initState();
-    _displayCtrl = TextEditingController(text: widget.initialDisplay);
-    _urlCtrl = TextEditingController(text: widget.initialUrl);
-  }
-
-  @override
-  void dispose() {
-    _displayCtrl.dispose();
-    _urlCtrl.dispose();
-    super.dispose();
-  }
-
-  bool _validate() {
-    final url = _urlCtrl.text.trim();
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      setState(() => _urlError = 'URL must start with http:// or https://');
-      return false;
-    }
-    setState(() => _urlError = null);
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        TextField(
-          controller: _displayCtrl,
-          decoration: InputDecoration(
-            labelText: 'Display text (optional)',
-            labelStyle: AppText.caption.copyWith(color: AppColors.textMuted),
-            border: OutlineInputBorder(
-              borderRadius: AppRadii.rSm,
-              borderSide: const BorderSide(color: AppColors.borderDefault),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: AppRadii.rSm,
-              borderSide: const BorderSide(color: AppColors.borderDefault),
-            ),
-          ),
-          style: AppText.body,
-          textInputAction: TextInputAction.next,
-        ),
-        const SizedBox(height: AppSpacing.md),
-        TextField(
-          controller: _urlCtrl,
-          decoration: InputDecoration(
-            labelText: 'URL',
-            labelStyle: AppText.caption.copyWith(color: AppColors.textMuted),
-            errorText: _urlError,
-            border: OutlineInputBorder(
-              borderRadius: AppRadii.rSm,
-              borderSide: const BorderSide(color: AppColors.borderDefault),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: AppRadii.rSm,
-              borderSide: const BorderSide(color: AppColors.borderDefault),
-            ),
-          ),
-          style: AppText.body,
-          keyboardType: TextInputType.url,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => _submit(),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        LzButton(
-          label: 'Save',
-          onPressed: _submit,
-        ),
-      ],
-    );
-  }
-
-  void _submit() {
-    if (!_validate()) return;
-    final url = _urlCtrl.text.trim();
-    final display = _displayCtrl.text;
-    Navigator.of(context).pop();
-    widget.onSave(display, url);
-  }
-}

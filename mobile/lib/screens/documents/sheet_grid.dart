@@ -30,6 +30,25 @@ import 'univer_model.dart';
 import 'univer_ops.dart';
 import 'univer_parse.dart';
 
+// ── SheetHeaderAction ─────────────────────────────────────────────────────────
+
+/// Actions emitted by long-pressing a column header or row gutter.
+enum SheetHeaderAction {
+  // Column actions (long-press on column header letter)
+  insertLeft,
+  insertRight,
+  deleteCol,
+  clearCol,
+  sortAsc,
+  sortDesc,
+  colWidth,
+  // Row actions (long-press on row gutter number)
+  insertAbove,
+  insertBelow,
+  deleteRow,
+  clearRow,
+}
+
 /// Public grid widget consumed by [SheetEditorScreen].
 ///
 /// Named [SheetEditorGrid] to avoid collision with [SheetGrid] (the read-only
@@ -45,6 +64,7 @@ class SheetEditorGrid extends StatefulWidget {
     required this.onTapCell,
     required this.onExtendSelection,
     required this.onStartSelection,
+    this.onHeaderAction,
   });
 
   final UniverSheet sheet;
@@ -55,6 +75,10 @@ class SheetEditorGrid extends StatefulWidget {
   final void Function(int row, int col) onTapCell;
   final void Function(int row, int col) onExtendSelection;
   final void Function(int row, int col) onStartSelection;
+
+  /// Called when the user long-presses a column header or row gutter and selects
+  /// an action from the context menu. [index] is the 0-based column or row index.
+  final void Function(SheetHeaderAction action, int index)? onHeaderAction;
 
   @override
   State<SheetEditorGrid> createState() => _SheetEditorGridState();
@@ -270,6 +294,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
   Widget _colHeader(int c, double colW) {
     return GestureDetector(
       onTap: () => _onTapColHeader(c),
+      onLongPressStart: (d) => _showColMenu(context, d.globalPosition, c),
       child: Container(
         width: colW,
         height: _rowH,
@@ -292,6 +317,34 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     );
   }
 
+  void _showColMenu(BuildContext ctx, Offset globalPos, int col) {
+    final onAction = widget.onHeaderAction;
+    if (onAction == null) return;
+    showMenu<SheetHeaderAction>(
+      context: ctx,
+      color: AppColors.bgSurfaceElevated,
+      position: RelativeRect.fromLTRB(
+        globalPos.dx,
+        globalPos.dy,
+        globalPos.dx + 1,
+        globalPos.dy + 1,
+      ),
+      items: [
+        _menuItem(SheetHeaderAction.insertLeft, 'Insert left'),
+        _menuItem(SheetHeaderAction.insertRight, 'Insert right'),
+        _menuItem(SheetHeaderAction.deleteCol, 'Delete column'),
+        _menuItem(SheetHeaderAction.clearCol, 'Clear column'),
+        const PopupMenuDivider(),
+        _menuItem(SheetHeaderAction.sortAsc, 'Sort A → Z'),
+        _menuItem(SheetHeaderAction.sortDesc, 'Sort Z → A'),
+        const PopupMenuDivider(),
+        _menuItem(SheetHeaderAction.colWidth, 'Column width…'),
+      ],
+    ).then((action) {
+      if (action != null) onAction(action, col);
+    });
+  }
+
   // ── Data row ─────────────────────────────────────────────────────────────────
 
   Widget _dataRow(int r, double colW) {
@@ -306,7 +359,38 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
   Widget _rowGutter(int r) {
     return GestureDetector(
       onTap: () => _onTapRowGutter(r),
+      onLongPressStart: (d) => _showRowMenu(context, d.globalPosition, r),
       child: _gutter('${r + 1}'),
+    );
+  }
+
+  void _showRowMenu(BuildContext ctx, Offset globalPos, int row) {
+    final onAction = widget.onHeaderAction;
+    if (onAction == null) return;
+    showMenu<SheetHeaderAction>(
+      context: ctx,
+      color: AppColors.bgSurfaceElevated,
+      position: RelativeRect.fromLTRB(
+        globalPos.dx,
+        globalPos.dy,
+        globalPos.dx + 1,
+        globalPos.dy + 1,
+      ),
+      items: [
+        _menuItem(SheetHeaderAction.insertAbove, 'Insert above'),
+        _menuItem(SheetHeaderAction.insertBelow, 'Insert below'),
+        _menuItem(SheetHeaderAction.deleteRow, 'Delete row'),
+        _menuItem(SheetHeaderAction.clearRow, 'Clear row'),
+      ],
+    ).then((action) {
+      if (action != null) onAction(action, row);
+    });
+  }
+
+  PopupMenuItem<SheetHeaderAction> _menuItem(SheetHeaderAction action, String label) {
+    return PopupMenuItem<SheetHeaderAction>(
+      value: action,
+      child: Text(label, style: AppText.body.copyWith(fontSize: 14)),
     );
   }
 
@@ -341,9 +425,18 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
         ? formatNumber(univCell.value, style.numFmt)
         : univCell.display;
 
-    // Background: fill color > selection tint > default surface.
+    // Freeze pane visual marker: row 0 or col 0 when sheet is frozen.
+    // True positional pinning inside a single InteractiveViewer requires a
+    // multi-viewport grid layout which is out of scope for this pass.
+    // TODO(freeze-v2): implement real sticky headers with two InteractiveViewers
+    //   sharing a TransformationController.
+    final isFrozenHeader = widget.sheet.frozen && (r == 0 || c == 0);
+
+    // Background: frozen-header > fill color > selection tint > default surface.
     Color bgColor;
-    if (style.bgColor != null) {
+    if (isFrozenHeader && style.bgColor == null && !inRange) {
+      bgColor = AppColors.bgSurfaceElevated;
+    } else if (style.bgColor != null) {
       bgColor = parseHex(style.bgColor!) ?? AppColors.bgSurface;
     } else if (inRange) {
       bgColor = AppColors.accent.withValues(alpha: 0.16);
@@ -352,15 +445,31 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     }
 
     // Border: anchor cell gets stronger accent border; in-range gets lighter
-    // accent; otherwise hairline.
-    final border = isAnchor
-        ? Border.all(color: AppColors.accent, width: 1.5)
-        : inRange
-            ? Border.all(
-                color: AppColors.accent.withValues(alpha: 0.5),
-                width: 0.75,
-              )
-            : Border.all(color: AppColors.borderSubtle, width: 0.5);
+    // accent; frozen header gets thicker bottom/right border; otherwise hairline.
+    final Border border;
+    if (isAnchor) {
+      border = Border.all(color: AppColors.accent, width: 1.5);
+    } else if (inRange) {
+      border = Border.all(
+        color: AppColors.accent.withValues(alpha: 0.5),
+        width: 0.75,
+      );
+    } else if (isFrozenHeader) {
+      border = Border(
+        right: BorderSide(
+          color: AppColors.borderDefault,
+          width: r == 0 ? 0.5 : 2.0,
+        ),
+        bottom: BorderSide(
+          color: AppColors.borderDefault,
+          width: r == 0 ? 2.0 : 0.5,
+        ),
+        left: const BorderSide(color: AppColors.borderSubtle, width: 0.5),
+        top: const BorderSide(color: AppColors.borderSubtle, width: 0.5),
+      );
+    } else {
+      border = Border.all(color: AppColors.borderSubtle, width: 0.5);
+    }
 
     // Check for hyperlink on this cell — linked cells override text color.
     final hasLink = widget.sheet.linkAt(r, c) != null;

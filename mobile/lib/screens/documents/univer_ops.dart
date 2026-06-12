@@ -45,6 +45,30 @@ class _SortRow {
   final dynamic keyVal;
 }
 
+// ── Free helpers ─────────────────────────────────────────────────────────────
+
+/// Return true if [sheet] has at least one formula cell on any worksheet.
+///
+/// Used by the editor to decide whether to fire server-side recalc after
+/// structural ops (insert/delete/sort). Cheap: short-circuits on first hit.
+bool sheetHasAnyFormula(UniverSheet sheet) {
+  final wb = sheet.rawWorkbook;
+  final sheets = wb['sheets'];
+  if (sheets is! Map) return false;
+  for (final sheetVal in sheets.values) {
+    if (sheetVal is! Map) continue;
+    final cellData = sheetVal['cellData'];
+    if (cellData is! Map) continue;
+    for (final rowVal in cellData.values) {
+      if (rowVal is! Map) continue;
+      for (final cell in rowVal.values) {
+        if (cell is Map && cell['f'] != null) return true;
+      }
+    }
+  }
+  return false;
+}
+
 // ── UniverOps extension on UniverSheet ────────────────────────────────────────
 
 /// Extension methods that add hyperlinks, structural ops, sort, freeze and TSV

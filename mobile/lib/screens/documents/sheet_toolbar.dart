@@ -29,6 +29,12 @@ enum SheetToolbarAction {
   redo,
   /// Insert / edit a hyperlink on the anchor cell.
   insertLink,
+  /// Copy selection as TSV to clipboard.
+  copy,
+  /// Paste TSV from clipboard at anchor cell.
+  paste,
+  /// Toggle freeze pane (row 0 + col 0).
+  freezeToggle,
 }
 
 // ── Color swatch palette ──────────────────────────────────────────────────────
@@ -77,6 +83,8 @@ class SheetToolbar extends StatelessWidget {
     required this.onTextColor,
     required this.onFillColor,
     required this.onNumberFormat,
+    this.frozen = false,
+    this.hasSelection = false,
   });
 
   /// Style of the anchor cell — drives active states on toggle buttons.
@@ -84,6 +92,13 @@ class SheetToolbar extends StatelessWidget {
 
   final bool canUndo;
   final bool canRedo;
+
+  /// Whether the active sheet has a freeze pane — drives active state on freeze
+  /// toggle button.
+  final bool frozen;
+
+  /// Whether there is a non-null selection — drives enabled state on copy button.
+  final bool hasSelection;
 
   /// Called for simple on/off actions.
   final ValueChanged<SheetToolbarAction> onAction;
@@ -237,6 +252,48 @@ class SheetToolbar extends StatelessWidget {
                       : null,
                 ),
               ),
+            ),
+            _divider(),
+            // ── Copy / Paste ─────────────────────────────────────────────────
+            Tooltip(
+              message: 'Copy',
+              child: SizedBox(
+                width: _btnSize,
+                height: _btnSize,
+                child: IconButton(
+                  iconSize: 18,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.copy),
+                  color: hasSelection
+                      ? AppColors.textSecondary
+                      : AppColors.textMuted,
+                  onPressed: hasSelection
+                      ? () => onAction(SheetToolbarAction.copy)
+                      : null,
+                ),
+              ),
+            ),
+            Tooltip(
+              message: 'Paste',
+              child: SizedBox(
+                width: _btnSize,
+                height: _btnSize,
+                child: IconButton(
+                  iconSize: 18,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.paste),
+                  color: AppColors.textSecondary,
+                  onPressed: () => onAction(SheetToolbarAction.paste),
+                ),
+              ),
+            ),
+            _divider(),
+            // ── Freeze toggle ────────────────────────────────────────────────
+            _IconToggleBtn(
+              icon: Icons.ac_unit,
+              tooltip: 'Freeze row & column',
+              active: frozen,
+              onTap: () => onAction(SheetToolbarAction.freezeToggle),
             ),
           ],
         ),

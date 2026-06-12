@@ -13,13 +13,14 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
 from lazyclaw.docs.docx_io import docx_to_snapshot, snapshot_to_docx, snapshot_to_pdf
 from lazyclaw.export_crypto import protect_export
 from lazyclaw.docs.store import (
+    DocConflictError,
     create_doc,
     delete_doc,
     get_doc,
@@ -48,8 +49,10 @@ class CreateDocBody(BaseModel):
 
 
 class SaveDocBody(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     payload: dict[str, Any]
+    base_updated_at: str | None = None
+    tags: list[str] | None = None
 
 
 class AiEditBody(BaseModel):
@@ -98,7 +101,15 @@ async def save_doc_route(
     user: User = Depends(get_current_user),
 ):
     """Persist the document snapshot from the editor (autosave)."""
-    row = await save_doc(_config, user.id, body.name, body.payload, doc_id=doc_id)
+    try:
+        row = await save_doc(
+            _config, user.id, body.name, body.payload, doc_id=doc_id,
+            base_updated_at=body.base_updated_at, tags=body.tags,
+        )
+    except DocConflictError as exc:
+        return JSONResponse(status_code=409, content={"detail": "conflict", "current": exc.current})
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Doc not found")
     return {"doc": row}
 
 

@@ -29,7 +29,7 @@ from lazyclaw.config import load_config
 from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.pdf import ops
-from lazyclaw.pdf.store import delete_pdf, get_pdf, list_pdfs, save_pdf
+from lazyclaw.pdf.store import delete_pdf, get_pdf, list_pdfs, save_pdf, update_pdf_meta
 from lazyclaw.runtime.doc_specialist import ai_edit_document
 
 _config = load_config()
@@ -41,6 +41,11 @@ _PDF_MEDIA = "application/pdf"
 
 class AiEditBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
+
+
+class PatchPdfBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    tags: list[str] | None = None
 
 
 def _safe_filename(name: str) -> str:
@@ -94,6 +99,19 @@ async def get_pdf_route(
     if not row:
         raise HTTPException(status_code=404, detail="PDF not found")
     return _meta(row)
+
+
+@router.patch("/{pdf_id}")
+async def patch_pdf_route(
+    pdf_id: str,
+    body: PatchPdfBody,
+    user: User = Depends(get_current_user),
+):
+    """Update a PDF's name and/or tags without touching its payload."""
+    row = await update_pdf_meta(_config, user.id, pdf_id, name=body.name, tags=body.tags)
+    if not row:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return {"file": row}
 
 
 @router.get("/{pdf_id}/raw")

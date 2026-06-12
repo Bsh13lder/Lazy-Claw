@@ -13,7 +13,7 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
@@ -21,6 +21,7 @@ from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.runtime.doc_specialist import ai_edit_document
 from lazyclaw.sheets.store import (
+    SheetConflictError,
     create_sheet,
     delete_sheet,
     get_sheet,
@@ -50,8 +51,10 @@ class CreateSheetBody(BaseModel):
 
 
 class SaveSheetBody(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     payload: dict[str, Any]
+    base_updated_at: str | None = None
+    tags: list[str] | None = None
 
 
 class AiEditBody(BaseModel):
@@ -104,7 +107,15 @@ async def save_sheet_route(
     user: User = Depends(get_current_user),
 ):
     """Persist the workbook snapshot from the editor (autosave)."""
-    row = await save_sheet(_config, user.id, body.name, body.payload, sheet_id=sheet_id)
+    try:
+        row = await save_sheet(
+            _config, user.id, body.name, body.payload, sheet_id=sheet_id,
+            base_updated_at=body.base_updated_at, tags=body.tags,
+        )
+    except SheetConflictError as exc:
+        return JSONResponse(status_code=409, content={"detail": "conflict", "current": exc.current})
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Sheet not found")
     return {"sheet": row}
 
 

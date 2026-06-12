@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  convertSheetLinks,
   createSheet,
   deleteSheet,
   downloadBlob,
@@ -10,6 +11,7 @@ import {
   uploadSheet,
   type SheetMeta,
   type UniverSnapshot,
+  ConflictError,
 } from "../api";
 import {
   createUniver,
@@ -21,6 +23,27 @@ import {
 import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
 import UniverPresetSheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
 import "@univerjs/preset-sheets-core/lib/index.css";
+import { UniverSheetsHyperLinkPreset } from "@univerjs/preset-sheets-hyper-link";
+import UniverPresetSheetsHyperLinkEnUS from "@univerjs/preset-sheets-hyper-link/locales/en-US";
+import "@univerjs/preset-sheets-hyper-link/lib/index.css";
+import { UniverSheetsFilterPreset } from "@univerjs/preset-sheets-filter";
+import UniverPresetSheetsFilterEnUS from "@univerjs/preset-sheets-filter/locales/en-US";
+import "@univerjs/preset-sheets-filter/lib/index.css";
+import { UniverSheetsSortPreset } from "@univerjs/preset-sheets-sort";
+import UniverPresetSheetsSortEnUS from "@univerjs/preset-sheets-sort/locales/en-US";
+import "@univerjs/preset-sheets-sort/lib/index.css";
+import { UniverSheetsConditionalFormattingPreset } from "@univerjs/preset-sheets-conditional-formatting";
+import UniverPresetSheetsConditionalFormattingEnUS from "@univerjs/preset-sheets-conditional-formatting/locales/en-US";
+import "@univerjs/preset-sheets-conditional-formatting/lib/index.css";
+import { UniverSheetsDataValidationPreset } from "@univerjs/preset-sheets-data-validation";
+import UniverPresetSheetsDataValidationEnUS from "@univerjs/preset-sheets-data-validation/locales/en-US";
+import "@univerjs/preset-sheets-data-validation/lib/index.css";
+import { UniverSheetsFindReplacePreset } from "@univerjs/preset-sheets-find-replace";
+import UniverPresetSheetsFindReplaceEnUS from "@univerjs/preset-sheets-find-replace/locales/en-US";
+import "@univerjs/preset-sheets-find-replace/lib/index.css";
+import { UniverSheetsNotePreset } from "@univerjs/preset-sheets-note";
+import UniverPresetSheetsNoteEnUS from "@univerjs/preset-sheets-note/locales/en-US";
+import "@univerjs/preset-sheets-note/lib/index.css";
 import DocAiPopover from "../components/DocAiPopover";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -44,6 +67,12 @@ export default function Sheets() {
   const [loadingList, setLoadingList] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
+  // ── Tag filter state ────────────────────────────────────────────────
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
+  // ── Tag editor state for the open sheet ─────────────────────────────
+  const [showTagEditor, setShowTagEditor] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+
   const [reloadToken, setReloadToken] = useState(0);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -51,6 +80,7 @@ export default function Sheets() {
   const apiRef = useRef<FUniver | null>(null);
   const dirtyRef = useRef(false);
   const nameRef = useRef("");
+  const updatedAtRef = useRef<string | null>(null);
   // Lets the ✨ AI popover flush pending edits before the agent reads the sheet.
   const flushHandleRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
@@ -59,6 +89,20 @@ export default function Sheets() {
   useEffect(() => {
     nameRef.current = activeName;
   }, [activeName]);
+
+  // Derived: all distinct tags across all sheets for the filter bar
+  const allTags = Array.from(
+    new Set(sheets.flatMap((s) => s.tags ?? []))
+  ).sort();
+
+  // Sheets filtered by active tag selection
+  const visibleSheets =
+    activeTags.size === 0
+      ? sheets
+      : sheets.filter((s) => (s.tags ?? []).some((t) => activeTags.has(t)));
+
+  // Current active sheet meta (for tag editor)
+  const activeMeta = sheets.find((s) => s.id === activeId) ?? null;
 
   async function refreshList(selectId?: string) {
     const rows = await listSheets();
@@ -69,10 +113,12 @@ export default function Sheets() {
       if (found) {
         setActiveId(found.id);
         setActiveName(found.name);
+        updatedAtRef.current = found.updated_at;
       }
     } else if (rows.length && !activeId) {
       setActiveId(rows[0].id);
       setActiveName(rows[0].name);
+      updatedAtRef.current = rows[0].updated_at;
     }
   }
 
@@ -81,7 +127,7 @@ export default function Sheets() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Univer lifecycle, keyed on the selected sheet ──────────────────
+  // ── Univer lifecycle, keyed on the selected sheet ──────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!activeId || !container) return;
@@ -98,12 +144,32 @@ export default function Sheets() {
       const snapshot = wb.save() as unknown as UniverSnapshot;
       dirtyRef.current = false;
       setSaveState("saving");
-      return saveSheet(sheetId, nameRef.current, snapshot)
-        .then(() => {
+      return saveSheet(sheetId, nameRef.current, snapshot, updatedAtRef.current)
+        .then((row) => {
+          updatedAtRef.current = row.updated_at;
           if (!cancelled) setSaveState("saved");
         })
-        .catch(() => {
-          if (!cancelled) setSaveState("error");
+        .catch((err) => {
+          if (cancelled) return;
+          if (err instanceof ConflictError) {
+            const reload = window.confirm(
+              "This sheet changed on the server. Reload the latest version? (Cancel keeps your copy and overwrites.)"
+            );
+            if (reload) {
+              setReloadToken((t) => t + 1);
+            } else {
+              // Re-save with no base — force overwrite
+              dirtyRef.current = true;
+              return saveSheet(sheetId, nameRef.current, snapshot, null)
+                .then((row) => {
+                  updatedAtRef.current = row.updated_at;
+                  setSaveState("saved");
+                })
+                .catch(() => setSaveState("error"));
+            }
+          } else {
+            setSaveState("error");
+          }
         });
     };
     flushHandleRef.current = flush;
@@ -118,11 +184,33 @@ export default function Sheets() {
       const doc = await getSheet(sheetId);
       if (cancelled || !containerRef.current) return;
 
+      updatedAtRef.current = doc.updated_at;
+
       const { univer, univerAPI } = createUniver({
         locale: LocaleType.EN_US,
-        locales: { [LocaleType.EN_US]: mergeLocales(UniverPresetSheetsCoreEnUS) },
+        locales: {
+          [LocaleType.EN_US]: mergeLocales(
+            UniverPresetSheetsCoreEnUS,
+            UniverPresetSheetsHyperLinkEnUS,
+            UniverPresetSheetsFilterEnUS,
+            UniverPresetSheetsSortEnUS,
+            UniverPresetSheetsConditionalFormattingEnUS,
+            UniverPresetSheetsDataValidationEnUS,
+            UniverPresetSheetsFindReplaceEnUS,
+            UniverPresetSheetsNoteEnUS,
+          ),
+        },
         theme: defaultTheme,
-        presets: [UniverSheetsCorePreset({ container })],
+        presets: [
+          UniverSheetsCorePreset({ container }),
+          UniverSheetsHyperLinkPreset(),
+          UniverSheetsFilterPreset(),
+          UniverSheetsSortPreset(),
+          UniverSheetsConditionalFormattingPreset(),
+          UniverSheetsDataValidationPreset(),
+          UniverSheetsFindReplacePreset(),
+          UniverSheetsNotePreset(),
+        ],
       });
       univerRef.current = univer;
       apiRef.current = univerAPI;
@@ -186,6 +274,7 @@ export default function Sheets() {
       const next = remaining[0];
       setActiveId(next ? next.id : null);
       setActiveName(next ? next.name : "");
+      updatedAtRef.current = next ? next.updated_at : null;
     }
   }
 
@@ -198,12 +287,69 @@ export default function Sheets() {
     const snapshot = wb.save() as unknown as UniverSnapshot;
     const name = nameRef.current.trim() || "Untitled sheet";
     setSaveState("saving");
-    saveSheet(id, name, snapshot)
-      .then(() => {
+    saveSheet(id, name, snapshot, updatedAtRef.current)
+      .then((row) => {
+        updatedAtRef.current = row.updated_at;
         setSaveState("saved");
         setSheets((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
       })
       .catch(() => setSaveState("error"));
+  }
+
+  async function handleConvertLinks() {
+    if (!activeId) return;
+    try {
+      const res = await convertSheetLinks(activeId);
+      updatedAtRef.current = res.updated_at;
+      dirtyRef.current = false;
+      setReloadToken((t) => t + 1);
+      window.alert(`Converted ${res.converted} URL${res.converted === 1 ? "" : "s"} to hyperlinks.`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Conversion failed");
+    }
+  }
+
+  // ── Tag editor helpers ──────────────────────────────────────────────
+  function addTag(tag: string) {
+    const trimmed = tag.trim();
+    if (!trimmed || !activeId) return;
+    const current = activeMeta?.tags ?? [];
+    if (current.includes(trimmed)) return;
+    const newTags = [...current, trimmed];
+    applyTags(newTags);
+  }
+
+  function removeTag(tag: string) {
+    if (!activeId) return;
+    const newTags = (activeMeta?.tags ?? []).filter((t) => t !== tag);
+    applyTags(newTags);
+  }
+
+  function applyTags(newTags: string[]) {
+    const id = activeId;
+    const api = apiRef.current;
+    if (!id) return;
+
+    // Get current snapshot to avoid clobbering edits
+    let snapshot: UniverSnapshot | null = null;
+    if (api) {
+      const wb = api.getActiveWorkbook();
+      if (wb) snapshot = wb.save() as unknown as UniverSnapshot;
+    }
+
+    if (snapshot) {
+      dirtyRef.current = false;
+      setSaveState("saving");
+      saveSheet(id, nameRef.current, snapshot, updatedAtRef.current, newTags)
+        .then((row) => {
+          updatedAtRef.current = row.updated_at;
+          setSaveState("saved");
+          setSheets((prev) =>
+            prev.map((s) => (s.id === id ? { ...s, tags: row.tags ?? newTags } : s))
+          );
+        })
+        .catch(() => setSaveState("error"));
+    }
   }
 
   return (
@@ -235,21 +381,48 @@ export default function Sheets() {
           </div>
         </div>
 
+        {/* Tag filter bar */}
+        {allTags.length > 0 && (
+          <div className="px-2 py-1.5 border-b border-border flex flex-wrap gap-1">
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                onClick={() =>
+                  setActiveTags((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(tag)) next.delete(tag);
+                    else next.add(tag);
+                    return next;
+                  })
+                }
+                className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                  activeTags.has(tag)
+                    ? "bg-accent text-bg-primary"
+                    : "bg-bg-hover text-text-muted hover:text-text-secondary"
+                }`}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto py-1">
           {loadingList ? (
             <div className="px-3 py-2 text-xs text-text-muted">Loading…</div>
-          ) : sheets.length === 0 ? (
+          ) : visibleSheets.length === 0 ? (
             <div className="px-3 py-3 text-xs text-text-muted leading-relaxed">
-              No sheets yet. Click <span className="text-accent">+ New</span> or ask
-              the agent to create one.
+              {sheets.length === 0
+                ? <>No sheets yet. Click <span className="text-accent">+ New</span> or ask the agent to create one.</>
+                : "No sheets match the selected tags."}
             </div>
           ) : (
-            sheets.map((s) => {
+            visibleSheets.map((s) => {
               const isActive = s.id === activeId;
               return (
                 <div
                   key={s.id}
-                  className={`group flex items-center gap-1 mx-1 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                  className={`group flex flex-col mx-1 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
                     isActive
                       ? "bg-bg-hover text-text-primary"
                       : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
@@ -257,29 +430,44 @@ export default function Sheets() {
                   onClick={() => {
                     setActiveId(s.id);
                     setActiveName(s.name);
+                    updatedAtRef.current = s.updated_at;
                   }}
                 >
-                  <svg
-                    width="16" height="16" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="1.8" className="shrink-0"
-                  >
-                    <rect x="3" y="3" width="18" height="18" rx="1" />
-                    <line x1="3" y1="9" x2="21" y2="9" />
-                    <line x1="9" y1="3" x2="9" y2="21" />
-                  </svg>
-                  <span className="text-sm truncate flex-1">{s.name}</span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(s.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red-400 transition-opacity"
-                    title="Delete sheet"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M18 6 6 18M6 6l12 12" />
+                  <div className="flex items-center gap-1">
+                    <svg
+                      width="16" height="16" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="1.8" className="shrink-0"
+                    >
+                      <rect x="3" y="3" width="18" height="18" rx="1" />
+                      <line x1="3" y1="9" x2="21" y2="9" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
                     </svg>
-                  </button>
+                    <span className="text-sm truncate flex-1">{s.name}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(s.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red-400 transition-opacity"
+                      title="Delete sheet"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  {s.tags && s.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1 ml-5">
+                      {s.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="px-1 py-0 rounded text-[9px] bg-bg-primary text-text-muted border border-border"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -302,8 +490,62 @@ export default function Sheets() {
                 className="text-sm font-medium bg-transparent outline-none border-b border-transparent focus:border-border-light px-1 py-0.5 min-w-0"
                 aria-label="Sheet name"
               />
+              {/* 🏷 Tag editor button */}
+              <div className="relative">
+                <button
+                  onClick={() => {
+                    setShowTagEditor((v) => !v);
+                    setTagInput("");
+                  }}
+                  className="p-1 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors"
+                  title="Edit tags"
+                >
+                  🏷
+                </button>
+                {showTagEditor && (
+                  <div className="absolute left-0 top-full mt-1 z-20 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <div className="flex flex-wrap gap-1">
+                      {(activeMeta?.tags ?? []).map((tag) => (
+                        <span
+                          key={tag}
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-bg-hover text-[10px] text-text-secondary"
+                        >
+                          {tag}
+                          <button
+                            onClick={() => removeTag(tag)}
+                            className="text-text-muted hover:text-red-400 transition-colors ml-0.5"
+                            aria-label={`Remove tag ${tag}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <input
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          addTag(tagInput);
+                          setTagInput("");
+                        }
+                      }}
+                      placeholder="Add tag, press Enter"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                      autoFocus
+                    />
+                  </div>
+                )}
+              </div>
               <SaveBadge state={saveState} />
               <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={handleConvertLinks}
+                  className="px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors"
+                  title="Convert plain URLs in cells to hyperlinks"
+                >
+                  Convert URLs to links
+                </button>
                 <details className="relative">
                   <summary className="list-none cursor-pointer select-none px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors">
                     Export ▾

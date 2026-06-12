@@ -5,6 +5,7 @@ import {
   downloadPdfBlob,
   extractPdfText,
   listPdfs,
+  patchPdf,
   pdfRawUrl,
   uploadPdf,
   type PdfMeta,
@@ -46,9 +47,26 @@ export default function Pdf() {
   const [extract, setExtract] = useState<ExtractState>({ phase: "idle" });
   const [exportPassword, setExportPassword] = useState("");
 
+  // ── Tag filter state ────────────────────────────────────────────────
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
+  // ── Tag editor state for the open PDF ───────────────────────────────
+  const [showTagEditor, setShowTagEditor] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeFile = files.find((f) => f.id === activeId) ?? null;
+
+  // Derived: all distinct tags across all PDFs for the filter bar
+  const allTags = Array.from(
+    new Set(files.flatMap((f) => f.tags ?? []))
+  ).sort();
+
+  // PDFs filtered by active tag selection
+  const visibleFiles =
+    activeTags.size === 0
+      ? files
+      : files.filter((f) => (f.tags ?? []).some((t) => activeTags.has(t)));
 
   // Memoize the `file` source — react-pdf uses `===` to detect changes, so a
   // fresh string each render would re-fetch the whole document every time.
@@ -134,6 +152,32 @@ export default function Pdf() {
     }
   }
 
+  // ── Tag editor helpers ──────────────────────────────────────────────
+  function addTag(tag: string) {
+    const trimmed = tag.trim();
+    if (!trimmed || !activeId) return;
+    const current = activeFile?.tags ?? [];
+    if (current.includes(trimmed)) return;
+    applyTags(activeId, [...current, trimmed]);
+  }
+
+  function removeTag(tag: string) {
+    if (!activeId) return;
+    applyTags(activeId, (activeFile?.tags ?? []).filter((t) => t !== tag));
+  }
+
+  function applyTags(id: string, newTags: string[]) {
+    patchPdf(id, { tags: newTags })
+      .then((updated) => {
+        setFiles((prev) =>
+          prev.map((f) => (f.id === id ? { ...f, tags: updated.tags ?? newTags } : f))
+        );
+      })
+      .catch((err) =>
+        window.alert(err instanceof Error ? err.message : "Failed to update tags")
+      );
+  }
+
   return (
     <div className="flex h-full bg-bg-primary text-text-primary">
       {/* PDF browser */}
@@ -157,48 +201,89 @@ export default function Pdf() {
           />
         </div>
 
+        {/* Tag filter bar */}
+        {allTags.length > 0 && (
+          <div className="px-2 py-1.5 border-b border-border flex flex-wrap gap-1">
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                onClick={() =>
+                  setActiveTags((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(tag)) next.delete(tag);
+                    else next.add(tag);
+                    return next;
+                  })
+                }
+                className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                  activeTags.has(tag)
+                    ? "bg-accent text-bg-primary"
+                    : "bg-bg-hover text-text-muted hover:text-text-secondary"
+                }`}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto py-1">
           {loadingList ? (
             <div className="px-3 py-2 text-xs text-text-muted">Loading…</div>
-          ) : files.length === 0 ? (
+          ) : visibleFiles.length === 0 ? (
             <div className="px-3 py-3 text-xs text-text-muted leading-relaxed">
-              No PDFs yet. Click <span className="text-accent">↑ Upload</span> or
-              ask the agent to create one.
+              {files.length === 0
+                ? <>No PDFs yet. Click <span className="text-accent">↑ Upload</span> or ask the agent to create one.</>
+                : "No PDFs match the selected tags."}
             </div>
           ) : (
-            files.map((f) => {
+            visibleFiles.map((f) => {
               const isActive = f.id === activeId;
               return (
                 <div
                   key={f.id}
-                  className={`group flex items-center gap-1 mx-1 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                  className={`group flex flex-col mx-1 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
                     isActive
                       ? "bg-bg-hover text-text-primary"
                       : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
                   }`}
                   onClick={() => setActiveId(f.id)}
                 >
-                  <svg
-                    width="16" height="16" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
-                    strokeLinejoin="round" className="shrink-0"
-                  >
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <path d="M14 2v6h6" />
-                  </svg>
-                  <span className="text-sm truncate flex-1">{f.name}</span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(f.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red-400 transition-opacity"
-                    title="Delete PDF"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M18 6 6 18M6 6l12 12" />
+                  <div className="flex items-center gap-1">
+                    <svg
+                      width="16" height="16" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
+                      strokeLinejoin="round" className="shrink-0"
+                    >
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <path d="M14 2v6h6" />
                     </svg>
-                  </button>
+                    <span className="text-sm truncate flex-1">{f.name}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(f.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red-400 transition-opacity"
+                      title="Delete PDF"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  {f.tags && f.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1 ml-5">
+                      {f.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="px-1 py-0 rounded text-[9px] bg-bg-primary text-text-muted border border-border"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -210,7 +295,7 @@ export default function Pdf() {
       <main className="flex-1 min-w-0 flex flex-col">
         {activeId && activeFile ? (
           <>
-            {/* Top strip: filename, page count, download, extract */}
+            {/* Top strip: filename, page count, tags, download, extract */}
             <div className="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-border">
               <span className="text-sm font-medium truncate min-w-0">
                 {activeFile.name}
@@ -222,6 +307,53 @@ export default function Pdf() {
                     ? `${activeFile.pages} pages`
                     : ""}
               </span>
+              {/* 🏷 Tag editor button */}
+              <div className="relative">
+                <button
+                  onClick={() => {
+                    setShowTagEditor((v) => !v);
+                    setTagInput("");
+                  }}
+                  className="p-1 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors"
+                  title="Edit tags"
+                >
+                  🏷
+                </button>
+                {showTagEditor && (
+                  <div className="absolute left-0 top-full mt-1 z-20 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <div className="flex flex-wrap gap-1">
+                      {(activeFile.tags ?? []).map((tag) => (
+                        <span
+                          key={tag}
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-bg-hover text-[10px] text-text-secondary"
+                        >
+                          {tag}
+                          <button
+                            onClick={() => removeTag(tag)}
+                            className="text-text-muted hover:text-red-400 transition-colors ml-0.5"
+                            aria-label={`Remove tag ${tag}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <input
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          addTag(tagInput);
+                          setTagInput("");
+                        }
+                      }}
+                      placeholder="Add tag, press Enter"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                      autoFocus
+                    />
+                  </div>
+                )}
+              </div>
               <div className="ml-auto flex items-center gap-3 shrink-0">
                 <DocAiPopover
                   kind="pdf"

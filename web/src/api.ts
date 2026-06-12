@@ -188,6 +188,19 @@ export class ApiError extends Error {
   }
 }
 
+/** Thrown when a PUT/PATCH hits a 409 Conflict (optimistic-lock mismatch). */
+export class ConflictError extends Error {
+  status: number;
+  /** The server's current row — use `current.updated_at` to re-base. */
+  current: { updated_at: string; payload?: unknown };
+  constructor(current: { updated_at: string; payload?: unknown }) {
+    super("Conflict: document was modified elsewhere.");
+    this.name = "ConflictError";
+    this.status = 409;
+    this.current = current;
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: "include",
@@ -197,11 +210,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let body: Record<string, unknown> | null = null;
     try {
-      const body = await res.json();
-      message = body.detail || body.message || body.error || message;
+      body = await res.json();
+      message = (body?.detail as string) || (body?.message as string) || (body?.error as string) || message;
     } catch {
       // not JSON
+    }
+    if (res.status === 409 && body?.current) {
+      throw new ConflictError(body.current as { updated_at: string; payload?: unknown });
     }
     throw new ApiError(message, res.status);
   }
@@ -1948,6 +1965,7 @@ export interface SheetMeta {
   name: string;
   created_at?: string;
   updated_at: string;
+  tags?: string[];
 }
 
 // Univer IWorkbookData snapshot — opaque to LazyClaw, owned by the editor.
@@ -1972,11 +1990,28 @@ export const createSheet = (name: string) =>
     body: JSON.stringify({ name }),
   }).then((r) => r.sheet);
 
-export const saveSheet = (id: string, name: string, payload: UniverSnapshot) =>
+export const saveSheet = (
+  id: string,
+  name: string,
+  payload: UniverSnapshot,
+  baseUpdatedAt?: string | null,
+  tags?: string[] | null,
+) =>
   request<{ sheet: SheetMeta }>(`/api/sheets/${encodeURIComponent(id)}`, {
     method: "PUT",
-    body: JSON.stringify({ name, payload }),
+    body: JSON.stringify({
+      name,
+      payload,
+      ...(baseUpdatedAt != null ? { base_updated_at: baseUpdatedAt } : {}),
+      ...(tags != null ? { tags } : {}),
+    }),
   }).then((r) => r.sheet);
+
+export const convertSheetLinks = (id: string) =>
+  request<{ ok: boolean; converted: number; snapshot: UniverSnapshot; updated_at: string }>(
+    `/api/sheets/${encodeURIComponent(id)}/links/convert`,
+    { method: "POST" },
+  );
 
 export const deleteSheet = (id: string) =>
   request<{ status: string; id: string }>(
@@ -2100,6 +2135,7 @@ export interface DocMeta {
   name: string;
   created_at?: string;
   updated_at: string;
+  tags?: string[];
 }
 
 // Univer IDocumentData snapshot — opaque to LazyClaw, owned by the editor.
@@ -2121,10 +2157,21 @@ export const createDoc = (name: string) =>
     body: JSON.stringify({ name }),
   }).then((r) => r.doc);
 
-export const saveDoc = (id: string, name: string, payload: UniverDocSnapshot) =>
+export const saveDoc = (
+  id: string,
+  name: string,
+  payload: UniverDocSnapshot,
+  baseUpdatedAt?: string | null,
+  tags?: string[] | null,
+) =>
   request<{ doc: DocMeta }>(`/api/docs/${encodeURIComponent(id)}`, {
     method: "PUT",
-    body: JSON.stringify({ name, payload }),
+    body: JSON.stringify({
+      name,
+      payload,
+      ...(baseUpdatedAt != null ? { base_updated_at: baseUpdatedAt } : {}),
+      ...(tags != null ? { tags } : {}),
+    }),
   }).then((r) => r.doc);
 
 export const deleteDoc = (id: string) =>
@@ -2166,6 +2213,7 @@ export interface PdfMeta {
   pages?: number | null;
   created_at?: string;
   updated_at: string;
+  tags?: string[];
 }
 
 export const listPdfs = () =>
@@ -2199,6 +2247,12 @@ export const deletePdf = (id: string) =>
     `/api/pdf/${encodeURIComponent(id)}`,
     { method: "DELETE" },
   );
+
+export const patchPdf = (id: string, body: { name?: string; tags?: string[] }) =>
+  request<{ file: PdfMeta }>(`/api/pdf/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  }).then((r) => r.file);
 
 export const extractPdfText = (id: string) =>
   request<{ text: string; pages: number }>(

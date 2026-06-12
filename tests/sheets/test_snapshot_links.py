@@ -230,3 +230,96 @@ def test_mixed_text_url_not_converted():
     out, count = S.convert_urls_to_links(wb)
     assert count == 0
     assert S.get_sheet_links(out) == []
+
+
+# ───────────────────────── 14. stray elements in resources ───────────
+
+
+def test_link_data_skips_non_dict_resources():
+    """_link_data must not crash on non-dict elements in the resources list."""
+    wb = _wb()
+    # Mix non-dict "stray" with the real plugin entry.
+    wb["resources"] = [
+        {"name": "OTHER"},
+        "stray",
+        {"name": S._LINK_RESOURCE, "data": json.dumps({"sh": [{"id": "l-abc", "row": 0, "column": 0, "payload": "https://ok.com"}]})},
+    ]
+    data = S._link_data(wb)
+    assert data == {"sh": [{"id": "l-abc", "row": 0, "column": 0, "payload": "https://ok.com"}]}
+
+
+def test_write_link_data_skips_non_dict_resources():
+    """_write_link_data must not crash on non-dict elements when scanning resources."""
+    wb = _wb()
+    wb["resources"] = [
+        "stray_string",
+        42,
+        {"name": "OTHER"},
+        {"name": S._LINK_RESOURCE, "data": "{}"},
+    ]
+    # Should update the existing entry without raising.
+    out = copy.deepcopy(wb)
+    new_data = {"sh": [{"id": "l-test", "row": 1, "column": 2, "payload": "https://written.com"}]}
+    S._write_link_data(out, new_data)
+    assert json.loads(out["resources"][3]["data"]) == new_data
+
+
+# ───────────────────────── 15. string row/col coercion ───────────────
+
+
+def test_set_cell_link_coerces_string_row_col_upsert():
+    """set_cell_link with string row/col coerces to int; same cell → 1 entry."""
+    wb = _wb()
+    out = S.set_cell_link(wb, 0, 0, "https://first.com")
+    # Call again with string "0", "0" — should be treated as the same cell.
+    out = S.set_cell_link(out, "0", "0", "https://second.com")
+    links = S.get_sheet_links(out)
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://second.com"
+
+
+def test_remove_cell_link_coerces_string_row_col():
+    """remove_cell_link with string row/col coerces to int correctly."""
+    wb = _wb()
+    out = S.set_cell_link(wb, 0, 0, "https://coerce.com")
+    out = S.remove_cell_link(out, "0", "0")
+    assert S.get_sheet_links(out) == []
+
+
+# ───────────────────────── 16. near-miss markdown (spaces in label) ──
+
+
+def test_converter_markdown_link_with_spaces_in_label():
+    """[ label ](url) — spaces inside brackets are matched by [^\\]]+.
+
+    The current regex _MD_LINK_RE uses [^\\]]+ which matches spaces, so
+    '[ label ](url)' DOES match and the display text is ' label ' (with spaces).
+    This test PINS that behaviour.
+    """
+    wb = S.set_cells(_wb(), [{"row": 0, "col": 0, "value": "[ label ](https://spaced.io)"}])
+    out, count = S.convert_urls_to_links(wb)
+    # The regex matches → link is created.
+    assert count == 1
+    links = S.get_sheet_links(out)
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://spaced.io"
+    # Display text is ' label ' (spaces preserved — that's what the regex captures).
+    cell = S.get_cell(out, 0, 0)
+    assert cell is not None
+    assert cell.get("v") == " label "
+
+
+# ───────────────────────── 17. perf-shaped scale test ───────────────
+
+
+def test_converter_200_url_cells():
+    """convert_urls_to_links handles 200 URL cells and yields exactly 200 links."""
+    wb = _wb()
+    edits = [
+        {"row": i, "col": 0, "value": f"https://example.com/page/{i}"}
+        for i in range(200)
+    ]
+    wb = S.set_cells(wb, edits)
+    out, count = S.convert_urls_to_links(wb)
+    assert count == 200
+    assert len(S.get_sheet_links(out)) == 200

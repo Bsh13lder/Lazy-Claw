@@ -332,9 +332,12 @@ def _link_data(snap: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Parse the hyperlink plugin resource into a dict keyed by sheet id.
 
     Returns ``{}`` on missing resource or any :class:`json.JSONDecodeError`.
+    Non-dict elements in the ``resources`` list are silently skipped.
     """
     resources = snap.get("resources") or []
     for res in resources:
+        if not isinstance(res, dict):
+            continue
         if res.get("name") == _LINK_RESOURCE:
             try:
                 return json.loads(res.get("data") or "{}")
@@ -361,20 +364,57 @@ def _write_link_data(
     """Mutate a caller-owned copy of *snap* to write the link resource.
 
     Updates the existing ``SHEET_HYPER_LINK_PLUGIN`` entry when present,
-    otherwise appends a new one.
+    otherwise appends a new one. Non-dict elements in the ``resources`` list
+    are silently skipped.
     """
     resources: list[dict[str, Any]] = snap.setdefault("resources", [])
     for res in resources:
+        if not isinstance(res, dict):
+            continue
         if res.get("name") == _LINK_RESOURCE:
             res["data"] = json.dumps(data)
             return
     resources.append({"name": _LINK_RESOURCE, "data": json.dumps(data)})
 
 
-def set_cell_link(
-    snap: dict[str, Any],
+def _apply_link(
+    snap_owned: dict[str, Any],
+    sid: str,
     row: int,
     col: int,
+    url: str,
+    display: str | None,
+    linked: set[tuple[int, int]],
+) -> None:
+    """Mutate a caller-owned snapshot to add/replace a hyperlink entry.
+
+    Drops any existing entry at (row, col), appends the new one, serialises
+    via :func:`_write_link_data`, optionally writes the display text, and
+    records (row, col) in *linked*.  All arguments beyond *snap_owned* must
+    already be coerced (row/col are ints).
+    """
+    data = _link_data(snap_owned)
+    entries = [
+        e for e in (data.get(sid) or [])
+        if not (e["row"] == row and e["column"] == col)
+    ]
+    entries.append({
+        "id": f"l-{uuid4().hex[:8]}",
+        "row": row,
+        "column": col,
+        "payload": url,
+    })
+    data[sid] = entries
+    _write_link_data(snap_owned, data)
+    if display is not None:
+        _apply_cell(snap_owned["sheets"][sid], row, col, display, None, clear=False)
+    linked.add((row, col))
+
+
+def set_cell_link(
+    snap: dict[str, Any],
+    row: int | str,
+    col: int | str,
     url: str,
     display: str | None = None,
     sheet: int | str = 0,
@@ -383,43 +423,36 @@ def set_cell_link(
 
     Any existing link entry at the same cell is removed first (upsert
     semantics). When *display* is not ``None`` the cell's text value is also
-    updated via :func:`_apply_cell`.
+    updated via :func:`_apply_cell`.  *row* and *col* are coerced to ``int``
+    at entry (mirrors :func:`set_cells` behaviour).
     """
+    row, col = int(row), int(col)
     out = copy.deepcopy(snap)
     sid = _resolve_sheet_id(out, sheet)
-
-    # Read current link data, drop any existing entry at (row, col).
-    data = _link_data(out)
-    entries = [e for e in (data.get(sid) or []) if not (e["row"] == row and e["column"] == col)]
-    entries.append({
-        "id": f"l-{uuid4().hex[:8]}",
-        "row": row,
-        "column": col,
-        "payload": url,
-    })
-    data[sid] = entries
-    _write_link_data(out, data)
-
-    if display is not None:
-        _apply_cell(out["sheets"][sid], row, col, display, None, clear=False)
-
+    linked: set[tuple[int, int]] = set()
+    _apply_link(out, sid, row, col, url, display, linked)
     return out
 
 
 def remove_cell_link(
     snap: dict[str, Any],
-    row: int,
-    col: int,
+    row: int | str,
+    col: int | str,
     sheet: int | str = 0,
 ) -> dict[str, Any]:
     """Return a NEW snapshot with the hyperlink at (row, col) removed.
 
     Cell text is left untouched. A no-op when there is no link at the cell.
+    *row* and *col* are coerced to ``int`` at entry.
     """
+    row, col = int(row), int(col)
     out = copy.deepcopy(snap)
     sid = _resolve_sheet_id(out, sheet)
     data = _link_data(out)
-    entries = [e for e in (data.get(sid) or []) if not (e["row"] == row and e["column"] == col)]
+    entries = [
+        e for e in (data.get(sid) or [])
+        if not (e["row"] == row and e["column"] == col)
+    ]
     data[sid] = entries
     _write_link_data(out, data)
     return out
@@ -440,14 +473,17 @@ def convert_urls_to_links(snap: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
     Returns ``(new_snapshot, count)`` where *count* is the number of links
     added. The original snapshot is never mutated.
+
+    Performance: one deepcopy at the top; all per-cell mutations go through
+    :func:`_apply_link` which operates on the already-owned copy.  ``_link_data``
+    is parsed once per sheet (not once per cell match).
     """
     out = copy.deepcopy(snap)
     count = 0
 
     order = out.get("sheetOrder") or list((out.get("sheets") or {}).keys())
     for sid in order:
-        # Re-read the linked set once per sheet before the cell loop so that
-        # cells converted earlier in this pass are in the skip set.
+        # Parse link data once per sheet; track newly linked cells in a set.
         linked: set[tuple[int, int]] = {
             (e["row"], e["column"]) for e in (_link_data(out).get(sid) or [])
         }
@@ -462,8 +498,7 @@ def convert_urls_to_links(snap: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
             md = _MD_LINK_RE.match(v.strip())
             if md:
-                out = set_cell_link(out, row, col, md.group(2), display=md.group(1), sheet=sid)
-                linked.add((row, col))
+                _apply_link(out, sid, row, col, md.group(2), md.group(1), linked)
                 count += 1
                 continue
 
@@ -471,8 +506,7 @@ def convert_urls_to_links(snap: dict[str, Any]) -> tuple[dict[str, Any], int]:
             if url_m:
                 matched_url = url_m.group(0).rstrip(_TRAIL_PUNCT)
                 if matched_url == v.strip().rstrip(_TRAIL_PUNCT):
-                    out = set_cell_link(out, row, col, matched_url, display=None, sheet=sid)
-                    linked.add((row, col))
+                    _apply_link(out, sid, row, col, matched_url, None, linked)
                     count += 1
 
     return out, count

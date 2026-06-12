@@ -3,8 +3,8 @@
 Mirrors :mod:`lazyclaw.sheets.store`: ``docs.payload`` is ciphertext over the
 Univer ``IDocumentData`` snapshot. Persistence granularity is one blob per
 doc — atomic restore, full UI fidelity, no per-paragraph schema. All queries
-are scoped by ``user_id`` (no cross-user access); the plaintext ``name`` is
-used to list docs in the sidebar.
+are scoped by ``user_id`` (no cross-user access); the plaintext ``name`` and
+``tags`` are used to list docs in the sidebar.
 """
 
 from __future__ import annotations
@@ -24,6 +24,16 @@ from lazyclaw.docs.snapshot import blank_document
 logger = logging.getLogger(__name__)
 
 _NAME_MAX = 120
+_TAGS_MAX = 32
+_TAG_LEN_MAX = 40
+
+
+class DocConflictError(Exception):
+    """Raised when base_updated_at doesn't match the stored row (CAS failure)."""
+
+    def __init__(self, current: dict[str, Any]) -> None:
+        super().__init__("doc was modified by another client")
+        self.current = current
 
 
 def _docs_aad(user_id: str) -> bytes:
@@ -42,17 +52,46 @@ def _empty_payload(name: str) -> dict[str, Any]:
     return blank_document(name)
 
 
+def _clean_tags(tags: Any) -> list[str]:
+    """Sanitise a tags value: must be a list, max 32 tags, each ≤40 chars, deduped."""
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for t in tags:
+        s = str(t).strip()[:_TAG_LEN_MAX]
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= _TAGS_MAX:
+            break
+    return out
+
+
+def _parse_tags(raw: str | None) -> list[str]:
+    """Parse a JSON tags string stored in DB; returns [] on any error."""
+    try:
+        result = json.loads(raw or "[]")
+        return result if isinstance(result, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 async def list_docs(config: Config, user_id: str) -> list[dict[str, Any]]:
-    """Plaintext index: id, name, timestamps (no payload)."""
+    """Plaintext index: id, name, tags, timestamps (no payload)."""
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, name, created_at, updated_at FROM docs "
+            "SELECT id, name, tags, created_at, updated_at FROM docs "
             "WHERE user_id = ? ORDER BY updated_at DESC",
             (user_id,),
         )
         data = await rows.fetchall()
     return [
-        {"id": r[0], "name": r[1], "created_at": r[2], "updated_at": r[3]}
+        {
+            "id": r[0],
+            "name": r[1],
+            "tags": _parse_tags(r[2]),
+            "created_at": r[3],
+            "updated_at": r[4],
+        }
         for r in data
     ]
 
@@ -64,7 +103,7 @@ async def get_doc(
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, name, payload, created_at, updated_at "
+            "SELECT id, name, payload, tags, created_at, updated_at "
             "FROM docs WHERE id = ? AND user_id = ?",
             (doc_id, user_id),
         )
@@ -82,50 +121,105 @@ async def get_doc(
         "id": row[0],
         "name": row[1],
         "payload": payload,
-        "created_at": row[3],
-        "updated_at": row[4],
+        "tags": _parse_tags(row[3]),
+        "created_at": row[4],
+        "updated_at": row[5],
     }
 
 
 async def save_doc(
     config: Config,
     user_id: str,
-    name: str,
+    name: str | None,
     payload: dict[str, Any],
     doc_id: str | None = None,
+    *,
+    base_updated_at: str | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Upsert a doc. Returns the index row (no payload)."""
+    """Upsert a doc. Returns the index row (no payload).
+
+    When ``base_updated_at`` is provided and does not match the stored
+    ``updated_at``, :exc:`DocConflictError` is raised with ``.current``
+    carrying the fresh decrypted row so the caller can show a merge UI.
+
+    When ``name`` is ``None`` the stored name is preserved (rename not intended).
+    When ``tags`` is ``None`` the stored tags are preserved.
+    """
     dek = await get_user_dek(config, user_id)
     enc = encrypt_field(json.dumps(payload), dek, _docs_aad(user_id))
     now = _now()
-    name = _clean_name(name)
 
     if doc_id is None:
+        effective_name = _clean_name(name)
+        effective_tags = json.dumps(_clean_tags(tags)) if tags is not None else "[]"
         doc_id = str(uuid4())
         async with db_session(config) as db:
             await db.execute(
-                "INSERT INTO docs (id, user_id, name, payload, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (doc_id, user_id, name, enc, now, now),
+                "INSERT INTO docs (id, user_id, name, payload, tags, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (doc_id, user_id, effective_name, enc, effective_tags, now, now),
             )
             await db.commit()
-        return {"id": doc_id, "name": name, "created_at": now, "updated_at": now}
+        return {
+            "id": doc_id,
+            "name": effective_name,
+            "tags": _parse_tags(effective_tags),
+            "created_at": now,
+            "updated_at": now,
+        }
 
+    # UPDATE path — read existing row for name/tags preservation + conflict check
     async with db_session(config) as db:
         cur = await db.execute(
-            "UPDATE docs SET name = ?, payload = ?, updated_at = ? "
-            "WHERE id = ? AND user_id = ?",
-            (name, enc, now, doc_id, user_id),
+            "SELECT name, tags, updated_at FROM docs WHERE id = ? AND user_id = ?",
+            (doc_id, user_id),
         )
-        if cur.rowcount == 0:
-            # Caller passed an id that doesn't exist (or isn't theirs) → create.
+        existing = await cur.fetchone()
+
+    if existing is None:
+        effective_name = _clean_name(name)
+        effective_tags = json.dumps(_clean_tags(tags)) if tags is not None else "[]"
+        async with db_session(config) as db:
             await db.execute(
-                "INSERT INTO docs (id, user_id, name, payload, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (doc_id, user_id, name, enc, now, now),
+                "INSERT INTO docs (id, user_id, name, payload, tags, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (doc_id, user_id, effective_name, enc, effective_tags, now, now),
             )
+            await db.commit()
+        return {
+            "id": doc_id,
+            "name": effective_name,
+            "tags": _parse_tags(effective_tags),
+            "updated_at": now,
+        }
+
+    stored_name, stored_tags_raw, stored_updated_at = existing
+
+    # Conflict detection (CAS)
+    if base_updated_at is not None and base_updated_at != stored_updated_at:
+        current = await get_doc(config, user_id, doc_id)
+        raise DocConflictError(current)  # type: ignore[arg-type]
+
+    effective_name = _clean_name(name) if name is not None else stored_name
+    effective_tags_raw = (
+        json.dumps(_clean_tags(tags)) if tags is not None else (stored_tags_raw or "[]")
+    )
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE docs SET name = ?, payload = ?, tags = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (effective_name, enc, effective_tags_raw, now, doc_id, user_id),
+        )
         await db.commit()
-    return {"id": doc_id, "name": name, "updated_at": now}
+
+    return {
+        "id": doc_id,
+        "name": effective_name,
+        "tags": _parse_tags(effective_tags_raw),
+        "updated_at": now,
+    }
 
 
 async def create_doc(

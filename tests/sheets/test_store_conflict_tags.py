@@ -1,0 +1,320 @@
+"""Tests for conflict-aware save + tags in sheets/docs/pdf stores.
+
+TDD: this file was written BEFORE the implementation.
+
+Covers:
+- SheetConflictError raised when base_updated_at is stale
+- SheetConflictError.current carries the decrypted fresh row
+- No error when base_updated_at matches
+- No error when base_updated_at is omitted (last-write-wins)
+- save_sheet(name=None) preserves the stored name
+- tags round-trip through save_sheet / list_sheets / get_sheet
+- _clean_tags sanitisation (non-list, >32 tags, >40 chars, duplicates)
+- DocConflictError mirrors SheetConflictError for docs store
+- update_pdf_meta sets name/tags without touching payload
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from lazyclaw.config import Config
+from lazyclaw.db.connection import close_pool, db_session, init_db
+from lazyclaw.sheets import store as sheets_store
+from lazyclaw.docs import store as docs_store
+from lazyclaw.pdf import store as pdf_store
+
+pytestmark = pytest.mark.asyncio
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def cfg(tmp_path: Path):
+    c = Config(database_dir=tmp_path)
+    await init_db(c)
+    async with db_session(c) as db:
+        for uid, salt in (("u1", "salt-a"), ("u2", "salt-b")):
+            await db.execute(
+                "INSERT INTO users (id, username, password_hash, encryption_salt) "
+                "VALUES (?, ?, ?, ?)",
+                (uid, uid, "x", salt),
+            )
+        await db.commit()
+    try:
+        yield c
+    finally:
+        await close_pool()
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+async def _make_sheet(cfg, user_id: str = "u1", name: str = "Sheet"):
+    return await sheets_store.create_sheet(cfg, user_id, name)
+
+
+async def _make_doc(cfg, user_id: str = "u1", name: str = "Doc"):
+    return await docs_store.create_doc(cfg, user_id, name)
+
+
+# ── sheets_store: conflict detection ─────────────────────────────────────────
+
+
+async def test_stale_base_raises_conflict(cfg):
+    """save_sheet with a stale base_updated_at raises SheetConflictError."""
+    row = await _make_sheet(cfg)
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    # Advance the stored updated_at directly in the DB (bypasses 1-second resolution)
+    newer_ts = "2026-01-01 12:00:01"
+    async with db_session(cfg) as db:
+        await db.execute(
+            "UPDATE sheets SET updated_at = ? WHERE id = ?", (newer_ts, sid)
+        )
+        await db.commit()
+
+    # base_updated_at still holds the original (stale) timestamp
+    with pytest.raises(sheets_store.SheetConflictError) as exc_info:
+        await sheets_store.save_sheet(
+            cfg, "u1", "Sheet", snap,
+            sheet_id=sid,
+            base_updated_at=row["updated_at"],  # stale
+        )
+
+    err = exc_info.value
+    assert hasattr(err, "current"), "SheetConflictError must carry .current"
+    assert err.current["id"] == sid
+    assert "payload" in err.current, ".current must include decrypted payload"
+    assert err.current["updated_at"] == newer_ts
+
+
+async def test_fresh_base_does_not_raise(cfg):
+    """save_sheet with the matching base_updated_at succeeds."""
+    row = await _make_sheet(cfg)
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    # Must not raise
+    result = await sheets_store.save_sheet(
+        cfg, "u1", "Sheet", snap,
+        sheet_id=sid,
+        base_updated_at=row["updated_at"],
+    )
+    assert result["id"] == sid
+
+
+async def test_no_base_updated_at_is_last_write_wins(cfg):
+    """Omitting base_updated_at keeps last-write-wins with no conflict error."""
+    row = await _make_sheet(cfg)
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    # Save twice without passing base_updated_at — must not raise
+    await sheets_store.save_sheet(cfg, "u1", "Sheet", snap, sheet_id=sid)
+    await sheets_store.save_sheet(cfg, "u1", "Sheet", snap, sheet_id=sid)
+
+
+# ── sheets_store: name preservation ───────────────────────────────────────────
+
+
+async def test_save_sheet_none_name_preserves_stored_name(cfg):
+    """Passing name=None keeps the existing stored name."""
+    row = await _make_sheet(cfg, name="Budget 2026")
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    result = await sheets_store.save_sheet(
+        cfg, "u1", None, snap, sheet_id=sid
+    )
+    assert result["name"] == "Budget 2026"
+
+
+async def test_save_sheet_new_name_renames(cfg):
+    """Passing a non-None name updates the stored name."""
+    row = await _make_sheet(cfg, name="Old Name")
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    result = await sheets_store.save_sheet(
+        cfg, "u1", "New Name", snap, sheet_id=sid
+    )
+    assert result["name"] == "New Name"
+
+
+# ── sheets_store: tags ────────────────────────────────────────────────────────
+
+
+async def test_tags_round_trip(cfg):
+    """Tags saved via save_sheet appear in list_sheets and get_sheet."""
+    row = await _make_sheet(cfg)
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    await sheets_store.save_sheet(
+        cfg, "u1", None, snap, sheet_id=sid, tags=["finance", "2026"]
+    )
+
+    listing = await sheets_store.list_sheets(cfg, "u1")
+    assert listing[0]["tags"] == ["finance", "2026"]
+
+    fetched = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert fetched["tags"] == ["finance", "2026"]
+
+
+async def test_tags_default_empty_list(cfg):
+    """A newly created sheet (no tags) returns tags=[] in list and get."""
+    row = await _make_sheet(cfg)
+    listing = await sheets_store.list_sheets(cfg, "u1")
+    assert listing[0]["tags"] == []
+    fetched = await sheets_store.get_sheet(cfg, "u1", row["id"])
+    assert fetched["tags"] == []
+
+
+async def test_clean_tags_non_list_returns_empty():
+    """_clean_tags rejects non-list input."""
+    assert sheets_store._clean_tags("not a list") == []
+    assert sheets_store._clean_tags(None) == []
+    assert sheets_store._clean_tags(42) == []
+
+
+async def test_clean_tags_truncates_long_tag():
+    """_clean_tags truncates tags longer than 40 chars."""
+    long_tag = "a" * 50
+    result = sheets_store._clean_tags([long_tag])
+    assert len(result) == 1
+    assert len(result[0]) == 40
+
+
+async def test_clean_tags_deduplicates():
+    """_clean_tags removes duplicate tags."""
+    result = sheets_store._clean_tags(["foo", "bar", "foo"])
+    assert result == ["foo", "bar"]
+
+
+async def test_clean_tags_max_32():
+    """_clean_tags caps the list at 32 tags."""
+    many = [str(i) for i in range(50)]
+    result = sheets_store._clean_tags(many)
+    assert len(result) == 32
+
+
+async def test_save_sheet_with_no_tags_preserves_existing_tags(cfg):
+    """Calling save_sheet without tags= leaves existing tags intact."""
+    row = await _make_sheet(cfg)
+    sid = row["id"]
+    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+
+    # Set tags first
+    await sheets_store.save_sheet(cfg, "u1", None, snap, sheet_id=sid, tags=["keep"])
+
+    # Save again without tags param — tags must be preserved
+    snap2 = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    await sheets_store.save_sheet(cfg, "u1", None, snap2, sheet_id=sid)
+
+    fetched = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert fetched["tags"] == ["keep"]
+
+
+# ── docs_store: DocConflictError mirrors SheetConflictError ───────────────────
+
+
+async def test_doc_stale_base_raises_conflict(cfg):
+    """save_doc with a stale base_updated_at raises DocConflictError."""
+    row = await _make_doc(cfg)
+    did = row["id"]
+    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+
+    # Advance the stored updated_at directly in the DB
+    newer_ts = "2026-01-01 12:00:01"
+    async with db_session(cfg) as db:
+        await db.execute(
+            "UPDATE docs SET updated_at = ? WHERE id = ?", (newer_ts, did)
+        )
+        await db.commit()
+
+    with pytest.raises(docs_store.DocConflictError) as exc_info:
+        await docs_store.save_doc(
+            cfg, "u1", "Doc", snap,
+            doc_id=did,
+            base_updated_at=row["updated_at"],  # stale
+        )
+
+    err = exc_info.value
+    assert hasattr(err, "current")
+    assert err.current["id"] == did
+    assert "payload" in err.current
+    assert err.current["updated_at"] == newer_ts
+
+
+async def test_doc_save_none_name_preserves_stored(cfg):
+    """save_doc(name=None) preserves the existing doc name."""
+    row = await _make_doc(cfg, name="My Letter")
+    did = row["id"]
+    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+
+    result = await docs_store.save_doc(cfg, "u1", None, snap, doc_id=did)
+    assert result["name"] == "My Letter"
+
+
+async def test_doc_tags_round_trip(cfg):
+    """Tags work the same way for docs."""
+    row = await _make_doc(cfg)
+    did = row["id"]
+    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+
+    await docs_store.save_doc(cfg, "u1", None, snap, doc_id=did, tags=["draft", "legal"])
+
+    listing = await docs_store.list_docs(cfg, "u1")
+    assert listing[0]["tags"] == ["draft", "legal"]
+
+    fetched = await docs_store.get_doc(cfg, "u1", did)
+    assert fetched["tags"] == ["draft", "legal"]
+
+
+# ── pdf_store: update_pdf_meta ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def minimal_pdf() -> bytes:
+    """Minimal PDF-magic bytes for testing store logic (not for parsing)."""
+    return b"%PDF-1.4\n%%EOF"
+
+
+async def test_update_pdf_meta_name_and_tags(cfg, minimal_pdf: bytes):
+    """update_pdf_meta sets name and tags without changing the payload bytes."""
+    row = await pdf_store.save_pdf(cfg, "u1", "original.pdf", minimal_pdf)
+    pid = row["id"]
+
+    updated = await pdf_store.update_pdf_meta(
+        cfg, "u1", pid, name="renamed.pdf", tags=["invoice", "2026"]
+    )
+
+    assert updated is not None
+    assert updated["name"] == "renamed.pdf"
+    assert updated["tags"] == ["invoice", "2026"]
+
+    # Payload should be unchanged — re-fetch the bytes
+    fetched = await pdf_store.get_pdf(cfg, "u1", pid)
+    assert fetched["bytes"] == minimal_pdf
+
+
+async def test_update_pdf_meta_missing_id_returns_none(cfg):
+    """update_pdf_meta returns None for unknown pdf_id."""
+    result = await pdf_store.update_pdf_meta(
+        cfg, "u1", "nonexistent-id", name="foo.pdf"
+    )
+    assert result is None
+
+
+async def test_pdf_tags_default_empty_list(cfg, minimal_pdf: bytes):
+    """A newly saved PDF returns tags=[] in list and get."""
+    row = await pdf_store.save_pdf(cfg, "u1", "test.pdf", minimal_pdf)
+    listing = await pdf_store.list_pdfs(cfg, "u1")
+    assert listing[0]["tags"] == []
+    fetched = await pdf_store.get_pdf(cfg, "u1", row["id"])
+    assert fetched["tags"] == []

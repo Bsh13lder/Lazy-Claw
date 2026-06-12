@@ -694,6 +694,7 @@ CREATE TABLE IF NOT EXISTS sheets (
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     payload     TEXT NOT NULL,
+    tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );
@@ -710,6 +711,7 @@ CREATE TABLE IF NOT EXISTS docs (
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     payload     TEXT NOT NULL,
+    tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );
@@ -727,6 +729,7 @@ CREATE TABLE IF NOT EXISTS pdf_files (
     name        TEXT NOT NULL,
     payload     TEXT NOT NULL,
     pages       INTEGER,
+    tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );

@@ -219,6 +219,12 @@ async def init_db(config: Config) -> None:
             # un-favorited. Exposed via list + /api/budgets/changes for the
             # offline sync pull, exactly like `color`.
             ("projects", "is_favorite", "ALTER TABLE projects ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
+            # Document tags (feat/sheets-next-level) — plaintext JSON array so the
+            # sidebar and agent skills can filter/group sheets/docs/PDFs by tag.
+            # Default '[]' (empty array) so pre-migration rows return [] cleanly.
+            ("sheets", "tags", "ALTER TABLE sheets ADD COLUMN tags TEXT DEFAULT '[]'"),
+            ("docs", "tags", "ALTER TABLE docs ADD COLUMN tags TEXT DEFAULT '[]'"),
+            ("pdf_files", "tags", "ALTER TABLE pdf_files ADD COLUMN tags TEXT DEFAULT '[]'"),
         ]
         for table, column, sql in migrations:
             try:

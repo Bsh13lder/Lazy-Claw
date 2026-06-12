@@ -272,7 +272,7 @@ def test_set_cell_link_coerces_string_row_col_upsert():
     wb = _wb()
     out = S.set_cell_link(wb, 0, 0, "https://first.com")
     # Call again with string "0", "0" — should be treated as the same cell.
-    out = S.set_cell_link(out, "0", "0", "https://second.com")
+    out = S.set_cell_link(out, "0", "0", "https://second.com")  # type: ignore[arg-type]
     links = S.get_sheet_links(out)
     assert len(links) == 1
     assert links[0]["payload"] == "https://second.com"
@@ -282,7 +282,7 @@ def test_remove_cell_link_coerces_string_row_col():
     """remove_cell_link with string row/col coerces to int correctly."""
     wb = _wb()
     out = S.set_cell_link(wb, 0, 0, "https://coerce.com")
-    out = S.remove_cell_link(out, "0", "0")
+    out = S.remove_cell_link(out, "0", "0")  # type: ignore[arg-type]
     assert S.get_sheet_links(out) == []
 
 

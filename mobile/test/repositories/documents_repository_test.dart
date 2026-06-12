@@ -1,5 +1,3 @@
-// ignore_for_file: avoid_catching_errors
-
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -11,7 +9,7 @@ import 'package:lazyclaw_mobile/repositories/documents_repository.dart';
 /// A flexible fake transport that returns a pre-set response for all JSON
 /// methods and optionally throws on the next [putJson] call.
 class _FakeTransport implements DocumentsTransport {
-  Map<String, dynamic> response;
+  final Map<String, dynamic> response;
   final List<int> bytes;
 
   String? lastMethod;
@@ -564,8 +562,10 @@ void main() {
       final t = _FakeTransport();
       t.putThrows = _dioError(409, {'detail': 'conflict'});
 
-      // current map is missing → either DocConflictException or DioException is fine.
-      // The important thing is no silent swallow.
+      // current map is missing → the repo rethrows the raw DioException (it
+      // can NOT build a DocConflictException without `current`). Call sites
+      // must treat a raw 409 DioException as a non-recoverable conflict:
+      // surface an error + force-reload, never silently ignore it.
       var threw = false;
       try {
         await DocumentsRepository(t).save(DocKind.sheets, 's1', {});
@@ -600,14 +600,14 @@ void main() {
 
   // ── convertLinks ─────────────────────────────────────────────────────────
   group('DocumentsRepository.convertLinks', () {
-    test('POST /api/sheets/{id}/links/convert, returns tuple', () async {
+    test('POST /api/sheets/{id}/links/convert, returns named record', () async {
       final t = _FakeTransport(response: {
         'ok': true,
         'converted': 3,
         'snapshot': {'sheetOrder': ['sh']},
         'updated_at': '2026-06-12T14:00:00Z',
       });
-      final (converted, snapshot, updatedAt) =
+      final (:converted, :snapshot, :updatedAt) =
           await DocumentsRepository(t).convertLinks('s1');
 
       expect(t.lastMethod, 'POST');
@@ -623,7 +623,7 @@ void main() {
         'ok': true,
         'snapshot': {},
       });
-      final (converted, snapshot, updatedAt) =
+      final (:converted, :snapshot, :updatedAt) =
           await DocumentsRepository(t).convertLinks('s1');
       expect(converted, 0);
       expect(snapshot, isEmpty);
@@ -636,8 +636,8 @@ void main() {
         'converted': 1,
         'updated_at': '2026-06-12',
       });
-      final (_, snapshot, _) = await DocumentsRepository(t).convertLinks('s1');
-      expect(snapshot, isEmpty);
+      final result = await DocumentsRepository(t).convertLinks('s1');
+      expect(result.snapshot, isEmpty);
     });
   });
 

@@ -456,12 +456,10 @@ class DocumentsRepository {
     }
   }
 
-  /// Convert wiki-style `[[links]]` in a sheet to Univer hyperlinks.
-  /// Maps `POST /api/sheets/<id>/links/convert` →
+  /// Convert bare URLs / `[text](url)` markdown in a sheet's cells into real
+  /// Univer hyperlinks. Maps `POST /api/sheets/<id>/links/convert` →
   /// `{ok, converted, snapshot, updated_at}`.
-  ///
-  /// Returns a tuple of (converted count, fresh snapshot, new updated_at).
-  Future<(int converted, Map<String, dynamic> snapshot, String? updatedAt)>
+  Future<({int converted, Map<String, dynamic> snapshot, String? updatedAt})>
       convertLinks(String id) async {
     final json = await _t.postJson('/api/sheets/$id/links/convert', {});
     final converted = (json['converted'] as num?)?.toInt() ?? 0;
@@ -469,7 +467,7 @@ class DocumentsRepository {
     final snapshot =
         snap is Map ? Map<String, dynamic>.from(snap) : <String, dynamic>{};
     final updatedAt = json['updated_at']?.toString();
-    return (converted, snapshot, updatedAt);
+    return (converted: converted, snapshot: snapshot, updatedAt: updatedAt);
   }
 
   /// Update tags on a PDF. Maps `PATCH /api/pdf/<id>` with `{tags}`.

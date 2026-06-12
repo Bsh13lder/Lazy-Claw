@@ -20,12 +20,11 @@ Config: monkeypatch.setattr(route_module, "_config", cfg) — module-level var p
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from unittest.mock import patch
 
 from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import create_user_dek
@@ -43,7 +42,7 @@ try:
     _DOCS_AVAILABLE = True
 except ImportError:
     docs_mod = None  # type: ignore[assignment]
-    create_doc = None  # type: ignore[assignment]
+    create_doc: Any = None
     _DOCS_AVAILABLE = False
 
 _requires_docs = pytest.mark.skipif(
@@ -224,23 +223,18 @@ async def test_sheet_put_tags_persisted_in_list(sheets_client):
     assert set(found["tags"]) == {"finance", "q1"}
 
 
-# ── Sheet: PUT on unknown id → 404 ────────────────────────────────────────────
+# ── Sheet: PUT on unknown id → auto-creates ───────────────────────────────────
 
 
-async def test_sheet_put_unknown_id_returns_404(sheets_client):
+async def test_sheet_put_unknown_id_auto_creates(sheets_client):
     client, _ = sheets_client
     r = client.put(
         "/api/sheets/nonexistent-id-xyz",
         json={"payload": _PAYLOAD},
     )
-    # Unknown id with no existing row gets auto-created (not a foreign key),
-    # so only a foreign-user scenario returns 404. A fully unknown id is
-    # inserted as a new row. Test the 404 via the store's LookupError path:
-    # we need a second user owning the same id.
-    # Since that setup is complex, verify the happy path just succeeds
-    # and the foreign-user protection exists at the store level.
-    # The store-level test coverage handles the LookupError case (per task spec).
-    assert r.status_code in (200, 404)
+    # A fully unknown id gets auto-created as a new row (not a foreign key constraint).
+    # Foreign-user protection is enforced at the store level (tested there per spec).
+    assert r.status_code == 200, r.text
 
 
 # ── Docs: conflict (stale base_updated_at) ────────────────────────────────────

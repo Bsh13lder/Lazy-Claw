@@ -12,11 +12,13 @@ Covers:
 - _clean_tags sanitisation (non-list, >32 tags, >40 chars, duplicates)
 - DocConflictError mirrors SheetConflictError for docs store
 - update_pdf_meta sets name/tags without touching payload
+- cross-user isolation: save_sheet by u2 does not touch u1's row
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -68,7 +70,9 @@ async def test_stale_base_raises_conflict(cfg):
     """save_sheet with a stale base_updated_at raises SheetConflictError."""
     row = await _make_sheet(cfg)
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     # Advance the stored updated_at directly in the DB (bypasses 1-second resolution)
     newer_ts = "2026-01-01 12:00:01"
@@ -97,7 +101,9 @@ async def test_fresh_base_does_not_raise(cfg):
     """save_sheet with the matching base_updated_at succeeds."""
     row = await _make_sheet(cfg)
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     # Must not raise
     result = await sheets_store.save_sheet(
@@ -112,7 +118,9 @@ async def test_no_base_updated_at_is_last_write_wins(cfg):
     """Omitting base_updated_at keeps last-write-wins with no conflict error."""
     row = await _make_sheet(cfg)
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     # Save twice without passing base_updated_at — must not raise
     await sheets_store.save_sheet(cfg, "u1", "Sheet", snap, sheet_id=sid)
@@ -126,7 +134,9 @@ async def test_save_sheet_none_name_preserves_stored_name(cfg):
     """Passing name=None keeps the existing stored name."""
     row = await _make_sheet(cfg, name="Budget 2026")
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     result = await sheets_store.save_sheet(
         cfg, "u1", None, snap, sheet_id=sid
@@ -138,7 +148,9 @@ async def test_save_sheet_new_name_renames(cfg):
     """Passing a non-None name updates the stored name."""
     row = await _make_sheet(cfg, name="Old Name")
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     result = await sheets_store.save_sheet(
         cfg, "u1", "New Name", snap, sheet_id=sid
@@ -153,7 +165,9 @@ async def test_tags_round_trip(cfg):
     """Tags saved via save_sheet appear in list_sheets and get_sheet."""
     row = await _make_sheet(cfg)
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     await sheets_store.save_sheet(
         cfg, "u1", None, snap, sheet_id=sid, tags=["finance", "2026"]
@@ -163,6 +177,7 @@ async def test_tags_round_trip(cfg):
     assert listing[0]["tags"] == ["finance", "2026"]
 
     fetched = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert fetched is not None
     assert fetched["tags"] == ["finance", "2026"]
 
 
@@ -172,6 +187,7 @@ async def test_tags_default_empty_list(cfg):
     listing = await sheets_store.list_sheets(cfg, "u1")
     assert listing[0]["tags"] == []
     fetched = await sheets_store.get_sheet(cfg, "u1", row["id"])
+    assert fetched is not None
     assert fetched["tags"] == []
 
 
@@ -207,17 +223,60 @@ async def test_save_sheet_with_no_tags_preserves_existing_tags(cfg):
     """Calling save_sheet without tags= leaves existing tags intact."""
     row = await _make_sheet(cfg)
     sid = row["id"]
-    snap = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet is not None
+    snap = sheet["payload"]
 
     # Set tags first
     await sheets_store.save_sheet(cfg, "u1", None, snap, sheet_id=sid, tags=["keep"])
 
     # Save again without tags param — tags must be preserved
-    snap2 = (await sheets_store.get_sheet(cfg, "u1", sid))["payload"]
+    sheet2 = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert sheet2 is not None
+    snap2 = sheet2["payload"]
     await sheets_store.save_sheet(cfg, "u1", None, snap2, sheet_id=sid)
 
     fetched = await sheets_store.get_sheet(cfg, "u1", sid)
+    assert fetched is not None
     assert fetched["tags"] == ["keep"]
+
+
+# ── sheets_store: cross-user isolation ────────────────────────────────────────
+
+
+async def test_save_sheet_cross_user_isolation(cfg):
+    """u2 calling save_sheet for their own new sheet must NOT affect u1's row.
+
+    save_sheet is scoped by user_id in its UPDATE/SELECT — a u2 write with a
+    fresh sheet_id leaves u1's sheet completely untouched.
+    """
+    u1_row = await _make_sheet(cfg, user_id="u1", name="U1 Sheet")
+    u1_sid = u1_row["id"]
+
+    u1_sheet = await sheets_store.get_sheet(cfg, "u1", u1_sid)
+    assert u1_sheet is not None
+    snap = u1_sheet["payload"]
+    u1_original_name = u1_sheet["name"]
+    u1_original_updated_at = u1_sheet["updated_at"]
+
+    # u2 creates their own sheet (no sheet_id — fresh insert)
+    u2_row = await sheets_store.save_sheet(cfg, "u2", "U2 Sheet", snap)
+    u2_sid = u2_row["id"]
+
+    # The two sheet ids must be different (separate rows)
+    assert u2_sid != u1_sid
+
+    # u1's sheet must be completely unchanged
+    u1_after = await sheets_store.get_sheet(cfg, "u1", u1_sid)
+    assert u1_after is not None
+    assert u1_after["name"] == u1_original_name
+    assert u1_after["updated_at"] == u1_original_updated_at
+
+    # u2 cannot see u1's sheet
+    assert await sheets_store.get_sheet(cfg, "u2", u1_sid) is None
+
+    # u1 cannot see u2's sheet
+    assert await sheets_store.get_sheet(cfg, "u1", u2_sid) is None
 
 
 # ── docs_store: DocConflictError mirrors SheetConflictError ───────────────────
@@ -227,7 +286,9 @@ async def test_doc_stale_base_raises_conflict(cfg):
     """save_doc with a stale base_updated_at raises DocConflictError."""
     row = await _make_doc(cfg)
     did = row["id"]
-    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+    doc = await docs_store.get_doc(cfg, "u1", did)
+    assert doc is not None
+    snap = doc["payload"]
 
     # Advance the stored updated_at directly in the DB
     newer_ts = "2026-01-01 12:00:01"
@@ -255,7 +316,9 @@ async def test_doc_save_none_name_preserves_stored(cfg):
     """save_doc(name=None) preserves the existing doc name."""
     row = await _make_doc(cfg, name="My Letter")
     did = row["id"]
-    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+    doc = await docs_store.get_doc(cfg, "u1", did)
+    assert doc is not None
+    snap = doc["payload"]
 
     result = await docs_store.save_doc(cfg, "u1", None, snap, doc_id=did)
     assert result["name"] == "My Letter"
@@ -265,7 +328,9 @@ async def test_doc_tags_round_trip(cfg):
     """Tags work the same way for docs."""
     row = await _make_doc(cfg)
     did = row["id"]
-    snap = (await docs_store.get_doc(cfg, "u1", did))["payload"]
+    doc = await docs_store.get_doc(cfg, "u1", did)
+    assert doc is not None
+    snap = doc["payload"]
 
     await docs_store.save_doc(cfg, "u1", None, snap, doc_id=did, tags=["draft", "legal"])
 
@@ -273,6 +338,7 @@ async def test_doc_tags_round_trip(cfg):
     assert listing[0]["tags"] == ["draft", "legal"]
 
     fetched = await docs_store.get_doc(cfg, "u1", did)
+    assert fetched is not None
     assert fetched["tags"] == ["draft", "legal"]
 
 
@@ -287,7 +353,8 @@ def minimal_pdf() -> bytes:
 
 async def test_update_pdf_meta_name_and_tags(cfg, minimal_pdf: bytes):
     """update_pdf_meta sets name and tags without changing the payload bytes."""
-    row = await pdf_store.save_pdf(cfg, "u1", "original.pdf", minimal_pdf)
+    with patch("lazyclaw.pdf.store.ops.page_count", return_value=1):
+        row = await pdf_store.save_pdf(cfg, "u1", "original.pdf", minimal_pdf)
     pid = row["id"]
 
     updated = await pdf_store.update_pdf_meta(
@@ -300,6 +367,7 @@ async def test_update_pdf_meta_name_and_tags(cfg, minimal_pdf: bytes):
 
     # Payload should be unchanged — re-fetch the bytes
     fetched = await pdf_store.get_pdf(cfg, "u1", pid)
+    assert fetched is not None
     assert fetched["bytes"] == minimal_pdf
 
 
@@ -313,8 +381,10 @@ async def test_update_pdf_meta_missing_id_returns_none(cfg):
 
 async def test_pdf_tags_default_empty_list(cfg, minimal_pdf: bytes):
     """A newly saved PDF returns tags=[] in list and get."""
-    row = await pdf_store.save_pdf(cfg, "u1", "test.pdf", minimal_pdf)
+    with patch("lazyclaw.pdf.store.ops.page_count", return_value=1):
+        row = await pdf_store.save_pdf(cfg, "u1", "test.pdf", minimal_pdf)
     listing = await pdf_store.list_pdfs(cfg, "u1")
     assert listing[0]["tags"] == []
     fetched = await pdf_store.get_pdf(cfg, "u1", row["id"])
+    assert fetched is not None
     assert fetched["tags"] == []

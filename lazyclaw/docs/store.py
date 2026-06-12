@@ -57,9 +57,11 @@ def _clean_tags(tags: Any) -> list[str]:
     if not isinstance(tags, list):
         return []
     out: list[str] = []
+    seen: set[str] = set()
     for t in tags:
         s = str(t).strip()[:_TAG_LEN_MAX]
-        if s and s not in out:
+        if s and s not in seen:
+            seen.add(s)
             out.append(s)
         if len(out) >= _TAGS_MAX:
             break

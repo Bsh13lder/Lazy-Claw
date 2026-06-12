@@ -17,8 +17,8 @@ import 'package:lazyclaw_mobile/providers/documents_provider.dart';
 import 'package:lazyclaw_mobile/repositories/documents_repository.dart';
 import 'package:lazyclaw_mobile/screens/documents/sheet_editor_screen.dart';
 import 'package:lazyclaw_mobile/screens/documents/sheet_toolbar.dart';
+import 'package:lazyclaw_mobile/screens/documents/univer_links.dart';
 import 'package:lazyclaw_mobile/screens/documents/univer_model.dart';
-import 'package:lazyclaw_mobile/screens/documents/univer_ops.dart';
 import 'package:lazyclaw_mobile/screens/documents/univer_parse.dart';
 
 // ── Fake transport ────────────────────────────────────────────────────────────

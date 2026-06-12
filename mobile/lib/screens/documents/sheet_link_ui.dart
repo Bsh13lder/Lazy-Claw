@@ -8,7 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'univer_ops.dart';
+import 'univer_links.dart';
 import 'univer_parse.dart';
 import 'sheet_selection.dart';
 import '../../ui/ui.dart';

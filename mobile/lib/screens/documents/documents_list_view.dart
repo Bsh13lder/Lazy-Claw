@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -43,6 +44,9 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
   /// Tags currently selected for filtering (AND semantics).
   Set<String> _selectedTags = {};
 
+  /// Guards against concurrent long-press → save races.
+  bool _savingTags = false;
+
   @override
   void initState() {
     super.initState();
@@ -66,43 +70,66 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
   /// Opens the tag editor bottom-sheet for [meta]. Handles save routing:
   /// PDFs → setPdfTags; sheets/docs → fetch-then-save with CAS protection.
   Future<void> _editTags(DocMeta meta) async {
-    final allKnownTags = ref
-        .read(documentsListProvider(widget.kind))
-        .items
-        .expand((d) => d.tags)
-        .toSet();
-
-    final newTags = await _TagEditorSheet.show(
-      context,
-      current: meta.tags,
-      knownTags: allKnownTags,
-    );
-    if (newTags == null || !mounted) return;
-
-    final repo = ref.read(documentsRepositoryProvider);
+    if (_savingTags) return;
+    _savingTags = true;
 
     try {
-      if (widget.kind == DocKind.pdf) {
-        await repo.setPdfTags(meta.id, newTags);
-      } else {
-        await _saveTagsForDoc(repo, meta, newTags);
-      }
-      if (mounted) {
-        ref.read(documentsListProvider(widget.kind).notifier).refresh();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: AppColors.bgSurfaceElevated,
-            content: Text(
-              "Couldn't save tags",
-              style: AppText.body.copyWith(color: AppColors.error),
+      final allKnownTags = ref
+          .read(documentsListProvider(widget.kind))
+          .items
+          .expand((d) => d.tags)
+          .toSet();
+
+      final newTags = await _TagEditorSheet.show(
+        context,
+        current: meta.tags,
+        knownTags: allKnownTags,
+      );
+      if (newTags == null || !mounted) return;
+
+      final repo = ref.read(documentsRepositoryProvider);
+
+      try {
+        if (widget.kind == DocKind.pdf) {
+          await repo.setPdfTags(meta.id, newTags);
+        } else {
+          await _saveTagsForDoc(repo, meta, newTags);
+        }
+        if (mounted) {
+          await ref.read(documentsListProvider(widget.kind).notifier).refresh();
+          // Prune selected tags to those that still exist after the refresh.
+          final freshItems =
+              ref.read(documentsListProvider(widget.kind)).items;
+          final newAllTags =
+              freshItems.expand((d) => d.tags).toSet();
+          setState(() {
+            _selectedTags = _selectedTags.intersection(newAllTags);
+          });
+        }
+      } on Exception catch (e) {
+        if (mounted) {
+          final cause = _tagSaveCause(e);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: AppColors.bgSurfaceElevated,
+              content: Text(
+                "Couldn't save tags — $cause",
+                style: AppText.body.copyWith(color: AppColors.error),
+              ),
             ),
-          ),
-        );
+          );
+        }
       }
+    } finally {
+      if (mounted) setState(() => _savingTags = false);
     }
+  }
+
+  /// Returns a short user-readable cause string for a tag-save failure.
+  String _tagSaveCause(Exception e) {
+    if (e is DioException) return 'network error';
+    if (e is DocConflictException) return 'edit conflict';
+    return e.runtimeType.toString();
   }
 
   /// Fetch-then-save for sheets/docs (keeps CAS safety). Retries once on
@@ -188,6 +215,7 @@ class _DocumentsListViewState extends ConsumerState<DocumentsListView> {
     return LzRefresh(
       onRefresh: notifier.refresh,
       child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
           // ── Tag filter row ─────────────────────────────────────────────────
           if (hasAnyTags)

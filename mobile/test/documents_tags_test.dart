@@ -3,10 +3,14 @@
 ///   2. Widget test — tag chips render on document cards.
 ///   3. Tag-editor save path for sheets — transport sees GET then PUT with
 ///      `base_updated_at` and `tags` in the body.
+///   4. Conflict-retry — first PUT returns 409; second PUT uses the server's
+///      updated_at as base and carries the original user tags.
+///   5. Filter pruning — pure test confirming intersection logic.
 library;
 
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -321,6 +325,132 @@ void main() {
       expect(rt.calls.first.body!['tags'], ['report']);
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 4. Conflict-retry — 409 on first PUT, second PUT uses conflict's updated_at
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  group('DocumentsRepository — conflict-retry (CAS)', () {
+    const sheetId = 'sheet-conflict';
+    const firstUpdatedAt = '2026-06-12T10:00:00Z';
+    const conflictUpdatedAt = '2026-06-12T10:05:00Z';
+    final fakePayload = <String, dynamic>{'cells': {}};
+    final userTags = ['finance', 'Q3'];
+
+    test(
+        'retries once on 409 — second PUT uses conflict updated_at and user tags',
+        () async {
+      final rt = _ConflictThenSucceedTransport(
+        getResponse: {
+          'id': sheetId,
+          'name': 'Budget',
+          'payload': fakePayload,
+          'updated_at': firstUpdatedAt,
+          'tags': ['old'],
+        },
+        // The 409 response body carries the server's current version.
+        conflictCurrent: {
+          'id': sheetId,
+          'name': 'Budget',
+          'payload': fakePayload,
+          'updated_at': conflictUpdatedAt,
+          'tags': ['old', 'extra'],
+        },
+        successResponse: {
+          'sheet': {'id': sheetId, 'updated_at': conflictUpdatedAt},
+        },
+      );
+
+      final repo = DocumentsRepository(rt);
+
+      // Replicate the _saveTagsForDoc logic from the screen: fetch, attempt,
+      // catch DocConflictException, retry with conflict.current.
+      Future<void> attempt(DocPayload detail) => repo.save(
+            DocKind.sheets,
+            sheetId,
+            detail.payload,
+            tags: userTags,
+            baseUpdatedAt: detail.updatedAt,
+          );
+
+      final detail = await repo.getPayload(DocKind.sheets, sheetId);
+      try {
+        await attempt(detail);
+      } on DocConflictException catch (conflict) {
+        await attempt(conflict.current);
+      }
+
+      // Expect: GET + first PUT (409) + second PUT (success).
+      final puts = rt.calls.where((c) => c.method == 'PUT').toList();
+      expect(puts, hasLength(2), reason: 'must have exactly 2 PUT attempts');
+
+      final firstPut = puts[0];
+      final secondPut = puts[1];
+
+      // First PUT uses the originally fetched base.
+      expect(firstPut.body!['base_updated_at'], firstUpdatedAt);
+      expect(firstPut.body!['tags'], userTags);
+
+      // Second PUT (retry) must use the server's conflict updated_at.
+      expect(
+        secondPut.body!['base_updated_at'],
+        conflictUpdatedAt,
+        reason: 'retry base_updated_at must equal conflict.current.updated_at',
+      );
+      // User's tags must be preserved on the retry — NOT the server's tags.
+      expect(
+        secondPut.body!['tags'],
+        userTags,
+        reason: 'retry must carry user-chosen tags, not server tags',
+      );
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 5. Filter pruning — pure intersection logic
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  group('filter pruning — pure intersection logic', () {
+    // NOTE: The mounted setState(() => _selectedTags = _selectedTags.intersection(newAllTags))
+    // lives inside a ConsumerState widget and requires a full widget pump to
+    // exercise end-to-end. The pure function under test here is Set.intersection,
+    // which is what the screen delegates to. Widget-level coverage is deferred
+    // because the refresh cycle requires a cooperative fake notifier that the
+    // current _FakeTransport scaffold does not provide.
+    //
+    // The contract: after a refresh that removes tag "Q3" from all documents,
+    // a selectedTags set that contained "Q3" must drop it while keeping the
+    // rest.
+
+    test('intersection keeps only tags still present after refresh', () {
+      final selectedTags = {'finance', 'Q3', 'draft'};
+      final newAllTags = {'finance', 'draft', 'archive'};
+      final pruned = selectedTags.intersection(newAllTags);
+      expect(pruned, {'finance', 'draft'});
+      expect(pruned, isNot(contains('Q3')));
+    });
+
+    test('intersection with empty new tags produces empty selection', () {
+      final selectedTags = {'finance', 'Q3'};
+      const newAllTags = <String>{};
+      final pruned = selectedTags.intersection(newAllTags);
+      expect(pruned, isEmpty);
+    });
+
+    test('intersection when no selected tags stays empty', () {
+      const selectedTags = <String>{};
+      final newAllTags = {'finance', 'Q3'};
+      final pruned = selectedTags.intersection(newAllTags);
+      expect(pruned, isEmpty);
+    });
+
+    test('intersection when all tags survive is unchanged', () {
+      final selectedTags = {'finance', 'Q3'};
+      final newAllTags = {'finance', 'Q3', 'archive'};
+      final pruned = selectedTags.intersection(newAllTags);
+      expect(pruned, {'finance', 'Q3'});
+    });
+  });
 }
 
 // ── Helpers for the repository save tests ────────────────────────────────────
@@ -349,6 +479,88 @@ class _RecordingTransportWithPutResponse implements DocumentsTransport {
       String path, Map<String, dynamic> body) async {
     calls.add((method: 'PUT', path: path, body: body));
     return putResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> patchJson(
+      String path, Map<String, dynamic> body) async {
+    calls.add((method: 'PATCH', path: path, body: body));
+    return const {};
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    calls.add((method: 'POST', path: path, body: body));
+    return const {};
+  }
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async {
+    calls.add((method: 'DELETE', path: path, body: null));
+    return const {};
+  }
+
+  @override
+  Future<Map<String, dynamic>> uploadFile(String path, File file) async =>
+      const {};
+
+  @override
+  Future<List<int>> getBytes(String path) async => const [];
+
+  @override
+  Future<List<int>> postBytes(String p, Map<String, dynamic> b) async =>
+      const [];
+}
+
+// ── Conflict-then-succeed transport ──────────────────────────────────────────
+
+/// Transport that throws a production-shape 409 DioException on the FIRST PUT,
+/// then succeeds on the second. Records every call so tests can verify both
+/// attempts.
+class _ConflictThenSucceedTransport implements DocumentsTransport {
+  _ConflictThenSucceedTransport({
+    required this.getResponse,
+    required this.conflictCurrent,
+    required this.successResponse,
+  });
+
+  final Map<String, dynamic> getResponse;
+
+  /// Placed inside the 409 response as `{ "current": conflictCurrent }`.
+  final Map<String, dynamic> conflictCurrent;
+  final Map<String, dynamic> successResponse;
+
+  final List<({String method, String path, Map<String, dynamic>? body})> calls =
+      [];
+
+  int _putCount = 0;
+
+  @override
+  Future<Map<String, dynamic>> getJson(String path) async {
+    calls.add((method: 'GET', path: path, body: null));
+    return getResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    calls.add((method: 'PUT', path: path, body: body));
+    _putCount++;
+    if (_putCount == 1) {
+      // Throw a 409 in the same shape the production server + repository use.
+      final fakeResponse = Response<Map<String, dynamic>>(
+        requestOptions: RequestOptions(path: path),
+        statusCode: 409,
+        data: {'current': conflictCurrent},
+      );
+      throw DioException(
+        requestOptions: fakeResponse.requestOptions,
+        response: fakeResponse,
+        type: DioExceptionType.badResponse,
+      );
+    }
+    return successResponse;
   }
 
   @override

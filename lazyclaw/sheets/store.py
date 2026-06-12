@@ -178,6 +178,18 @@ async def save_sheet(
         existing = await cur.fetchone()
 
     if existing is None:
+        # The user-scoped SELECT returned nothing.  Before inserting, check
+        # whether this id belongs to a different user — if so, surface the
+        # same "not found" surface as a missing sheet to avoid leaking the
+        # existence of foreign rows (and to prevent a PK IntegrityError).
+        async with db_session(config) as db:
+            probe = await db.execute(
+                "SELECT 1 FROM sheets WHERE id = ?", (sheet_id,)
+            )
+            foreign = await probe.fetchone()
+        if foreign is not None:
+            raise LookupError("sheet not found")
+
         # Unknown id — create with whatever we were given
         effective_name = _clean_name(name)
         effective_tags = json.dumps(_clean_tags(tags)) if tags is not None else "[]"

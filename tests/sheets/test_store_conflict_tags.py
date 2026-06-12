@@ -388,3 +388,79 @@ async def test_pdf_tags_default_empty_list(cfg, minimal_pdf: bytes):
     fetched = await pdf_store.get_pdf(cfg, "u1", row["id"])
     assert fetched is not None
     assert fetched["tags"] == []
+
+
+# ── sheets_store: foreign-id save raises LookupError ─────────────────────────
+
+
+async def test_save_sheet_foreign_id_raises_lookup_error(cfg):
+    """save_sheet(u2, sheet_id=<u1's id>) raises LookupError, not IntegrityError."""
+    u1_row = await _make_sheet(cfg, user_id="u1", name="U1 Sheet")
+    u1_sid = u1_row["id"]
+
+    u1_sheet = await sheets_store.get_sheet(cfg, "u1", u1_sid)
+    assert u1_sheet is not None
+    snap = u1_sheet["payload"]
+
+    with pytest.raises(LookupError, match="sheet not found"):
+        await sheets_store.save_sheet(cfg, "u2", "U2 Sheet", snap, sheet_id=u1_sid)
+
+
+async def test_save_sheet_foreign_id_u1_row_unchanged(cfg):
+    """After the failed save attempt, u1's row is completely untouched."""
+    u1_row = await _make_sheet(cfg, user_id="u1", name="U1 Sheet")
+    u1_sid = u1_row["id"]
+
+    u1_sheet = await sheets_store.get_sheet(cfg, "u1", u1_sid)
+    assert u1_sheet is not None
+    snap = u1_sheet["payload"]
+    original_name = u1_sheet["name"]
+    original_updated_at = u1_sheet["updated_at"]
+
+    try:
+        await sheets_store.save_sheet(cfg, "u2", "Hijack", snap, sheet_id=u1_sid)
+    except LookupError:
+        pass
+
+    u1_after = await sheets_store.get_sheet(cfg, "u1", u1_sid)
+    assert u1_after is not None
+    assert u1_after["name"] == original_name
+    assert u1_after["updated_at"] == original_updated_at
+
+
+# ── docs_store: foreign-id save raises LookupError ───────────────────────────
+
+
+async def test_save_doc_foreign_id_raises_lookup_error(cfg):
+    """save_doc(u2, doc_id=<u1's id>) raises LookupError, not IntegrityError."""
+    u1_row = await _make_doc(cfg, user_id="u1", name="U1 Doc")
+    u1_did = u1_row["id"]
+
+    u1_doc = await docs_store.get_doc(cfg, "u1", u1_did)
+    assert u1_doc is not None
+    snap = u1_doc["payload"]
+
+    with pytest.raises(LookupError, match="doc not found"):
+        await docs_store.save_doc(cfg, "u2", "U2 Doc", snap, doc_id=u1_did)
+
+
+async def test_save_doc_foreign_id_u1_row_unchanged(cfg):
+    """After the failed save attempt, u1's doc row is completely untouched."""
+    u1_row = await _make_doc(cfg, user_id="u1", name="U1 Doc")
+    u1_did = u1_row["id"]
+
+    u1_doc = await docs_store.get_doc(cfg, "u1", u1_did)
+    assert u1_doc is not None
+    snap = u1_doc["payload"]
+    original_name = u1_doc["name"]
+    original_updated_at = u1_doc["updated_at"]
+
+    try:
+        await docs_store.save_doc(cfg, "u2", "Hijack", snap, doc_id=u1_did)
+    except LookupError:
+        pass
+
+    u1_after = await docs_store.get_doc(cfg, "u1", u1_did)
+    assert u1_after is not None
+    assert u1_after["name"] == original_name
+    assert u1_after["updated_at"] == original_updated_at

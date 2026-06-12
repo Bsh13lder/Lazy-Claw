@@ -180,6 +180,18 @@ async def save_doc(
         existing = await cur.fetchone()
 
     if existing is None:
+        # The user-scoped SELECT returned nothing.  Before inserting, check
+        # whether this id belongs to a different user — if so, surface the
+        # same "not found" surface as a missing doc to avoid leaking the
+        # existence of foreign rows (and to prevent a PK IntegrityError).
+        async with db_session(config) as db:
+            probe = await db.execute(
+                "SELECT 1 FROM docs WHERE id = ?", (doc_id,)
+            )
+            foreign = await probe.fetchone()
+        if foreign is not None:
+            raise LookupError("doc not found")
+
         effective_name = _clean_name(name)
         effective_tags = json.dumps(_clean_tags(tags)) if tags is not None else "[]"
         async with db_session(config) as db:

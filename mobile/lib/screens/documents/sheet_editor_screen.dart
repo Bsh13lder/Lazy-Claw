@@ -182,7 +182,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       final workbook = sheet.toWorkbook();
       await ref
           .read(documentsRepositoryProvider)
-          .save(DocKind.sheets, widget.id, widget.name, workbook);
+          .save(DocKind.sheets, widget.id, workbook, name: widget.name);
       await _cacheWorkbook(workbook, widget.name);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } catch (_) {

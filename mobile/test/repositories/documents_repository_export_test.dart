@@ -41,6 +41,8 @@ class _RecordingTransport implements DocumentsTransport {
   @override
   Future<Map<String, dynamic>> putJson(String p, Map<String, dynamic> b) async => json;
   @override
+  Future<Map<String, dynamic>> patchJson(String p, Map<String, dynamic> b) async => json;
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async => json;
 }
 

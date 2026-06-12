@@ -145,7 +145,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
       final payload = {..._basePayload, 'body': body};
       await ref
           .read(documentsRepositoryProvider)
-          .save(DocKind.docs, widget.id, widget.name, payload);
+          .save(DocKind.docs, widget.id, payload, name: widget.name);
       await _cachePayload(payload, widget.name);
       ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
     } catch (_) {

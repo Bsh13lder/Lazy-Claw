@@ -34,6 +34,14 @@ class _RecordingTransport implements DocumentsTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> patchJson(String path, Map<String, dynamic> body) async {
+    lastMethod = 'PATCH';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async => response;
 
   @override
@@ -57,6 +65,9 @@ class _ThrowingTransport implements DocumentsTransport {
   @override
   Future<Map<String, dynamic>> putJson(String p, Map<String, dynamic> b) async =>
       throw ApiError(500, 'save failed');
+  @override
+  Future<Map<String, dynamic>> patchJson(String p, Map<String, dynamic> b) async =>
+      throw ApiError(500, 'patch failed');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async => throw ApiError(500, 'x');
   @override
@@ -96,7 +107,7 @@ void main() {
   test('save PUTs name + payload to the kind path', () async {
     final t = _RecordingTransport({'ok': true});
     final repo = DocumentsRepository(t);
-    await repo.save(DocKind.sheets, 'wb-1', 'Budget', {'sheets': {}});
+    await repo.save(DocKind.sheets, 'wb-1', {'sheets': {}}, name: 'Budget');
     expect(t.lastMethod, 'PUT');
     expect(t.lastPath, '/api/sheets/wb-1');
     expect(t.lastBody, {'name': 'Budget', 'payload': {'sheets': {}}});
@@ -113,7 +124,7 @@ void main() {
   test('save propagates the production ApiError', () async {
     final repo = DocumentsRepository(_ThrowingTransport());
     expect(
-      () => repo.save(DocKind.docs, 'd-1', 'Doc', {'body': {}}),
+      () => repo.save(DocKind.docs, 'd-1', {'body': {}}, name: 'Doc'),
       throwsA(isA<ApiError>()),
     );
   });

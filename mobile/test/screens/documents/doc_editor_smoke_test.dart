@@ -26,6 +26,8 @@ class _FakeTransport implements DocumentsTransport {
   @override
   Future<Map<String, dynamic>> putJson(String p, Map<String, dynamic> b) async => {};
   @override
+  Future<Map<String, dynamic>> patchJson(String p, Map<String, dynamic> b) async => {};
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async => {};
   @override
   Future<Map<String, dynamic>> uploadFile(String p, File f) async => {};

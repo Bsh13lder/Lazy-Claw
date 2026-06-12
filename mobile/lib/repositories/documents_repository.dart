@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:dio/dio.dart';
+
 import '../core/api/api_client.dart';
 
 // ── Kinds ────────────────────────────────────────────────────────────────────
@@ -69,6 +71,7 @@ class DocMeta {
     this.createdAt,
     this.updatedAt,
     this.pages,
+    this.tags = const [],
   });
 
   final String id;
@@ -79,17 +82,33 @@ class DocMeta {
   /// PDF page count (null for sheets/docs).
   final int? pages;
 
-  factory DocMeta.fromJson(Map<String, dynamic> json) => DocMeta(
-        id: json['id']?.toString() ?? '',
-        name: (json['name']?.toString().trim().isNotEmpty ?? false)
-            ? json['name'].toString()
-            : 'Untitled',
-        createdAt: json['created_at']?.toString(),
-        updatedAt: json['updated_at']?.toString(),
-        pages: json['pages'] is int
-            ? json['pages'] as int
-            : int.tryParse(json['pages']?.toString() ?? ''),
-      );
+  /// User-defined tags. Empty when absent or malformed.
+  final List<String> tags;
+
+  factory DocMeta.fromJson(Map<String, dynamic> json) {
+    final rawTags = json['tags'];
+    final List<String> parsedTags;
+    if (rawTags is List) {
+      parsedTags = rawTags
+          .whereType<String>()
+          .toList(growable: false);
+    } else {
+      parsedTags = const [];
+    }
+
+    return DocMeta(
+      id: json['id']?.toString() ?? '',
+      name: (json['name']?.toString().trim().isNotEmpty ?? false)
+          ? json['name'].toString()
+          : 'Untitled',
+      createdAt: json['created_at']?.toString(),
+      updatedAt: json['updated_at']?.toString(),
+      pages: json['pages'] is int
+          ? json['pages'] as int
+          : int.tryParse(json['pages']?.toString() ?? ''),
+      tags: parsedTags,
+    );
+  }
 
   /// Round-trips through [DocMeta.fromJson] — used to persist the list cache.
   Map<String, dynamic> toJson() => {
@@ -98,12 +117,19 @@ class DocMeta {
         if (createdAt != null) 'created_at': createdAt,
         if (updatedAt != null) 'updated_at': updatedAt,
         if (pages != null) 'pages': pages,
+        if (tags.isNotEmpty) 'tags': tags,
       };
 }
 
 /// A sheet/doc opened for viewing: metadata + its decrypted Univer snapshot.
 class DocPayload {
-  const DocPayload({required this.id, required this.name, required this.payload});
+  const DocPayload({
+    required this.id,
+    required this.name,
+    required this.payload,
+    this.updatedAt,
+    this.tags = const [],
+  });
 
   final String id;
   final String name;
@@ -111,13 +137,45 @@ class DocPayload {
   /// Univer `IWorkbookData` (sheets) or `IDocumentData` (docs).
   final Map<String, dynamic> payload;
 
-  factory DocPayload.fromJson(Map<String, dynamic> json) => DocPayload(
-        id: json['id']?.toString() ?? '',
-        name: json['name']?.toString() ?? 'Untitled',
-        payload: json['payload'] is Map
-            ? Map<String, dynamic>.from(json['payload'] as Map)
-            : const {},
-      );
+  /// Server-side `updated_at` timestamp for optimistic-concurrency tracking.
+  final String? updatedAt;
+
+  /// User-defined tags on the document.
+  final List<String> tags;
+
+  factory DocPayload.fromJson(Map<String, dynamic> json) {
+    final rawTags = json['tags'];
+    final List<String> parsedTags;
+    if (rawTags is List) {
+      parsedTags = rawTags
+          .whereType<String>()
+          .toList(growable: false);
+    } else {
+      parsedTags = const [];
+    }
+
+    return DocPayload(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Untitled',
+      payload: json['payload'] is Map
+          ? Map<String, dynamic>.from(json['payload'] as Map)
+          : const {},
+      updatedAt: json['updated_at']?.toString(),
+      tags: parsedTags,
+    );
+  }
+}
+
+/// Thrown when a save hits a 409 — another client changed the document.
+class DocConflictException implements Exception {
+  DocConflictException(this.current);
+
+  /// The server's current version (payload + updated_at) for reload-in-place.
+  final DocPayload current;
+
+  @override
+  String toString() => 'DocConflictException: document ${current.id} was '
+      'modified elsewhere (updated_at=${current.updatedAt})';
 }
 
 /// The result of a ✨ AI edit. For sheets/docs [snapshot] carries the fresh
@@ -156,6 +214,7 @@ abstract class DocumentsTransport {
   Future<Map<String, dynamic>> getJson(String path);
   Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body);
+  Future<Map<String, dynamic>> patchJson(String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> deleteJson(String path);
 
   /// Multipart upload of [file] → decoded JSON (PDF import).
@@ -192,6 +251,13 @@ class DioDocumentsTransport implements DocumentsTransport {
     Map<String, dynamic> body,
   ) =>
       _client.put<Map<String, dynamic>>(path, data: body, fromJson: _map);
+
+  @override
+  Future<Map<String, dynamic>> patchJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      _client.patch<Map<String, dynamic>>(path, data: body, fromJson: _map);
 
   @override
   Future<Map<String, dynamic>> deleteJson(String path) =>
@@ -302,7 +368,7 @@ class DocumentsRepository {
   }
 
   /// Fetch a sheet/doc with its decrypted Univer snapshot. Maps
-  /// `GET /api/<kind>/<id>` → `{id, name, payload, ...}`.
+  /// `GET /api/<kind>/<id>` → `{id, name, payload, tags, updated_at, ...}`.
   Future<DocPayload> getPayload(DocKind kind, String id) async {
     assert(kind != DocKind.pdf, 'PDFs are fetched as raw bytes');
     final json = await _t.getJson('/api/${kind.api}/$id');
@@ -347,16 +413,71 @@ class DocumentsRepository {
     return snap is Map ? Map<String, dynamic>.from(snap) : snapshot;
   }
 
-  /// Persist an edited sheet/doc [payload]. Maps `PUT /api/<kind>/<id>` with
-  /// `{name, payload}` (autosave — mirrors the web editor).
-  Future<void> save(
+  /// Persist an edited sheet/doc [payload]. Maps `PUT /api/<kind>/<id>`.
+  ///
+  /// - [name] — when non-null, renames the document.
+  /// - [baseUpdatedAt] — when non-null, sent as `base_updated_at` for
+  ///   optimistic concurrency. A 409 response throws [DocConflictException]
+  ///   carrying the server's current version so callers can reload in-place.
+  /// - [tags] — when non-null, persists the tag list.
+  ///
+  /// Returns the new `updated_at` string on success (null if the server omits
+  /// it, which should not happen for a correctly deployed server).
+  Future<String?> save(
     DocKind kind,
     String id,
-    String name,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    String? name,
+    String? baseUpdatedAt,
+    List<String>? tags,
+  }) async {
     assert(kind != DocKind.pdf, 'PDFs are immutable; no snapshot save');
-    await _t.putJson('/api/${kind.api}/$id', {'name': name, 'payload': payload});
+
+    final body = <String, dynamic>{'payload': payload};
+    if (name != null) body['name'] = name;
+    if (baseUpdatedAt != null) body['base_updated_at'] = baseUpdatedAt;
+    if (tags != null) body['tags'] = tags;
+
+    try {
+      final response = await _t.putJson('/api/${kind.api}/$id', body);
+      // Response is { "sheet"|"doc": { id, name, updated_at, ... } }
+      final row = response[kind.itemKey];
+      final rowMap = row is Map ? Map<String, dynamic>.from(row) : response;
+      return rowMap['updated_at']?.toString();
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data;
+        if (data is Map && data['current'] is Map) {
+          final currentMap = Map<String, dynamic>.from(data['current'] as Map);
+          throw DocConflictException(DocPayload.fromJson(currentMap));
+        }
+      }
+      rethrow;
+    }
+  }
+
+  /// Convert wiki-style `[[links]]` in a sheet to Univer hyperlinks.
+  /// Maps `POST /api/sheets/<id>/links/convert` →
+  /// `{ok, converted, snapshot, updated_at}`.
+  ///
+  /// Returns a tuple of (converted count, fresh snapshot, new updated_at).
+  Future<(int converted, Map<String, dynamic> snapshot, String? updatedAt)>
+      convertLinks(String id) async {
+    final json = await _t.postJson('/api/sheets/$id/links/convert', {});
+    final converted = (json['converted'] as num?)?.toInt() ?? 0;
+    final snap = json['snapshot'];
+    final snapshot =
+        snap is Map ? Map<String, dynamic>.from(snap) : <String, dynamic>{};
+    final updatedAt = json['updated_at']?.toString();
+    return (converted, snapshot, updatedAt);
+  }
+
+  /// Update tags on a PDF. Maps `PATCH /api/pdf/<id>` with `{tags}`.
+  ///
+  /// For sheets/docs, tags must be sent via [save] together with the payload
+  /// (the server requires a payload on PUT for those kinds).
+  Future<void> setPdfTags(String id, List<String> tags) async {
+    await _t.patchJson('/api/pdf/$id', {'tags': tags});
   }
 
   /// Delete a document. Maps `DELETE /api/<kind>/<id>` →

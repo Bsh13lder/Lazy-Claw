@@ -6,6 +6,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/screens/documents/univer_model.dart';
+import 'package:lazyclaw_mobile/screens/documents/univer_ops.dart';
 import 'package:lazyclaw_mobile/screens/documents/univer_parse.dart';
 
 // ── Workbook factory helpers ──────────────────────────────────────────────────
@@ -383,6 +384,15 @@ void main() {
       expect(s3.linkAt(0, 0), 'https://second.com');
     });
 
+    test('original workbook unchanged after setLink (immutability)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb(cellData: {
+        '0': {'0': {'v': 'A'}},
+      }));
+      final original = sheet.toWorkbook();
+      sheet.setLink(0, 0, 'https://example.com', display: 'Example');
+      expect(sheet.toWorkbook(), equals(original));
+    });
+
     test('removeLink removes the link', () {
       final sheet = UniverSheet.fromWorkbook(_simpleWb())
           .setLink(0, 0, 'https://example.com');
@@ -390,6 +400,14 @@ void main() {
       expect(next.linkAt(0, 0), isNull);
       // Original untouched.
       expect(sheet.linkAt(0, 0), 'https://example.com');
+    });
+
+    test('original workbook unchanged after removeLink (immutability)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb())
+          .setLink(0, 0, 'https://example.com');
+      final original = sheet.toWorkbook();
+      sheet.removeLink(0, 0);
+      expect(sheet.toWorkbook(), equals(original));
     });
 
     test('removeLink on cell with no link is a no-op', () {
@@ -519,6 +537,18 @@ void main() {
       }));
       final (_, count) = sheet.convertUrlsToLinks();
       expect(count, 2);
+    });
+
+    test('original workbook unchanged after convertUrlsToLinks (immutability)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb(cellData: {
+        '0': {
+          '0': {'v': 'https://a.com'},
+          '1': {'v': '[Foo](https://foo.com)'},
+        },
+      }));
+      final original = sheet.toWorkbook();
+      sheet.convertUrlsToLinks();
+      expect(sheet.toWorkbook(), equals(original));
     });
   });
 
@@ -852,6 +882,19 @@ void main() {
       final before = sheet.toWorkbook();
       sheet.sortRange(SelRange(0, 0, 2, 1), 0, asc: true);
       expect(sheet.toWorkbook(), equals(before));
+    });
+
+    test('sortRange desc keeps empty cells last', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb(cellData: {
+        '0': {'0': <String, dynamic>{}}, // empty
+        '1': {'0': {'v': 3}},
+        '2': {'0': {'v': 1}},
+      }));
+      final next = sheet.sortRange(SelRange(0, 0, 2, 0), 0, asc: false);
+      // Desc: 3, 1, empty — empty must be LAST
+      expect(next.cellAt(0, 0).value, 3);
+      expect(next.cellAt(1, 0).value, 1);
+      expect(next.cellAt(2, 0).display, ''); // empty last even in desc
     });
   });
 

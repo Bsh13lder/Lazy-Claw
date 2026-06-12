@@ -183,11 +183,21 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     _formulaFocus.requestFocus();
   }
 
+  /// Grid dimensions currently rendered — mirrors the rows/cols computed in
+  /// [_buildBody] so selection extension can clamp to the visible grid.
+  (int, int) _gridDims() {
+    final sheet = _sheet;
+    if (sheet == null) return (_minRows, _minCols);
+    final (maxRow, maxCol) = sheet.usedBounds();
+    return ((maxRow + 2).clamp(_minRows, 1000), (maxCol + 2).clamp(_minCols, 100));
+  }
+
   void _extendSelectionTo(int row, int col) {
     final sel = _sel;
     if (sel == null) return;
+    final (rows, cols) = _gridDims();
     setState(() {
-      _sel = sel.extendTo(row, col);
+      _sel = sel.extendTo(row.clamp(0, rows - 1), col.clamp(0, cols - 1));
     });
   }
 
@@ -599,9 +609,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     if (sheet == null) return const SizedBox.shrink();
     return LayoutBuilder(
       builder: (context, constraints) {
-        final (maxRow, maxCol) = sheet.usedBounds();
-        final rows = (maxRow + 2).clamp(_minRows, 1000);
-        final cols = (maxCol + 2).clamp(_minCols, 100);
+        final (rows, cols) = _gridDims();
         return SheetEditorGrid(
           sheet: sheet,
           rows: rows,

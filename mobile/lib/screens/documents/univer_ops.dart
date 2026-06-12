@@ -53,7 +53,9 @@ class _SortRow {
 extension UniverOps on UniverSheet {
   // ─── Internal workbook access helpers (duplicated, extension-private) ───────
 
-  Map<String, dynamic> _wb() => toWorkbook();
+  /// Returns a fresh mutable copy of the workbook snapshot.
+  /// Read-only callers may also use this method — the copy is cheap and avoids
+  /// accidental mutation of the stored snapshot.
   Map<String, dynamic> _mutableWb() => toWorkbook();
 
   Map<String, dynamic> _sm(dynamic v) {
@@ -95,7 +97,7 @@ extension UniverOps on UniverSheet {
 
   /// Return the URL of the link at (row, col) on the active sheet, or null.
   String? linkAt(int row, int col) {
-    final wb = _wb();
+    final wb = _mutableWb();
     final links = _linksForSheet(wb);
     for (final entry in links) {
       final m = _sm(entry);
@@ -378,7 +380,7 @@ extension UniverOps on UniverSheet {
 
   /// Whether the active worksheet has a freeze pane with ySplit > 0.
   bool get frozen {
-    final wb = _wb();
+    final wb = _mutableWb();
     final sheet = _activeSheet(wb);
     final freeze = _sm(sheet['freeze']);
     final ySplit = (freeze['ySplit'] as num?)?.toInt() ?? 0;

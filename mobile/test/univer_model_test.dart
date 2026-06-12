@@ -331,6 +331,15 @@ void main() {
       expect(result, '1899-12-31');
     });
 
+    test('"yyyy-mm-dd" modern date serial 45292 = 2024-01-01 (epoch pin)', () {
+      // Verifies 1899-12-30 epoch: days(1899-12-30 → 2024-01-01) = 45292 (matches openpyxl).
+      expect(formatNumber(45292, 'yyyy-mm-dd'), '2024-01-01');
+    });
+
+    test('"#,##0.00" negative number keeps minus sign', () {
+      expect(formatNumber(-1234567.89, '#,##0.00'), '-1,234,567.89');
+    });
+
     test('"yyyy-mm-dd" passes through ISO string', () {
       expect(formatNumber('2024-06-15', 'yyyy-mm-dd'), '2024-06-15');
     });
@@ -882,6 +891,25 @@ void main() {
       final before = sheet.toWorkbook();
       sheet.sortRange(SelRange(0, 0, 2, 1), 0, asc: true);
       expect(sheet.toWorkbook(), equals(before));
+    });
+
+    test('sortRange with range starting at c1=2 sorts by byCol=3 (absolute column semantics)', () {
+      // Range is columns 2–3; byCol=3 is the absolute column index (not relative).
+      // Row 0: col2=10, col3='Z'; Row 1: col2=20, col3='A'; Row 2: col2=30, col3='M'
+      // After asc sort by col3: A(row1), M(row2), Z(row0) → col2 values: 20,30,10.
+      final sheet = UniverSheet.fromWorkbook(_simpleWb(cellData: {
+        '0': {'2': {'v': 10}, '3': {'v': 'Z'}},
+        '1': {'2': {'v': 20}, '3': {'v': 'A'}},
+        '2': {'2': {'v': 30}, '3': {'v': 'M'}},
+      }));
+      final next = sheet.sortRange(SelRange(0, 2, 2, 3), 3, asc: true);
+      expect(next.cellAt(0, 3).display, 'A');
+      expect(next.cellAt(1, 3).display, 'M');
+      expect(next.cellAt(2, 3).display, 'Z');
+      // Corresponding col2 values follow their rows.
+      expect(next.cellAt(0, 2).value, 20);
+      expect(next.cellAt(1, 2).value, 30);
+      expect(next.cellAt(2, 2).value, 10);
     });
 
     test('sortRange desc keeps empty cells last', () {

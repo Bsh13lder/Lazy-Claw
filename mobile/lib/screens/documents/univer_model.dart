@@ -108,6 +108,9 @@ class CellStyleView {
 ///   unknown        → v.toString()
 ///
 /// Non-numeric [v] or null [pattern] → `v?.toString() ?? ''`.
+///
+/// Note: thousands separator and decimal point are hardcoded en-US (`','` / `'.'`).
+/// Locale-aware formatting would require the `intl` package.
 String formatNumber(dynamic v, String? pattern) {
   if (v == null) return '';
   if (pattern == null || pattern.isEmpty) return v.toString();
@@ -137,7 +140,8 @@ String formatNumber(dynamic v, String? pattern) {
 
     case 'yyyy-mm-dd':
       if (n != null) {
-        // Excel serial: days since 1899-12-30
+        // 1899-12-30: standard serial→date epoch (absorbs Excel's phantom 1900-02-29; matches openpyxl).
+        // Serials < 60 (Jan-Feb 1900) are off by one — irrelevant for real data.
         final epoch = DateTime(1899, 12, 30);
         final d = epoch.add(Duration(days: n.round()));
         final mm = d.month.toString().padLeft(2, '0');
@@ -206,6 +210,10 @@ Map<String, dynamic>? _asMapOpt(dynamic v) {
 
 /// Encode [m] with sorted keys so two semantically identical style dicts
 /// produce the same string (used for registry dedup).
+///
+/// Only top-level keys are sorted; sub-maps are encoded as-is. This is safe
+/// because current Univer style sub-maps (e.g. `cl`, `bg`, `ul`, `st`, `n`)
+/// are all single-key objects, so insertion order is deterministic.
 String _stableEncode(Map<String, dynamic> m) {
   final sorted = Map.fromEntries(
     m.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
@@ -221,8 +229,6 @@ String _stableEncode(Map<String, dynamic> m) {
 /// (`univer_ops.dart`).
 extension UniverSheetModel on UniverSheet {
   // ─── Internal workbook access helpers ──────────────────────────────────────
-
-  Map<String, dynamic> _wb() => toWorkbook();
 
   String _activeId(Map<String, dynamic> wb) {
     final sheets = _sm(wb['sheets']);
@@ -267,7 +273,7 @@ extension UniverSheetModel on UniverSheet {
 
   /// Resolve style view for cell (row, col).
   CellStyleView resolveStyle(int row, int col) {
-    final wb = _wb();
+    final wb = _mutableWb();
     final d = _rawStyleDict(wb, row, col);
     if (d.isEmpty) return CellStyleView.empty;
     return _viewFromDict(d);
@@ -284,6 +290,13 @@ extension UniverSheetModel on UniverSheet {
     final styles = _ensureStyles(wb);
     final sheet = _activeSheet(wb);
     final cellData = _ensureCellData(sheet);
+
+    // Precompute encoded→id map once so per-cell lookup is O(1) instead of
+    // O(styles) per cell.
+    final encodedToId = <String, String>{
+      for (final e in styles.entries)
+        if (e.value is Map) _stableEncode(_sm(e.value)): e.key,
+    };
 
     for (final (r, c) in range.cells) {
       final current = Map<String, dynamic>.from(
@@ -307,10 +320,7 @@ extension UniverSheetModel on UniverSheet {
         cell.remove('s');
       } else {
         final encoded = _stableEncode(current);
-        final existingId = styles.entries
-            .where((e) => _stableEncode(_sm(e.value)) == encoded)
-            .map((e) => e.key)
-            .firstOrNull;
+        final existingId = encodedToId[encoded];
         if (existingId != null) {
           cell['s'] = existingId;
         } else {
@@ -322,6 +332,8 @@ extension UniverSheetModel on UniverSheet {
           } while (styles.containsKey(newId));
           styles[newId] = current;
           cell['s'] = newId;
+          // Keep the lookup map in sync so later cells in this range reuse it.
+          encodedToId[encoded] = newId;
         }
       }
     }

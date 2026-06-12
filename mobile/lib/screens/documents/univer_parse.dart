@@ -336,6 +336,11 @@ class UniverSheet {
     return (maxRow, maxCol);
   }
 
+  /// Read-only view of the underlying workbook map. Callers MUST NOT mutate
+  /// it or anything reachable from it — use the mutator APIs instead. Exists
+  /// so per-cell readers (styles, links) don't deep-copy the workbook.
+  Map<String, dynamic> get rawWorkbook => _wb;
+
   /// The underlying Univer workbook map (for save / recalc round-trips).
   Map<String, dynamic> toWorkbook() => _deepCopyMap(_wb);
 

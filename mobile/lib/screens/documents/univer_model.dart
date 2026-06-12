@@ -272,8 +272,11 @@ extension UniverSheetModel on UniverSheet {
   }
 
   /// Resolve style view for cell (row, col).
+  ///
+  /// Uses [rawWorkbook] — no deep copy. Callers must not mutate the returned
+  /// [CellStyleView] (it is already an immutable value type).
   CellStyleView resolveStyle(int row, int col) {
-    final wb = _mutableWb();
+    final wb = rawWorkbook;
     final d = _rawStyleDict(wb, row, col);
     if (d.isEmpty) return CellStyleView.empty;
     return _viewFromDict(d);

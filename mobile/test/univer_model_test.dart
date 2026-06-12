@@ -1030,4 +1030,84 @@ void main() {
       expect(sheet.toWorkbook(), equals(before));
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // rawWorkbook — zero-copy read-path tests
+  // ──────────────────────────────────────────────────────────────────────────
+  group('rawWorkbook zero-copy read path', () {
+    test('rawWorkbook identity is stable across calls (no copy per call)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb());
+      // identical() verifies same object in memory — no deep copy was made.
+      expect(identical(sheet.rawWorkbook, sheet.rawWorkbook), isTrue);
+    });
+
+    test('resolveStyle does not mutate the workbook (toWorkbook unchanged)', () {
+      final sheet = UniverSheet.fromWorkbook(_wbWithStyles(
+        styles: {
+          'sid1': {'bl': 1, 'it': 1, 'cl': {'rgb': '#ff0000'}},
+        },
+        cellData: {
+          '0': {'0': {'v': 'Hello', 's': 'sid1'}},
+        },
+      ));
+      final before = sheet.toWorkbook();
+      // Call resolveStyle multiple times to simulate per-cell grid rebuilds.
+      final s1 = sheet.resolveStyle(0, 0);
+      final s2 = sheet.resolveStyle(0, 0);
+      final s3 = sheet.resolveStyle(1, 1); // empty cell
+      // Workbook state is unchanged.
+      expect(sheet.toWorkbook(), equals(before));
+      // Repeated reads return consistent results.
+      expect(s1.bold, isTrue);
+      expect(s2.bold, isTrue);
+      expect(s1.italic, isTrue);
+      expect(s2.italic, isTrue);
+      expect(s3.bold, isFalse);
+    });
+
+    test('linkAt does not mutate the workbook (toWorkbook unchanged)', () {
+      final sheet = UniverSheet.fromWorkbook(_wbWithLinks(
+        links: [
+          {'id': 'l1', 'row': 0, 'column': 0, 'payload': 'https://test.com'},
+        ],
+      ));
+      final before = sheet.toWorkbook();
+      // Call linkAt multiple times.
+      final u1 = sheet.linkAt(0, 0);
+      final u2 = sheet.linkAt(0, 0);
+      final u3 = sheet.linkAt(1, 1); // no link
+      // Workbook state is unchanged.
+      expect(sheet.toWorkbook(), equals(before));
+      // Consistent results across calls.
+      expect(u1, 'https://test.com');
+      expect(u2, 'https://test.com');
+      expect(u3, isNull);
+    });
+
+    test('frozen does not mutate the workbook (toWorkbook unchanged)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb()).toggleFreeze();
+      final before = sheet.toWorkbook();
+      // Call frozen multiple times.
+      final f1 = sheet.frozen;
+      final f2 = sheet.frozen;
+      // Workbook state is unchanged.
+      expect(sheet.toWorkbook(), equals(before));
+      // Consistent results.
+      expect(f1, isTrue);
+      expect(f2, isTrue);
+    });
+
+    test('resolveStyle after applyStyle sees new style (rawWorkbook reflects mutation)', () {
+      final sheet = UniverSheet.fromWorkbook(_simpleWb(cellData: {
+        '0': {'0': {'v': 'A'}},
+      }));
+      // Before: not bold.
+      expect(sheet.resolveStyle(0, 0).bold, isFalse);
+      // After: apply bold — returns a NEW sheet.
+      final next = sheet.applyStyle(SelRange(0, 0, 0, 0), {'bl': 1});
+      expect(next.resolveStyle(0, 0).bold, isTrue);
+      // Original sheet is still not bold (immutability).
+      expect(sheet.resolveStyle(0, 0).bold, isFalse);
+    });
+  });
 }

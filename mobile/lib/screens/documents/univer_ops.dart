@@ -96,9 +96,12 @@ extension UniverOps on UniverSheet {
   // ─── Hyperlinks ─────────────────────────────────────────────────────────────
 
   /// Return the URL of the link at (row, col) on the active sheet, or null.
+  ///
+  /// Uses [rawWorkbook] — no deep copy. Uses the read-only link accessor so
+  /// the stored workbook is never mutated by a pure read.
   String? linkAt(int row, int col) {
-    final wb = _mutableWb();
-    final links = _linksForSheet(wb);
+    final wb = rawWorkbook;
+    final links = _linksForSheetReadOnly(wb);
     for (final entry in links) {
       final m = _sm(entry);
       if ((m['row'] as num?)?.toInt() == row &&
@@ -379,8 +382,10 @@ extension UniverOps on UniverSheet {
   // ─── Freeze pane ────────────────────────────────────────────────────────────
 
   /// Whether the active worksheet has a freeze pane with ySplit > 0.
+  ///
+  /// Uses [rawWorkbook] — no deep copy.
   bool get frozen {
-    final wb = _mutableWb();
+    final wb = rawWorkbook;
     final sheet = _activeSheet(wb);
     final freeze = _sm(sheet['freeze']);
     final ySplit = (freeze['ySplit'] as num?)?.toInt() ?? 0;
@@ -445,6 +450,37 @@ extension UniverOps on UniverSheet {
   }
 
   // ─── Link CRUD helpers ───────────────────────────────────────────────────────
+
+  /// Read-only variant of [_linksForSheet]: never mutates [wb].
+  ///
+  /// Used by [linkAt] which routes through [rawWorkbook]. Falls back to an
+  /// empty list when `resources` is absent (no ensure-initialisation).
+  List<dynamic> _linksForSheetReadOnly(Map<String, dynamic> wb) {
+    final raw = wb['resources'];
+    if (raw == null || raw is! List) return const [];
+    final resources = raw;
+    for (final res in resources) {
+      if (res is! Map) continue;
+      final m = _sm(res);
+      if (m['name'] != _kLinkPlugin) continue;
+      final data = m['data'];
+      Map<String, dynamic> decoded;
+      if (data is String) {
+        try {
+          decoded = _sm(jsonDecode(data));
+        } catch (_) {
+          decoded = <String, dynamic>{};
+        }
+      } else {
+        decoded = _sm(data);
+      }
+      final sid = _activeId(wb);
+      final sheetLinks = decoded[sid];
+      if (sheetLinks is List) return sheetLinks;
+      return <dynamic>[];
+    }
+    return <dynamic>[];
+  }
 
   List<dynamic> _linksForSheet(Map<String, dynamic> wb) {
     final resources = _resourcesList(wb);

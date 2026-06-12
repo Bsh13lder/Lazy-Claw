@@ -261,6 +261,7 @@ class SetCellsSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         from lazyclaw.sheets import snapshot as S
         from lazyclaw.sheets.recalc import recalc
+        from lazyclaw.sheets.snapshot import _MD_LINK_RE
         from lazyclaw.sheets.store import get_sheet, save_sheet
 
         cells = params.get("cells")
@@ -272,15 +273,37 @@ class SetCellsSkill(BaseSkill):
         sheet = await get_sheet(self._config, user_id, sid)
         if not sheet:
             return "Sheet not found."
+
+        # Pre-process edits: markdown [text](url) values → real hyperlinks.
+        snap = sheet["payload"]
+        plain_edits = []
+        for edit in cells:
+            value = edit.get("value")
+            formula = edit.get("formula")
+            if formula is None and isinstance(value, str):
+                md = _MD_LINK_RE.match(value.strip())
+                if md:
+                    # Resolve the cell address first so set_cell_link gets row/col.
+                    if "cell" in edit:
+                        row, col = S.a1_to_rc(str(edit["cell"]))
+                    else:
+                        row, col = int(edit["row"]), int(edit["col"])
+                    snap = S.set_cell_link(
+                        snap, row, col, md.group(2), display=md.group(1)
+                    )
+                    continue  # handled as hyperlink — skip plain write
+            plain_edits.append(edit)
+
         try:
-            updated = S.set_cells(sheet["payload"], cells)
+            if plain_edits:
+                snap = S.set_cells(snap, plain_edits)
         except (ValueError, KeyError) as e:
             return f"Could not apply edits: {e}"
-        updated = recalc(updated)
-        await save_sheet(self._config, user_id, sheet["name"], updated, sheet_id=sid)
+        snap = recalc(snap)
+        await save_sheet(self._config, user_id, sheet["name"], snap, sheet_id=sid)
         return (
             f"Updated {len(cells)} cell(s) in **{sheet['name']}**.\n"
-            f"```\n{_format_grid(updated)}\n```"
+            f"```\n{_format_grid(snap)}\n```"
         )
 
 
@@ -370,6 +393,63 @@ class RecalcSheetSkill(BaseSkill):
         updated = recalc(sheet["payload"])
         await save_sheet(self._config, user_id, sheet["name"], updated, sheet_id=sid)
         return f"Recalculated **{sheet['name']}**.\n```\n{_format_grid(updated)}\n```"
+
+
+class ConvertSheetLinksSkill(BaseSkill):
+    """Convert plain URLs and markdown links in a sheet into clickable hyperlinks."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "convert_sheet_links"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Scan a spreadsheet for plain URLs (https://…) and Markdown-style "
+            "[text](url) links and turn them into real clickable hyperlinks in "
+            "the Univer editor. Use when cells contain bare URLs or markdown "
+            "links that should be clickable. Returns a summary like "
+            "'Converted 3 URLs to links in \\'Budget\\''."
+        )
+
+    @property
+    def category(self) -> str:
+        return "sheets"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "sheet_id": {
+                    "type": "string",
+                    "description": "Sheet id or name (optional — defaults to most recent)",
+                },
+            },
+            "required": [],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.sheets.snapshot import convert_urls_to_links
+        from lazyclaw.sheets.store import get_sheet, save_sheet
+
+        sid, err = await _resolve_sheet_id(self._config, user_id, params.get("sheet_id"))
+        if err:
+            return err
+        sheet = await get_sheet(self._config, user_id, sid)
+        if not sheet:
+            return "Sheet not found."
+        snap, converted = convert_urls_to_links(sheet["payload"])
+        if converted:
+            await save_sheet(self._config, user_id, None, snap, sheet_id=sid)
+        name = sheet["name"]
+        if converted == 0:
+            return f"No plain URLs or markdown links found in **{name}**."
+        noun = "URL" if converted == 1 else "URLs"
+        return f"Converted {converted} {noun} to links in **{name}**."
 
 
 class SendSheetSkill(BaseSkill):

@@ -20,6 +20,7 @@ from lazyclaw.config import load_config
 from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.runtime.doc_specialist import ai_edit_document
+from lazyclaw.sheets.snapshot import convert_urls_to_links
 from lazyclaw.sheets.store import (
     SheetConflictError,
     create_sheet,
@@ -162,6 +163,20 @@ async def recalc_sheet_route(
 
     snapshot = _recalc_snapshot(body.payload)
     return {"ok": True, "snapshot": snapshot}
+
+
+@router.post("/{sheet_id}/links/convert")
+async def convert_links_route(sheet_id: str, user: User = Depends(get_current_user)):
+    """Convert bare URLs / [text](url) markdown in cells into real hyperlinks.
+
+    Returns the updated snapshot + updated_at so the editor reloads in place.
+    """
+    sheet = await get_sheet(_config, user.id, sheet_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    snap, converted = convert_urls_to_links(sheet["payload"])
+    row = await save_sheet(_config, user.id, None, snap, sheet_id=sheet_id)
+    return {"ok": True, "converted": converted, "snapshot": snap, "updated_at": row["updated_at"]}
 
 
 @router.delete("/{sheet_id}")

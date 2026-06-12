@@ -1,4 +1,5 @@
-"""Gateway tests for 409 conflict detection + tags wiring (Task 2).
+"""Gateway tests for 409 conflict detection + tags wiring (Task 2)
+and links/convert endpoint (Task 4).
 
 Covers:
   Sheets:
@@ -7,6 +8,8 @@ Covers:
     - PUT without name keeps stored name
     - PUT with tags persists tags (visible in list)
     - PUT on unknown id → 404
+    - POST /{id}/links/convert → 200, converted count, snapshot has resource,
+      updated_at present, sheet persisted; 404 on unknown id
   Docs:
     - PUT with stale base_updated_at → 409
   PDF:
@@ -410,3 +413,75 @@ async def test_sheet_put_409_carries_full_payload(sheets_client):
     body = r.json()
     assert "current" in body
     assert "payload" in body["current"], "409 body must carry full current snapshot"
+
+
+# ── Sheet: POST /links/convert ────────────────────────────────────────────────
+
+
+async def test_links_convert_bare_url_returns_200_and_count(sheets_client):
+    """POST /{id}/links/convert on a sheet with a bare URL: 200, converted==1."""
+    from lazyclaw.sheets.snapshot import set_cells
+    from lazyclaw.sheets.store import get_sheet, save_sheet
+
+    client, cfg = sheets_client
+    sheet = await create_sheet(cfg, "u1", "Links Sheet")
+    sid = sheet["id"]
+
+    # Write a bare URL into the sheet
+    stored = await get_sheet(cfg, "u1", sid)
+    snap_with_url = set_cells(
+        stored["payload"],
+        [{"row": 0, "col": 0, "value": "https://example.com"}],
+    )
+    await save_sheet(cfg, "u1", "Links Sheet", snap_with_url, sheet_id=sid)
+
+    r = client.post(f"/api/sheets/{sid}/links/convert")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["converted"] == 1
+    assert "updated_at" in body
+    assert "snapshot" in body
+
+    # Verify the resource is embedded in the returned snapshot
+    snap = body["snapshot"]
+    resources = snap.get("resources") or []
+    assert any(
+        res.get("name") == "SHEET_HYPER_LINK_PLUGIN"
+        for res in resources
+        if isinstance(res, dict)
+    ), "snapshot must contain SHEET_HYPER_LINK_PLUGIN resource"
+
+
+async def test_links_convert_sheet_persisted_after_convert(sheets_client):
+    """After convert, a GET shows the resource is stored (not just returned in-memory)."""
+    from lazyclaw.sheets.snapshot import get_sheet_links, set_cells
+    from lazyclaw.sheets.store import get_sheet, save_sheet
+
+    client, cfg = sheets_client
+    sheet = await create_sheet(cfg, "u1", "Persist Sheet")
+    sid = sheet["id"]
+
+    stored = await get_sheet(cfg, "u1", sid)
+    snap_with_url = set_cells(
+        stored["payload"],
+        [{"row": 0, "col": 0, "value": "https://persisted.io"}],
+    )
+    await save_sheet(cfg, "u1", "Persist Sheet", snap_with_url, sheet_id=sid)
+
+    client.post(f"/api/sheets/{sid}/links/convert")
+
+    # GET the sheet back and check links are persisted
+    r2 = client.get(f"/api/sheets/{sid}")
+    assert r2.status_code == 200, r2.text
+    fetched_snap = r2.json()["payload"]
+    links = get_sheet_links(fetched_snap)
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://persisted.io"
+
+
+async def test_links_convert_unknown_id_returns_404(sheets_client):
+    """POST /links/convert on an unknown sheet id → 404."""
+    client, _ = sheets_client
+    r = client.post("/api/sheets/no-such-id/links/convert")
+    assert r.status_code == 404, r.text

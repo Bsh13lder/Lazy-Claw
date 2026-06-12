@@ -10,6 +10,7 @@ from lazyclaw.config import Config
 from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.permissions.models import ALLOW, DEFAULT_CATEGORY_PERMISSIONS
 from lazyclaw.skills.builtin.sheets import (
+    ConvertSheetLinksSkill,
     CreateSheetSkill,
     ListSheetsSkill,
     ReadSheetSkill,
@@ -171,8 +172,129 @@ async def test_skill_metadata():
     assert {
         CreateSheetSkill().name, ListSheetsSkill().name, ReadSheetSkill().name,
         SetCellsSkill().name, SetFormulaSkill().name, RecalcSheetSkill().name,
-        SendSheetSkill().name,
+        SendSheetSkill().name, ConvertSheetLinksSkill().name,
     } == {
         "create_sheet", "list_sheets", "read_sheet", "set_cells",
-        "set_formula", "recalc_sheet", "send_sheet",
+        "set_formula", "recalc_sheet", "send_sheet", "convert_sheet_links",
     }
+
+
+# ── ConvertSheetLinksSkill ────────────────────────────────────────────────────
+
+
+async def test_convert_sheet_links_happy_path(cfg):
+    """convert_sheet_links finds a bare URL, converts it, returns human summary."""
+    from lazyclaw.sheets.snapshot import get_sheet_links, set_cells
+    from lazyclaw.sheets.store import get_sheet, save_sheet
+
+    await CreateSheetSkill(config=cfg).execute("u1", {"name": "Links"})
+
+    # Write a bare URL directly into the stored snapshot
+    sheet_ref = await get_sheet(cfg, "u1", (await _resolve_sheet_id(cfg, "u1", "Links"))[0])
+    snap = set_cells(sheet_ref["payload"], [{"row": 0, "col": 0, "value": "https://lazyclaw.io"}])
+    await save_sheet(cfg, "u1", "Links", snap, sheet_id=sheet_ref["id"])
+
+    out = await ConvertSheetLinksSkill(config=cfg).execute("u1", {"sheet_id": "Links"})
+    assert "1" in out
+    assert "Links" in out
+    assert "link" in out.lower()
+
+    # Verify the link is actually persisted
+    updated = await get_sheet(cfg, "u1", sheet_ref["id"])
+    links = get_sheet_links(updated["payload"])
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://lazyclaw.io"
+
+
+async def test_convert_sheet_links_no_urls_returns_message(cfg):
+    """convert_sheet_links on a sheet with no URLs returns an informative message."""
+    await CreateSheetSkill(config=cfg).execute("u1", {"name": "Empty"})
+    await SetCellsSkill(config=cfg).execute("u1", {
+        "sheet_id": "Empty",
+        "cells": [{"cell": "A1", "value": "hello world"}],
+    })
+    out = await ConvertSheetLinksSkill(config=cfg).execute("u1", {"sheet_id": "Empty"})
+    assert "No" in out or "no" in out or "0" in out
+
+
+async def test_convert_sheet_links_no_sheet(cfg):
+    """convert_sheet_links with no sheets returns a helpful error."""
+    out = await ConvertSheetLinksSkill(config=cfg).execute("u1", {})
+    assert "no sheets" in out.lower()
+
+
+# ── SetCellsSkill: markdown [text](url) detection ────────────────────────────
+
+
+async def test_set_cells_markdown_link_creates_hyperlink(cfg):
+    """set_cells with a [text](url) value stores a real hyperlink, not plain text."""
+    from lazyclaw.sheets.snapshot import get_sheet_links
+    from lazyclaw.sheets.store import get_sheet
+
+    await CreateSheetSkill(config=cfg).execute("u1", {"name": "MD"})
+
+    out = await SetCellsSkill(config=cfg).execute("u1", {
+        "sheet_id": "MD",
+        "cells": [{"cell": "A1", "value": "[Invoice](https://inv.example.com/1)"}],
+    })
+    assert "Updated 1 cell" in out
+
+    sheet = await get_sheet(cfg, "u1", (await _resolve_sheet_id(cfg, "u1", "MD"))[0])
+    links = get_sheet_links(sheet["payload"])
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://inv.example.com/1"
+
+    # Display text is 'Invoice', not the raw markdown
+    from lazyclaw.sheets.snapshot import get_cell
+    cell = get_cell(sheet["payload"], 0, 0)
+    assert cell is not None
+    assert cell.get("v") == "Invoice"
+
+
+async def test_set_cells_markdown_and_plain_in_same_batch(cfg):
+    """Mixed batch: markdown cell becomes a link, plain value stays plain text."""
+    from lazyclaw.sheets.snapshot import get_sheet_links
+    from lazyclaw.sheets.store import get_sheet
+
+    await CreateSheetSkill(config=cfg).execute("u1", {"name": "Mixed"})
+
+    out = await SetCellsSkill(config=cfg).execute("u1", {
+        "sheet_id": "Mixed",
+        "cells": [
+            {"cell": "A1", "value": "[Link](https://example.com)"},
+            {"cell": "B1", "value": "plain text"},
+            {"cell": "C1", "value": 42},
+        ],
+    })
+    assert "Updated 3 cell" in out
+
+    sid = (await _resolve_sheet_id(cfg, "u1", "Mixed"))[0]
+    sheet = await get_sheet(cfg, "u1", sid)
+    snap = sheet["payload"]
+
+    links = get_sheet_links(snap)
+    assert len(links) == 1
+    assert links[0]["payload"] == "https://example.com"
+
+    from lazyclaw.sheets.snapshot import get_cell
+    plain = get_cell(snap, 0, 1)  # B1
+    assert plain is not None
+    assert plain.get("v") == "plain text"
+
+
+async def test_set_cells_non_markdown_url_in_mixed_text_stays_plain(cfg):
+    """A URL embedded in surrounding text is NOT turned into a hyperlink by set_cells."""
+    from lazyclaw.sheets.snapshot import get_sheet_links
+    from lazyclaw.sheets.store import get_sheet
+
+    await CreateSheetSkill(config=cfg).execute("u1", {"name": "NM"})
+
+    await SetCellsSkill(config=cfg).execute("u1", {
+        "sheet_id": "NM",
+        "cells": [{"cell": "A1", "value": "see https://example.com today"}],
+    })
+
+    sid = (await _resolve_sheet_id(cfg, "u1", "NM"))[0]
+    sheet = await get_sheet(cfg, "u1", sid)
+    links = get_sheet_links(sheet["payload"])
+    assert links == []

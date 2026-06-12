@@ -29,6 +29,7 @@ callers never observe in-place changes (project immutability rule).
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Any, Iterator
 from uuid import uuid4
@@ -317,3 +318,161 @@ def set_cells(
             clear=(value is None and formula is None),
         )
     return out
+
+
+# ───────────────────────── hyperlink resource helpers ───────────────
+
+_LINK_RESOURCE = "SHEET_HYPER_LINK_PLUGIN"
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\((https?://[^\s)]+)\)$")
+_TRAIL_PUNCT = ".,;:!?)"
+
+
+def _link_data(snap: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Parse the hyperlink plugin resource into a dict keyed by sheet id.
+
+    Returns ``{}`` on missing resource or any :class:`json.JSONDecodeError`.
+    """
+    resources = snap.get("resources") or []
+    for res in resources:
+        if res.get("name") == _LINK_RESOURCE:
+            try:
+                return json.loads(res.get("data") or "{}")
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def get_sheet_links(
+    snap: dict[str, Any], sheet: int | str = 0
+) -> list[dict[str, Any]]:
+    """Return hyperlink entries for the resolved sheet.
+
+    Each entry has keys ``id``, ``row``, ``column``, ``payload`` (URL).
+    Returns ``[]`` when no links exist for that sheet.
+    """
+    sid = _resolve_sheet_id(snap, sheet)
+    return list(_link_data(snap).get(sid) or [])
+
+
+def _write_link_data(
+    snap: dict[str, Any], data: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Mutate a caller-owned copy of *snap* to write the link resource.
+
+    Updates the existing ``SHEET_HYPER_LINK_PLUGIN`` entry when present,
+    otherwise appends a new one.
+    """
+    resources: list[dict[str, Any]] = snap.setdefault("resources", [])
+    for res in resources:
+        if res.get("name") == _LINK_RESOURCE:
+            res["data"] = json.dumps(data)
+            return
+    resources.append({"name": _LINK_RESOURCE, "data": json.dumps(data)})
+
+
+def set_cell_link(
+    snap: dict[str, Any],
+    row: int,
+    col: int,
+    url: str,
+    display: str | None = None,
+    sheet: int | str = 0,
+) -> dict[str, Any]:
+    """Return a NEW snapshot with a hyperlink set at (row, col).
+
+    Any existing link entry at the same cell is removed first (upsert
+    semantics). When *display* is not ``None`` the cell's text value is also
+    updated via :func:`_apply_cell`.
+    """
+    out = copy.deepcopy(snap)
+    sid = _resolve_sheet_id(out, sheet)
+
+    # Read current link data, drop any existing entry at (row, col).
+    data = _link_data(out)
+    entries = [e for e in (data.get(sid) or []) if not (e["row"] == row and e["column"] == col)]
+    entries.append({
+        "id": f"l-{uuid4().hex[:8]}",
+        "row": row,
+        "column": col,
+        "payload": url,
+    })
+    data[sid] = entries
+    _write_link_data(out, data)
+
+    if display is not None:
+        _apply_cell(out["sheets"][sid], row, col, display, None, clear=False)
+
+    return out
+
+
+def remove_cell_link(
+    snap: dict[str, Any],
+    row: int,
+    col: int,
+    sheet: int | str = 0,
+) -> dict[str, Any]:
+    """Return a NEW snapshot with the hyperlink at (row, col) removed.
+
+    Cell text is left untouched. A no-op when there is no link at the cell.
+    """
+    out = copy.deepcopy(snap)
+    sid = _resolve_sheet_id(out, sheet)
+    data = _link_data(out)
+    entries = [e for e in (data.get(sid) or []) if not (e["row"] == row and e["column"] == col)]
+    data[sid] = entries
+    _write_link_data(out, data)
+    return out
+
+
+def convert_urls_to_links(snap: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Scan all sheets and convert URL / Markdown-link cells to hyperlinks.
+
+    Rules (applied per cell):
+    - Skip cells that have a formula (``f`` key present).
+    - Skip cells whose value is not a string.
+    - Skip cells that already have a hyperlink entry.
+    - If the cell text matches :data:`_MD_LINK_RE` exactly → create a link with
+      the URL from group 2 and set the cell display text to the label (group 1).
+    - Else if a URL is found by :data:`_URL_RE` *and* the matched URL
+      (stripped of trailing :data:`_TRAIL_PUNCT`) equals the cell text stripped
+      of the same punctuation → bare-URL cell: create a link (text stays as-is).
+
+    Returns ``(new_snapshot, count)`` where *count* is the number of links
+    added. The original snapshot is never mutated.
+    """
+    out = copy.deepcopy(snap)
+    count = 0
+
+    order = out.get("sheetOrder") or list((out.get("sheets") or {}).keys())
+    for sid in order:
+        # Re-read the linked set once per sheet before the cell loop so that
+        # cells converted earlier in this pass are in the skip set.
+        linked: set[tuple[int, int]] = {
+            (e["row"], e["column"]) for e in (_link_data(out).get(sid) or [])
+        }
+        for row, col, cell in iter_cells(out, sid):
+            if cell.get("f") is not None:
+                continue
+            v = cell.get("v")
+            if not isinstance(v, str):
+                continue
+            if (row, col) in linked:
+                continue
+
+            md = _MD_LINK_RE.match(v.strip())
+            if md:
+                out = set_cell_link(out, row, col, md.group(2), display=md.group(1), sheet=sid)
+                linked.add((row, col))
+                count += 1
+                continue
+
+            url_m = _URL_RE.search(v)
+            if url_m:
+                matched_url = url_m.group(0).rstrip(_TRAIL_PUNCT)
+                if matched_url == v.strip().rstrip(_TRAIL_PUNCT):
+                    out = set_cell_link(out, row, col, matched_url, display=None, sheet=sid)
+                    linked.add((row, col))
+                    count += 1
+
+    return out, count

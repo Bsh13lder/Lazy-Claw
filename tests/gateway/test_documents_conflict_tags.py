@@ -121,7 +121,7 @@ async def pdf_client(tmp_path: Path, monkeypatch):
     cfg = await _setup_db(tmp_path)
     monkeypatch.setattr(pdf_mod, "_config", cfg)
     # page_count requires pypdf which may not be installed in dev env; stub it.
-    monkeypatch.setattr("lazyclaw.pdf.store.ops.page_count", lambda data: 1)
+    monkeypatch.setattr("lazyclaw.pdf.store.ops.page_count", lambda _: 1)
 
     app = FastAPI()
     app.include_router(pdf_mod.router)
@@ -329,7 +329,8 @@ async def test_pdf_patch_name_only_leaves_tags_unchanged(pdf_client):
     pdf_id = row["id"]
 
     # First patch to set tags
-    client.patch(f"/api/pdf/{pdf_id}", json={"tags": ["keep-me"]})
+    r0 = client.patch(f"/api/pdf/{pdf_id}", json={"tags": ["keep-me"]})
+    assert r0.status_code == 200, r0.text
 
     # Second patch: rename only
     r = client.patch(f"/api/pdf/{pdf_id}", json={"name": "new-name.pdf"})
@@ -337,3 +338,75 @@ async def test_pdf_patch_name_only_leaves_tags_unchanged(pdf_client):
     meta = r.json()["file"]
     assert meta["name"] == "new-name.pdf"
     assert "keep-me" in meta["tags"]
+
+
+# ── PDF: list endpoint shows tags after PATCH (covers fix 1) ──────────────────
+
+
+async def test_pdf_list_shows_tags_after_patch(pdf_client):
+    client, cfg = pdf_client
+    row = await save_pdf(cfg, "u1", "listed.pdf", _MINIMAL_PDF)
+    pdf_id = row["id"]
+
+    r = client.patch(f"/api/pdf/{pdf_id}", json={"tags": ["visible", "in-list"]})
+    assert r.status_code == 200, r.text
+
+    list_r = client.get("/api/pdf")
+    assert list_r.status_code == 200, list_r.text
+    files = list_r.json()["files"]
+    found = next((f for f in files if f["id"] == pdf_id), None)
+    assert found is not None
+    assert set(found["tags"]) == {"visible", "in-list"}
+
+
+# ── Doc: PUT with tags persists them ─────────────────────────────────────────
+
+
+@_requires_docs
+async def test_doc_put_tags_persisted_in_list(docs_client):
+    client, cfg = docs_client
+    doc = await create_doc(cfg, "u1", "Tagged Doc")  # type: ignore[misc]
+    did = doc["id"]
+
+    r = client.put(
+        f"/api/docs/{did}",
+        json={"payload": _DOC_PAYLOAD, "tags": ["report", "q2"]},
+    )
+    assert r.status_code == 200, r.text
+
+    list_r = client.get("/api/docs")
+    assert list_r.status_code == 200, list_r.text
+    docs = list_r.json()["docs"]
+    found = next((d for d in docs if d["id"] == did), None)
+    assert found is not None
+    assert set(found["tags"]) == {"report", "q2"}
+
+
+# ── Sheet: 409 carries full payload in body["current"]["payload"] ─────────────
+
+
+async def test_sheet_put_409_carries_full_payload(sheets_client):
+    client, cfg = sheets_client
+    sheet = await create_sheet(cfg, "u1", "Conflict Payload Sheet")
+    sid = sheet["id"]
+    original_ts = sheet["updated_at"]
+
+    # Advance stored updated_at to force a conflict
+    newer_ts = "2026-01-01 12:00:02"
+    async with db_session(cfg) as db:
+        await db.execute(
+            "UPDATE sheets SET updated_at = ? WHERE id = ?", (newer_ts, sid)
+        )
+        await db.commit()
+
+    r = client.put(
+        f"/api/sheets/{sid}",
+        json={
+            "payload": _PAYLOAD,
+            "base_updated_at": original_ts,
+        },
+    )
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert "current" in body
+    assert "payload" in body["current"], "409 body must carry full current snapshot"

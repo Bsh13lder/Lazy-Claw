@@ -106,7 +106,11 @@ async def save_sheet_route(
     body: SaveSheetBody,
     user: User = Depends(get_current_user),
 ):
-    """Persist the workbook snapshot from the editor (autosave)."""
+    """Persist the workbook snapshot from the editor (autosave).
+
+    On conflict (stale ``base_updated_at``), 409 carries the full decrypted
+    current snapshot so clients never need a second fetch.
+    """
     try:
         row = await save_sheet(
             _config, user.id, body.name, body.payload, sheet_id=sheet_id,

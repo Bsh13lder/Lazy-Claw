@@ -61,6 +61,7 @@ def _meta(row: dict) -> dict:
         "id": row["id"],
         "name": row["name"],
         "pages": row.get("pages"),
+        "tags": row.get("tags", []),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
@@ -111,7 +112,7 @@ async def patch_pdf_route(
     row = await update_pdf_meta(_config, user.id, pdf_id, name=body.name, tags=body.tags)
     if not row:
         raise HTTPException(status_code=404, detail="PDF not found")
-    return {"file": row}
+    return {"file": _meta(row)}
 
 
 @router.get("/{pdf_id}/raw")

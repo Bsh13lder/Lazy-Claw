@@ -100,7 +100,11 @@ async def save_doc_route(
     body: SaveDocBody,
     user: User = Depends(get_current_user),
 ):
-    """Persist the document snapshot from the editor (autosave)."""
+    """Persist the document snapshot from the editor (autosave).
+
+    On conflict (stale ``base_updated_at``), 409 carries the full decrypted
+    current snapshot so clients never need a second fetch.
+    """
     try:
         row = await save_doc(
             _config, user.id, body.name, body.payload, doc_id=doc_id,

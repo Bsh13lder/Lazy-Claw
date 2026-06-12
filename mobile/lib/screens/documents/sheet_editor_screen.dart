@@ -133,7 +133,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(detail.payload, detail.name ?? widget.name);
+      await _cacheWorkbook(detail.payload, detail.name);
     } catch (_) {
       // Revalidation is best-effort; keep showing the current state.
     }
@@ -193,7 +193,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(detail.payload, detail.name ?? widget.name);
+      await _cacheWorkbook(detail.payload, detail.name);
     } catch (_) {
       if (!mounted) return;
       if (cached == null) setState(() { _error = 'Could not open this sheet. Pull to retry.'; _loading = false; });

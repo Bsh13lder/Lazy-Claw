@@ -12,12 +12,21 @@ import 'doc_ai_box.dart';
 import 'doc_share.dart';
 import 'export_password_dialog.dart';
 import 'formula_helper.dart';
+import 'sheet_grid.dart';
+import 'sheet_selection.dart';
+import 'sheet_toolbar.dart';
+import 'univer_model.dart';
 import 'univer_parse.dart';
 
 /// Full native editor for a single sheet: tap a cell to load it into the formula
 /// bar, edit the value or `=formula`, and commit. Formulas recompute on the
 /// server (the phone has no JS engine) and the workbook autosaves. Multi-sheet
 /// tabs, fit-to-width + pinch-zoom, and the ✨ AI box round it out.
+///
+/// New in this pass:
+///   - Range selection ([SheetSelection]) with drag-to-extend handle
+///   - Formatting toolbar ([SheetToolbar]) wired to [applyStyle]
+///   - Undo/redo (50-step history cap)
 ///
 /// Grid library decision: a custom `Table`-in-`InteractiveViewer` (not
 /// pluto_grid) — we need fit-to-width sizing, a shared formula bar/helper, and
@@ -39,8 +48,12 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   String? _error;
 
   UniverSheet? _sheet;
-  int? _selRow;
-  int? _selCol;
+  SheetSelection? _sel;
+
+  // ── Undo / redo stacks ──────────────────────────────────────────────────────
+  final List<UniverSheet> _undo = [];
+  final List<UniverSheet> _redo = [];
+  static const int _maxHistory = 50;
 
   final TextEditingController _formulaCtrl = TextEditingController();
   final FocusNode _formulaFocus = FocusNode();
@@ -67,6 +80,35 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     _formulaFocus.dispose();
     super.dispose();
   }
+
+  // ── Undo/redo helpers ────────────────────────────────────────────────────────
+
+  /// Push the current sheet onto the undo stack before a mutation.
+  void _pushUndo() {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    _undo.add(sheet);
+    if (_undo.length > _maxHistory) _undo.removeAt(0);
+    _redo.clear();
+  }
+
+  void _doUndo() {
+    if (_undo.isEmpty || _sheet == null) return;
+    _redo.add(_sheet!);
+    final prev = _undo.removeLast();
+    setState(() => _sheet = prev);
+    _scheduleSave();
+  }
+
+  void _doRedo() {
+    if (_redo.isEmpty || _sheet == null) return;
+    _undo.add(_sheet!);
+    final next = _redo.removeLast();
+    setState(() => _sheet = next);
+    _scheduleSave();
+  }
+
+  // ── Load ─────────────────────────────────────────────────────────────────────
 
   Future<void> _load() async {
     final cache = ref.read(documentCacheDaoProvider);
@@ -126,12 +168,13 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     }
   }
 
+  // ── Selection ────────────────────────────────────────────────────────────────
+
   void _selectCell(int row, int col) {
     final sheet = _sheet;
     if (sheet == null) return;
     setState(() {
-      _selRow = row;
-      _selCol = col;
+      _sel = SheetSelection.single(row, col);
       _formulaCtrl.text = sheet.cellAt(row, col).editText;
       _formulaCtrl.selection = TextSelection.collapsed(
         offset: _formulaCtrl.text.length,
@@ -140,14 +183,38 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     _formulaFocus.requestFocus();
   }
 
+  void _extendSelectionTo(int row, int col) {
+    final sel = _sel;
+    if (sel == null) return;
+    setState(() {
+      _sel = sel.extendTo(row, col);
+    });
+  }
+
+  void _startSelectionFrom(int row, int col) {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    setState(() {
+      _sel = SheetSelection.single(row, col);
+      _formulaCtrl.text = sheet.cellAt(row, col).editText;
+      _formulaCtrl.selection = TextSelection.collapsed(
+        offset: _formulaCtrl.text.length,
+      );
+    });
+  }
+
+  // ── Commit cell edit ─────────────────────────────────────────────────────────
+
   Future<void> _commit() async {
     final sheet = _sheet;
-    final r = _selRow;
-    final c = _selCol;
-    if (sheet == null || r == null || c == null) return;
+    final sel = _sel;
+    if (sheet == null || sel == null) return;
+    final r = sel.anchorRow;
+    final c = sel.anchorCol;
     final raw = _formulaCtrl.text;
     final isFormula = raw.trimLeft().startsWith('=');
 
+    _pushUndo();
     var next = isFormula
         ? sheet.setCell(r, c, formula: raw.trim())
         : sheet.setCell(r, c, value: raw);
@@ -168,6 +235,77 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     }
     _scheduleSave();
   }
+
+  // ── Toolbar actions ──────────────────────────────────────────────────────────
+
+  void _handleToolbarAction(SheetToolbarAction action) {
+    switch (action) {
+      case SheetToolbarAction.undo:
+        _doUndo();
+      case SheetToolbarAction.redo:
+        _doRedo();
+      case SheetToolbarAction.bold:
+        _applyStyleToggle('bl', _anchorStyle.bold);
+      case SheetToolbarAction.italic:
+        _applyStyleToggle('it', _anchorStyle.italic);
+      case SheetToolbarAction.underline:
+        _applyStyleUnderlineToggle(_anchorStyle.underline);
+      case SheetToolbarAction.strike:
+        _applyStyleStrikeToggle(_anchorStyle.strike);
+      case SheetToolbarAction.wrapToggle:
+        _applyStylePatch({'tb': _anchorStyle.wrap ? null : 3});
+      case SheetToolbarAction.alignLeft:
+        _applyStylePatch({'ht': _anchorStyle.hAlign == 1 ? null : 1});
+      case SheetToolbarAction.alignCenter:
+        _applyStylePatch({'ht': _anchorStyle.hAlign == 2 ? null : 2});
+      case SheetToolbarAction.alignRight:
+        _applyStylePatch({'ht': _anchorStyle.hAlign == 3 ? null : 3});
+    }
+  }
+
+  void _applyStyleToggle(String key, bool currentlyOn) {
+    _applyStylePatch({key: currentlyOn ? 0 : 1});
+  }
+
+  void _applyStyleUnderlineToggle(bool currentlyOn) {
+    _applyStylePatch({'ul': currentlyOn ? {'s': 0} : {'s': 1}});
+  }
+
+  void _applyStyleStrikeToggle(bool currentlyOn) {
+    _applyStylePatch({'st': currentlyOn ? {'s': 0} : {'s': 1}});
+  }
+
+  void _applyTextColor(String? rgb) {
+    _applyStylePatch({'cl': rgb == null ? null : {'rgb': rgb}});
+  }
+
+  void _applyFillColor(String? rgb) {
+    _applyStylePatch({'bg': rgb == null ? null : {'rgb': rgb}});
+  }
+
+  void _applyNumberFormat(String? pattern) {
+    _applyStylePatch({'n': pattern == null ? null : {'pattern': pattern}});
+  }
+
+  void _applyStylePatch(Map<String, dynamic> patch) {
+    final sheet = _sheet;
+    final sel = _sel;
+    if (sheet == null || sel == null) return;
+    _pushUndo();
+    setState(() {
+      _sheet = sheet.applyStyle(sel.range, patch);
+    });
+    _scheduleSave();
+  }
+
+  CellStyleView get _anchorStyle {
+    final sheet = _sheet;
+    final sel = _sel;
+    if (sheet == null || sel == null) return CellStyleView.empty;
+    return sheet.resolveStyle(sel.anchorRow, sel.anchorCol);
+  }
+
+  // ── Save ─────────────────────────────────────────────────────────────────────
 
   void _scheduleSave() {
     _saveTimer?.cancel();
@@ -191,6 +329,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       if (mounted) setState(() => _saving = false);
     }
   }
+
+  // ── Export ───────────────────────────────────────────────────────────────────
 
   static const _xlsxMime =
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -218,6 +358,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     }
   }
 
+  // ── AI edit ──────────────────────────────────────────────────────────────────
+
   Future<void> _openAi() async {
     final instruction = await DocAiBox.show(context, kindLabel: 'sheet');
     if (instruction == null || !mounted) return;
@@ -226,19 +368,18 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       final repo = ref.read(documentsRepositoryProvider);
       final result = await repo.aiEdit(DocKind.sheets, widget.id, instruction);
       if (!mounted) return;
-      setState(() {
-        _applying = false;
-        if (result.ok && result.snapshot != null) {
-          _sheet = UniverSheet.fromWorkbook(result.snapshot!);
-          _selRow = null;
-          _selCol = null;
-        }
-      });
       if (result.ok && result.snapshot != null) {
+        _pushUndo();
+        setState(() {
+          _applying = false;
+          _sheet = UniverSheet.fromWorkbook(result.snapshot!);
+          _sel = null;
+        });
         await _cacheWorkbook(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
         _snack(result.summary ?? 'Sheet updated.');
       } else {
+        setState(() => _applying = false);
         _snack(result.error ?? 'AI could not apply that change.', error: true);
       }
     } catch (_) {
@@ -247,6 +388,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       _snack('AI edit failed. Try again.', error: true);
     }
   }
+
+  // ── Snackbar ─────────────────────────────────────────────────────────────────
 
   void _snack(String msg, {bool error = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -261,6 +404,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       ),
     );
   }
+
+  // ── Build ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -314,6 +459,16 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
             children: [
               if (sheet != null && sheet.sheetNames.length > 1)
                 _sheetTabs(sheet),
+              if (sheet != null && _sel != null)
+                SheetToolbar(
+                  anchorStyle: _anchorStyle,
+                  canUndo: _undo.isNotEmpty,
+                  canRedo: _redo.isNotEmpty,
+                  onAction: _handleToolbarAction,
+                  onTextColor: _applyTextColor,
+                  onFillColor: _applyFillColor,
+                  onNumberFormat: _applyNumberFormat,
+                ),
               if (sheet != null) _formulaBar(),
               if (suggestions.isNotEmpty) _formulaHelper(suggestions),
               Expanded(child: _buildBody()),
@@ -340,8 +495,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
                 selected: i == sheet.activeIndex,
                 onSelected: (_) => setState(() {
                   _sheet = sheet.withActiveIndex(i);
-                  _selRow = null;
-                  _selCol = null;
+                  _sel = null;
                   _formulaCtrl.clear();
                 }),
               ),
@@ -352,8 +506,10 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   }
 
   Widget _formulaBar() {
-    final hasSel = _selRow != null && _selCol != null;
-    final ref = hasSel ? '${colToLetter(_selCol!)}${_selRow! + 1}' : '—';
+    final hasSel = _sel != null;
+    final cellRef = hasSel
+        ? '${colToLetter(_sel!.anchorCol)}${_sel!.anchorRow + 1}'
+        : '—';
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.md,
@@ -368,7 +524,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
           SizedBox(
             width: 48,
             child: Text(
-              ref,
+              cellRef,
               style: AppText.caption.copyWith(
                 color: AppColors.textMuted,
                 fontWeight: FontWeight.w700,
@@ -446,154 +602,17 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         final (maxRow, maxCol) = sheet.usedBounds();
         final rows = (maxRow + 2).clamp(_minRows, 1000);
         final cols = (maxCol + 2).clamp(_minCols, 100);
-        return _SheetGrid(
+        return SheetEditorGrid(
           sheet: sheet,
           rows: rows,
           cols: cols,
-          selRow: _selRow,
-          selCol: _selCol,
+          sel: _sel,
           viewportWidth: constraints.maxWidth,
           onTapCell: _selectCell,
+          onExtendSelection: _extendSelectionTo,
+          onStartSelection: _startSelectionFrom,
         );
       },
-    );
-  }
-}
-
-// ── Editable grid ────────────────────────────────────────────────────────────
-
-class _SheetGrid extends StatelessWidget {
-  const _SheetGrid({
-    required this.sheet,
-    required this.rows,
-    required this.cols,
-    required this.selRow,
-    required this.selCol,
-    required this.viewportWidth,
-    required this.onTapCell,
-  });
-
-  final UniverSheet sheet;
-  final int rows;
-  final int cols;
-  final int? selRow;
-  final int? selCol;
-  final double viewportWidth;
-  final void Function(int row, int col) onTapCell;
-
-  static const double _gutterW = 44;
-  static const double _minColW = 88;
-  static const double _maxColW = 160;
-  static const double _rowH = 36;
-
-  double get _colW {
-    final avail = viewportWidth - _gutterW;
-    final fit = avail / cols;
-    return fit.clamp(_minColW, _maxColW);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colW = _colW;
-    return InteractiveViewer(
-      panEnabled: true,
-      scaleEnabled: true,
-      minScale: 0.5,
-      maxScale: 3.0,
-      constrained: false,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.vertical,
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _headerRow(colW),
-              for (var r = 0; r < rows; r++) _dataRow(r, colW),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _headerRow(double colW) {
-    return Row(
-      children: [
-        _gutter(''),
-        for (var c = 0; c < cols; c++)
-          _staticCell(colToLetter(c), colW, header: true),
-      ],
-    );
-  }
-
-  Widget _dataRow(int r, double colW) {
-    return Row(
-      children: [
-        _gutter('${r + 1}'),
-        for (var c = 0; c < cols; c++) _cell(r, c, colW),
-      ],
-    );
-  }
-
-  Widget _gutter(String text) => Container(
-        width: _gutterW,
-        height: _rowH,
-        alignment: Alignment.center,
-        decoration: const BoxDecoration(
-          color: AppColors.bgSurfaceElevated,
-          border: Border(
-            right: BorderSide(color: AppColors.borderSubtle),
-            bottom: BorderSide(color: AppColors.borderSubtle),
-          ),
-        ),
-        child: Text(text, style: AppText.caption.copyWith(color: AppColors.textMuted)),
-      );
-
-  Widget _staticCell(String text, double colW, {bool header = false}) => Container(
-        width: colW,
-        height: _rowH,
-        alignment: Alignment.center,
-        decoration: const BoxDecoration(
-          color: AppColors.bgSurfaceElevated,
-          border: Border(
-            right: BorderSide(color: AppColors.borderSubtle),
-            bottom: BorderSide(color: AppColors.borderSubtle),
-          ),
-        ),
-        child: Text(
-          text,
-          style: AppText.caption
-              .copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.w700),
-        ),
-      );
-
-  Widget _cell(int r, int c, double colW) {
-    final selected = r == selRow && c == selCol;
-    final text = sheet.cellAt(r, c).display;
-    return GestureDetector(
-      onTap: () => onTapCell(r, c),
-      child: Container(
-        width: colW,
-        height: _rowH,
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-        decoration: BoxDecoration(
-          color: selected
-              ? AppColors.accent.withValues(alpha: 0.16)
-              : AppColors.bgSurface,
-          border: Border.all(
-            color: selected ? AppColors.accent : AppColors.borderSubtle,
-            width: selected ? 1.5 : 0.5,
-          ),
-        ),
-        child: Text(
-          text,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: AppText.body.copyWith(fontSize: 13),
-        ),
-      ),
     );
   }
 }

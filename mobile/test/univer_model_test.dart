@@ -805,14 +805,14 @@ void main() {
   // sortRange
   // ──────────────────────────────────────────────────────────────────────────
   group('sortRange', () {
-    UniverSheet _twoColSheet() => UniverSheet.fromWorkbook(_simpleWb(cellData: {
+    UniverSheet twoColSheet() => UniverSheet.fromWorkbook(_simpleWb(cellData: {
           '0': {'0': {'v': 3}, '1': {'v': 'C'}},
           '1': {'0': {'v': 1}, '1': {'v': 'A'}},
           '2': {'0': {'v': 2}, '1': {'v': 'B'}},
         }));
 
     test('numeric ascending by col 0', () {
-      final next = _twoColSheet().sortRange(
+      final next = twoColSheet().sortRange(
         SelRange(0, 0, 2, 1),
         0,
         asc: true,
@@ -823,7 +823,7 @@ void main() {
     });
 
     test('numeric descending by col 0', () {
-      final next = _twoColSheet().sortRange(
+      final next = twoColSheet().sortRange(
         SelRange(0, 0, 2, 1),
         0,
         asc: false,
@@ -887,7 +887,7 @@ void main() {
     });
 
     test('original unchanged after sortRange (immutability)', () {
-      final sheet = _twoColSheet();
+      final sheet = twoColSheet();
       final before = sheet.toWorkbook();
       sheet.sortRange(SelRange(0, 0, 2, 1), 0, asc: true);
       expect(sheet.toWorkbook(), equals(before));

@@ -13,6 +13,7 @@ import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
 import 'doc_share.dart';
 import 'export_password_dialog.dart';
+import 'sheet_conflict_banner.dart';
 import 'univer_quill.dart';
 
 /// Full native rich-text editor for a single document.
@@ -31,7 +32,8 @@ class DocEditorScreen extends ConsumerStatefulWidget {
   ConsumerState<DocEditorScreen> createState() => _DocEditorScreenState();
 }
 
-class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
+class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
+    with WidgetsBindingObserver {
   bool _loading = true;
   bool _applying = false;
   bool _saving = false;
@@ -43,19 +45,54 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
   StreamSubscription<dynamic>? _changeSub;
   Timer? _saveTimer;
 
+  // ── Optimistic-concurrency tracking ────────────────────────────────────────
+  /// The `updated_at` value from the server when we last loaded or saved.
+  String? _baseUpdatedAt;
+
+  /// Non-null when a save returned a 409 DocConflictException.
+  DocPayload? _conflict;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
     _changeSub?.cancel();
     _controller?.dispose();
     _editorFocus.dispose();
     super.dispose();
+  }
+
+  // ── WidgetsBindingObserver — fresh-on-resume ──────────────────────────────
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _revalidateIfIdle();
+    }
+  }
+
+  /// Re-run the network half of [_load] when no unsaved edit is in-flight.
+  Future<void> _revalidateIfIdle() async {
+    if (_saveTimer != null || _saving || _conflict != null) return;
+    try {
+      final repo = ref.read(documentsRepositoryProvider);
+      final detail = await repo.getPayload(DocKind.docs, widget.id);
+      if (!mounted) return;
+      _basePayload = detail.payload;
+      _baseUpdatedAt = detail.updatedAt;
+      _installController(deltaFromUniver(detail.payload));
+      setState(() { _loading = false; _error = null; });
+      await _cachePayload(detail.payload, detail.name ?? widget.name);
+    } catch (_) {
+      // Revalidation is best-effort.
+    }
   }
 
   Future<void> _load() async {
@@ -85,12 +122,13 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
       final detail = await repo.getPayload(DocKind.docs, widget.id);
       if (!mounted) return;
       _basePayload = detail.payload;
+      _baseUpdatedAt = detail.updatedAt;
       _installController(deltaFromUniver(detail.payload));
       setState(() {
         _loading = false;
         _error = null;
       });
-      await _cachePayload(detail.payload, detail.name);
+      await _cachePayload(detail.payload, detail.name ?? widget.name);
     } catch (_) {
       if (!mounted) return;
       // Keep showing the cached copy when offline; only error on a cold miss.
@@ -136,6 +174,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
   }
 
   Future<void> _save() async {
+    _saveTimer = null;
     final controller = _controller;
     if (controller == null) return;
     setState(() => _saving = true);
@@ -143,13 +182,64 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
       final body = univerFromDelta(controller.document.toDelta())['body'];
       // Preserve the doc's original top-level keys (id/documentStyle), swap body.
       final payload = {..._basePayload, 'body': body};
-      await ref
+      final newUpdatedAt = await ref
           .read(documentsRepositoryProvider)
-          .save(DocKind.docs, widget.id, payload, name: widget.name);
+          .save(DocKind.docs, widget.id, payload,
+              // name: null — server keeps its stored name; avoids stale-rename clobber.
+              baseUpdatedAt: _baseUpdatedAt);
+      _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
       await _cachePayload(payload, widget.name);
       ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
-    } catch (_) {
+    } on DocConflictException catch (e) {
+      if (mounted) setState(() => _conflict = e.current);
+    } catch (e) {
+      if (e is Exception) {
+        final msg = e.toString();
+        if (msg.contains('409')) {
+          if (mounted) {
+            _snack('Save conflict — reloading.', error: true);
+            _load();
+          }
+          return;
+        }
+      }
       // Best-effort autosave; the next edit reschedules.
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ── Conflict resolution ───────────────────────────────────────────────────────
+
+  Future<void> _resolveConflictReload() async {
+    final conflict = _conflict;
+    if (conflict == null) return;
+    setState(() {
+      _conflict = null;
+      _basePayload = conflict.payload;
+      _baseUpdatedAt = conflict.updatedAt;
+    });
+    _installController(deltaFromUniver(conflict.payload));
+    setState(() {});
+    await _cachePayload(conflict.payload, widget.name);
+  }
+
+  Future<void> _resolveConflictKeepMine() async {
+    final controller = _controller;
+    if (controller == null) return;
+    setState(() { _conflict = null; _saving = true; });
+    try {
+      final body = univerFromDelta(controller.document.toDelta())['body'];
+      final payload = {..._basePayload, 'body': body};
+      // LWW: omit base_updated_at.
+      final newUpdatedAt = await ref
+          .read(documentsRepositoryProvider)
+          .save(DocKind.docs, widget.id, payload);
+      _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
+      await _cachePayload(payload, widget.name);
+      ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
+    } catch (e) {
+      if (mounted) _snack('Save failed: $e', error: true);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -203,6 +293,8 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
         await _cachePayload(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
         _snack(result.summary ?? 'Document updated.');
+        // AI edit saves server-side — LWW on next autosave (null base).
+        _baseUpdatedAt = null;
       } else {
         _snack(result.error ?? 'AI could not apply that change.', error: true);
       }
@@ -287,6 +379,13 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
     if (controller == null) return const SizedBox.shrink();
     return Column(
       children: [
+        // ── Conflict banner ──────────────────────────────────────────────────
+        if (_conflict != null)
+          SheetConflictBanner(
+            label: 'Document changed on the server.',
+            onReload: _resolveConflictReload,
+            onKeepMine: _resolveConflictKeepMine,
+          ),
         QuillSimpleToolbar(
           controller: controller,
           config: const QuillSimpleToolbarConfig(

@@ -110,6 +110,14 @@ String? authRedirect(AuthStatus status, {required bool loggingIn}) {
   return null;
 }
 
+// ── Route observer (fresh-on-focus) ───────────────────────────────────────
+//
+// Editors subscribe to this observer so they can reload when the user
+// navigates back to them (e.g. after opening a link or a sub-screen).
+// Exported so each editor can register via `didChangeDependencies`.
+
+final routeObserver = RouteObserver<ModalRoute<void>>();
+
 // ── Router provider ────────────────────────────────────────────────────────
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -117,6 +125,7 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/home',
     refreshListenable: listenable,
+    observers: [routeObserver],
     // Defense-in-depth: an unmatched location (e.g. a stray `lazyclaw://…`
     // widget URI that slipped past Flutter's disabled auto-deep-linking) must
     // never surface GoRouter's "no routes for location" page-not-found screen —

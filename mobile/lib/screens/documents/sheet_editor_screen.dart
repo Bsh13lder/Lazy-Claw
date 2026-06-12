@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../core/router/app_router.dart';
 import '../../local/document_cache_dao.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
@@ -13,11 +14,13 @@ import 'doc_ai_box.dart';
 import 'doc_share.dart';
 import 'export_password_dialog.dart';
 import 'formula_helper.dart';
+import 'sheet_conflict_banner.dart';
 import 'sheet_grid.dart';
 import 'sheet_formula_bar.dart';
 import 'sheet_link_ui.dart';
 import 'sheet_selection.dart';
 import 'sheet_toolbar.dart';
+import 'univer_links.dart';
 import 'univer_model.dart';
 import 'univer_ops.dart';
 import 'univer_parse.dart';
@@ -35,7 +38,8 @@ class SheetEditorScreen extends ConsumerStatefulWidget {
   ConsumerState<SheetEditorScreen> createState() => _SheetEditorScreenState();
 }
 
-class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
+class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
+    with WidgetsBindingObserver, RouteAware {
   bool _loading = true;
   bool _applying = false;
   bool _saving = false;
@@ -54,6 +58,16 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   List<FormulaFn> _catalog = const [];
   Timer? _saveTimer;
 
+  // ── Optimistic-concurrency tracking ────────────────────────────────────────
+  /// The `updated_at` value from the server when we last loaded or saved.
+  /// Sent as `base_updated_at` on every save so the server can detect conflicts.
+  /// null = we haven't committed a CAS base yet (LWW semantics for that save).
+  String? _baseUpdatedAt;
+
+  /// Non-null when a save returned a 409 DocConflictException. Cleared after
+  /// the user resolves via Reload or Keep mine.
+  DocPayload? _conflict;
+
   // Minimum populated viewport so a brand-new sheet is still editable.
   static const int _minRows = 12;
   static const int _minCols = 6;
@@ -61,6 +75,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
     loadFormulaCatalog().then((c) {
       if (mounted) setState(() => _catalog = c);
@@ -68,11 +83,60 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null) {
+      routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    routeObserver.unsubscribe(this);
     _saveTimer?.cancel();
     _formulaCtrl.dispose();
     _formulaFocus.dispose();
     super.dispose();
+  }
+
+  // ── WidgetsBindingObserver — fresh-on-resume ──────────────────────────────
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _revalidateIfIdle();
+    }
+  }
+
+  // ── RouteAware — fresh when popped back to ────────────────────────────────
+
+  @override
+  void didPopNext() {
+    _revalidateIfIdle();
+  }
+
+  /// Re-run the network half of [_load] when no unsaved edit is in-flight and
+  /// there is no unresolved conflict. Adopts the fresh server snapshot + re-bases
+  /// `_baseUpdatedAt`. Skips silently when busy so autosave is never interrupted.
+  Future<void> _revalidateIfIdle() async {
+    if (_saveTimer != null || _saving || _conflict != null) return;
+    try {
+      final detail = await ref
+          .read(documentsRepositoryProvider)
+          .getPayload(DocKind.sheets, widget.id);
+      if (!mounted) return;
+      setState(() {
+        _sheet = UniverSheet.fromWorkbook(detail.payload);
+        _baseUpdatedAt = detail.updatedAt;
+        _loading = false;
+        _error = null;
+      });
+      await _cacheWorkbook(detail.payload, detail.name ?? widget.name);
+    } catch (_) {
+      // Revalidation is best-effort; keep showing the current state.
+    }
   }
 
   // ── Undo/redo helpers ────────────────────────────────────────────────────────
@@ -110,18 +174,43 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     if (cache != null) {
       cached = await cache.getDoc(DocKind.sheets.api, widget.id);
       if (cached != null && mounted) {
-        setState(() { _sheet = UniverSheet.fromWorkbook(cached!.payload); _loading = false; _error = null; });
+        setState(() {
+          _sheet = UniverSheet.fromWorkbook(cached!.payload);
+          _loading = false;
+          _error = null;
+          // _baseUpdatedAt intentionally left unchanged — we still need the
+          // server value from the network path below.
+        });
       }
     }
     if (cached == null) setState(() { _loading = true; _error = null; });
     try {
       final detail = await ref.read(documentsRepositoryProvider).getPayload(DocKind.sheets, widget.id);
       if (!mounted) return;
-      setState(() { _sheet = UniverSheet.fromWorkbook(detail.payload); _loading = false; _error = null; });
-      await _cacheWorkbook(detail.payload, detail.name);
+      setState(() {
+        _sheet = UniverSheet.fromWorkbook(detail.payload);
+        _baseUpdatedAt = detail.updatedAt;
+        _loading = false;
+        _error = null;
+      });
+      await _cacheWorkbook(detail.payload, detail.name ?? widget.name);
     } catch (_) {
       if (!mounted) return;
       if (cached == null) setState(() { _error = 'Could not open this sheet. Pull to retry.'; _loading = false; });
+    }
+  }
+
+  /// Light refetch used after an AI edit to re-base `_baseUpdatedAt` without
+  /// disturbing the sheet state (we already adopted the AI snapshot locally).
+  Future<void> _rebaseFromServer() async {
+    try {
+      final detail = await ref
+          .read(documentsRepositoryProvider)
+          .getPayload(DocKind.sheets, widget.id);
+      if (mounted) _baseUpdatedAt = detail.updatedAt;
+    } catch (_) {
+      // Fall back to LWW (null base) — the next save will succeed without CAS.
+      _baseUpdatedAt = null;
     }
   }
 
@@ -462,6 +551,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
             result.snapshot,
             active: sheet.activeIndex,
           );
+          // Re-base from the updated_at returned by the server.
+          if (result.updatedAt != null) _baseUpdatedAt = result.updatedAt;
         });
         await _cacheWorkbook(result.snapshot, widget.name);
         if (!mounted) return;
@@ -525,19 +616,77 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   }
 
   Future<void> _save() async {
+    _saveTimer = null;
     final sheet = _sheet;
     if (sheet == null) return;
     setState(() => _saving = true);
     try {
       final workbook = sheet.toWorkbook();
-      await ref
+      final newUpdatedAt = await ref
           .read(documentsRepositoryProvider)
-          .save(DocKind.sheets, widget.id, workbook, name: widget.name);
+          .save(DocKind.sheets, widget.id, workbook,
+              // name: null — server keeps its stored name; avoids stale-rename clobber.
+              baseUpdatedAt: _baseUpdatedAt);
+      // Re-base from the fresh updated_at the server returned.
+      _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
+      await _cacheWorkbook(workbook, widget.name);
+      ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
+    } on DocConflictException catch (e) {
+      if (!mounted) return;
+      setState(() => _conflict = e.current);
+    } catch (e) {
+      if (e is Exception) {
+        // Check for a raw 409 without a conflict body — treat as non-recoverable.
+        final msg = e.toString();
+        if (msg.contains('409')) {
+          if (mounted) {
+            _snack('Save conflict — reloading.', error: true);
+            _load();
+          }
+          return;
+        }
+      }
+      // Other autosave failures are best-effort; the next edit reschedules.
+      debugPrint('sheet autosave failed: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ── Conflict resolution ───────────────────────────────────────────────────────
+
+  /// User chose "Reload": adopt the server's current version. The pre-conflict
+  /// local sheet is pushed onto the undo stack so the user can recover it.
+  Future<void> _resolveConflictReload() async {
+    final conflict = _conflict;
+    if (conflict == null) return;
+    final localSheet = _sheet;
+    if (localSheet != null) _pushUndo();
+    setState(() {
+      _sheet = UniverSheet.fromWorkbook(conflict.payload);
+      _baseUpdatedAt = conflict.updatedAt;
+      _conflict = null;
+      _redo.clear();
+    });
+    await _cacheWorkbook(conflict.payload, widget.name);
+  }
+
+  /// User chose "Keep mine": force-save by sending baseUpdatedAt=null (LWW).
+  Future<void> _resolveConflictKeepMine() async {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    setState(() { _conflict = null; _saving = true; });
+    try {
+      final workbook = sheet.toWorkbook();
+      // LWW: omit base_updated_at so the server always accepts this write.
+      final newUpdatedAt = await ref
+          .read(documentsRepositoryProvider)
+          .save(DocKind.sheets, widget.id, workbook);
+      _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
       await _cacheWorkbook(workbook, widget.name);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } catch (e) {
-      // Autosave is best-effort; the next edit reschedules another save.
-      debugPrint('sheet autosave failed: $e');
+      if (mounted) _snack('Save failed: $e', error: true);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -591,6 +740,9 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         await _cacheWorkbook(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
         _snack(result.summary ?? 'Sheet updated.');
+        // The AI edit saved server-side (bumping updated_at). Refetch to re-base
+        // so the next autosave doesn't 409 against the AI-bumped version.
+        await _rebaseFromServer();
       } else {
         setState(() => _applying = false);
         _snack(result.error ?? 'AI could not apply that change.', error: true);
@@ -677,6 +829,12 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         children: [
           Column(
             children: [
+              // ── Conflict banner (above everything else) ──────────────────
+              if (_conflict != null)
+                SheetConflictBanner(
+                  onReload: _resolveConflictReload,
+                  onKeepMine: _resolveConflictKeepMine,
+                ),
               if (sheet != null && sheet.sheetNames.length > 1)
                 SheetTabs(
                   sheetNames: sheet.sheetNames,
@@ -777,4 +935,3 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     );
   }
 }
-

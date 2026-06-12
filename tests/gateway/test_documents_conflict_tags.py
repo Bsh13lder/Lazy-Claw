@@ -429,6 +429,7 @@ async def test_links_convert_bare_url_returns_200_and_count(sheets_client):
 
     # Write a bare URL into the sheet
     stored = await get_sheet(cfg, "u1", sid)
+    assert stored is not None
     snap_with_url = set_cells(
         stored["payload"],
         [{"row": 0, "col": 0, "value": "https://example.com"}],
@@ -463,13 +464,15 @@ async def test_links_convert_sheet_persisted_after_convert(sheets_client):
     sid = sheet["id"]
 
     stored = await get_sheet(cfg, "u1", sid)
+    assert stored is not None
     snap_with_url = set_cells(
         stored["payload"],
         [{"row": 0, "col": 0, "value": "https://persisted.io"}],
     )
     await save_sheet(cfg, "u1", "Persist Sheet", snap_with_url, sheet_id=sid)
 
-    client.post(f"/api/sheets/{sid}/links/convert")
+    r = client.post(f"/api/sheets/{sid}/links/convert")
+    assert r.status_code == 200, r.text
 
     # GET the sheet back and check links are persisted
     r2 = client.get(f"/api/sheets/{sid}")

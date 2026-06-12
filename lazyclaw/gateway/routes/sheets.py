@@ -175,7 +175,11 @@ async def convert_links_route(sheet_id: str, user: User = Depends(get_current_us
     if not sheet:
         raise HTTPException(status_code=404, detail="Sheet not found")
     snap, converted = convert_urls_to_links(sheet["payload"])
-    row = await save_sheet(_config, user.id, None, snap, sheet_id=sheet_id)
+    # Always save so the editor gets a fresh updated_at to re-base on.
+    try:
+        row = await save_sheet(_config, user.id, None, snap, sheet_id=sheet_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Sheet not found")
     return {"ok": True, "converted": converted, "snapshot": snap, "updated_at": row["updated_at"]}
 
 

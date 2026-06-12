@@ -191,6 +191,7 @@ async def test_convert_sheet_links_happy_path(cfg):
 
     # Write a bare URL directly into the stored snapshot
     sheet_ref = await get_sheet(cfg, "u1", (await _resolve_sheet_id(cfg, "u1", "Links"))[0])
+    assert sheet_ref is not None
     snap = set_cells(sheet_ref["payload"], [{"row": 0, "col": 0, "value": "https://lazyclaw.io"}])
     await save_sheet(cfg, "u1", "Links", snap, sheet_id=sheet_ref["id"])
 
@@ -201,6 +202,7 @@ async def test_convert_sheet_links_happy_path(cfg):
 
     # Verify the link is actually persisted
     updated = await get_sheet(cfg, "u1", sheet_ref["id"])
+    assert updated is not None
     links = get_sheet_links(updated["payload"])
     assert len(links) == 1
     assert links[0]["payload"] == "https://lazyclaw.io"
@@ -240,6 +242,7 @@ async def test_set_cells_markdown_link_creates_hyperlink(cfg):
     assert "Updated 1 cell" in out
 
     sheet = await get_sheet(cfg, "u1", (await _resolve_sheet_id(cfg, "u1", "MD"))[0])
+    assert sheet is not None
     links = get_sheet_links(sheet["payload"])
     assert len(links) == 1
     assert links[0]["payload"] == "https://inv.example.com/1"
@@ -270,6 +273,7 @@ async def test_set_cells_markdown_and_plain_in_same_batch(cfg):
 
     sid = (await _resolve_sheet_id(cfg, "u1", "Mixed"))[0]
     sheet = await get_sheet(cfg, "u1", sid)
+    assert sheet is not None
     snap = sheet["payload"]
 
     links = get_sheet_links(snap)
@@ -296,5 +300,6 @@ async def test_set_cells_non_markdown_url_in_mixed_text_stays_plain(cfg):
 
     sid = (await _resolve_sheet_id(cfg, "u1", "NM"))[0]
     sheet = await get_sheet(cfg, "u1", sid)
+    assert sheet is not None
     links = get_sheet_links(sheet["payload"])
     assert links == []

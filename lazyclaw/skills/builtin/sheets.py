@@ -444,7 +444,10 @@ class ConvertSheetLinksSkill(BaseSkill):
             return "Sheet not found."
         snap, converted = convert_urls_to_links(sheet["payload"])
         if converted:
-            await save_sheet(self._config, user_id, None, snap, sheet_id=sid)
+            try:
+                await save_sheet(self._config, user_id, None, snap, sheet_id=sid)
+            except LookupError:
+                return "Sheet not found."
         name = sheet["name"]
         if converted == 0:
             return f"No plain URLs or markdown links found in **{name}**."

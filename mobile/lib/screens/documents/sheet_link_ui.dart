@@ -1,6 +1,7 @@
 /// Hyperlink UI components extracted from sheet_editor_screen.dart:
 ///   - [LinkChip]  – compact action strip shown when a linked cell is selected.
 ///   - [LinkDialogBody] – content for the insert/edit-link bottom sheet.
+///   - [resolveCurrentColWidth] – reads current column width from a workbook.
 ///
 /// Extracted to keep sheet_editor_screen.dart under the 800-line limit.
 library;
@@ -13,7 +14,27 @@ import 'univer_parse.dart';
 import 'sheet_selection.dart';
 import '../../ui/ui.dart';
 
-// ── Column width dialog ───────────────────────────────────────────────────────
+// ── Column width helpers ──────────────────────────────────────────────────────
+
+/// Returns the current pixel width of [col] from [sheet]'s raw workbook data,
+/// falling back to the Univer default of 88 px when the column has no explicit
+/// width entry.
+double resolveCurrentColWidth(UniverSheet sheet, int col) {
+  final wb = sheet.rawWorkbook;
+  final sheetsMap = wb['sheets'];
+  if (sheetsMap is! Map) return 88.0;
+  final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList()
+      ?? sheetsMap.keys.cast<String>().toList();
+  final idx = sheet.activeIndex.clamp(0, order.isEmpty ? 0 : order.length - 1);
+  final sheetId = order.isEmpty ? '' : order[idx];
+  final sheetData = sheetsMap[sheetId];
+  if (sheetData is! Map) return 88.0;
+  final colData = sheetData['columnData'];
+  if (colData is! Map) return 88.0;
+  final entry = colData[col.toString()];
+  if (entry is Map && entry['w'] is num) return (entry['w'] as num).toDouble();
+  return 88.0;
+}
 
 /// Show a dialog with a slider (60–320 px) to set column width.
 ///

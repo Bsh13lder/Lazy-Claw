@@ -89,7 +89,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
       _baseUpdatedAt = detail.updatedAt;
       _installController(deltaFromUniver(detail.payload));
       setState(() { _loading = false; _error = null; });
-      await _cachePayload(detail.payload, detail.name ?? widget.name);
+      await _cachePayload(detail.payload, detail.name);
     } catch (_) {
       // Revalidation is best-effort.
     }
@@ -128,7 +128,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
         _loading = false;
         _error = null;
       });
-      await _cachePayload(detail.payload, detail.name ?? widget.name);
+      await _cachePayload(detail.payload, detail.name);
     } catch (_) {
       if (!mounted) return;
       // Keep showing the cached copy when offline; only error on a cold miss.

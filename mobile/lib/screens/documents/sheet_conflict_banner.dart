@@ -1,17 +1,26 @@
-/// Conflict-resolution banner shown by sheet / doc editors when a server-side
-/// optimistic-concurrency check (409) detects that another client saved while
-/// this client had the document open.
+/// Conflict-resolution banner and extracted build helpers for the sheet editor.
 ///
-/// Offers two resolutions:
-///   • **Reload** — adopt the server version (the user's pending edits go onto
-///     the undo stack so they can get them back via Ctrl-Z / ⌘Z).
-///   • **Keep mine** — re-save the local version with LWW semantics (sends
-///     `base_updated_at: null`), bypassing the CAS check.
+/// Exports:
+///   • [SheetConflictBanner] – amber banner rendered on 409 conflicts.
+///   • [SheetAppBarActions]  – appBar action row for SheetEditorScreen.
+///   • [SheetEditorBody]     – column + grid body for SheetEditorScreen.
+///
+/// Extracted to keep sheet_editor_screen.dart under the 800-line limit.
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../repositories/documents_repository.dart';
 import '../../ui/ui.dart';
+import 'formula_helper.dart';
+import 'sheet_formula_bar.dart';
+import 'sheet_grid.dart';
+import 'sheet_link_ui.dart';
+import 'sheet_selection.dart';
+import 'sheet_toolbar.dart';
+import 'univer_model.dart';
+import 'univer_ops.dart';
+import 'univer_parse.dart';
 
 /// A full-width amber banner that sits above the editor toolbar when a
 /// save operation raises a [DocConflictException].
@@ -106,6 +115,233 @@ class _Action extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── SheetAppBarActions ────────────────────────────────────────────────────────
+
+/// AppBar action row for [SheetEditorScreen]: saving indicator, export/share
+/// popup menu, and the AI edit button.
+class SheetAppBarActions extends StatelessWidget {
+  const SheetAppBarActions({
+    super.key,
+    required this.saving,
+    required this.applying,
+    required this.onExport,
+    required this.onConvertLinks,
+    required this.onAi,
+  });
+
+  final bool saving;
+  final bool applying;
+
+  /// Called with (format, ext, mime) when the user picks an export option.
+  final void Function(String format, String ext, String mime) onExport;
+  final VoidCallback onConvertLinks;
+  final VoidCallback onAi;
+
+  static const _xlsxMime =
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (saving)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
+            child: Center(
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.accent,
+                ),
+              ),
+            ),
+          ),
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.ios_share, color: AppColors.textSecondary),
+          tooltip: 'Export / share',
+          color: AppColors.bgSurfaceElevated,
+          onSelected: (v) {
+            if (v == 'xlsx') {
+              onExport('xlsx', 'xlsx', _xlsxMime);
+            } else if (v == 'csv') {
+              onExport('csv', 'csv', 'text/csv');
+            } else if (v == 'convert_links') {
+              onConvertLinks();
+            }
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'xlsx', child: Text('Export as Excel (.xlsx)')),
+            PopupMenuItem(value: 'csv', child: Text('Export as CSV (.csv)')),
+            PopupMenuDivider(),
+            PopupMenuItem(
+              value: 'convert_links',
+              child: Text('Convert URLs to links'),
+            ),
+          ],
+        ),
+        LzIconButton(
+          icon: Icons.auto_awesome,
+          tooltip: 'Ask AI to edit',
+          accent: true,
+          onPressed: applying ? null : onAi,
+        ),
+      ],
+    );
+  }
+}
+
+// ── SheetEditorBody ───────────────────────────────────────────────────────────
+
+/// The full column+grid body for [SheetEditorScreen]: conflict banner, sheet
+/// tabs, toolbar, link chip, formula bar, formula helper, and the data grid.
+///
+/// Extracted to keep [SheetEditorScreen] under 800 lines.
+class SheetEditorBody extends StatelessWidget {
+  const SheetEditorBody({
+    super.key,
+    required this.loading,
+    required this.error,
+    required this.onRetry,
+    required this.sheet,
+    required this.sel,
+    required this.anchorStyle,
+    required this.canUndo,
+    required this.canRedo,
+    required this.conflict,
+    required this.suggestions,
+    required this.formulaCtrl,
+    required this.formulaFocus,
+    required this.gridRows,
+    required this.gridCols,
+    required this.onConflictReload,
+    required this.onConflictKeepMine,
+    required this.onTabSelect,
+    required this.onToolbarAction,
+    required this.onTextColor,
+    required this.onFillColor,
+    required this.onNumberFormat,
+    required this.onEditLink,
+    required this.onRemoveLink,
+    required this.onSnack,
+    required this.onFormulaChanged,
+    required this.onFormulaSubmit,
+    required this.onInsertFunction,
+    required this.onTapCell,
+    required this.onExtendSelection,
+    required this.onStartSelection,
+    required this.onHeaderAction,
+  });
+
+  final bool loading;
+  final String? error;
+  final VoidCallback onRetry;
+  final UniverSheet? sheet;
+  final SheetSelection? sel;
+  final CellStyleView anchorStyle;
+  final bool canUndo;
+  final bool canRedo;
+  final DocPayload? conflict;
+  final List<FormulaFn> suggestions;
+  final TextEditingController formulaCtrl;
+  final FocusNode formulaFocus;
+  final int gridRows;
+  final int gridCols;
+  final VoidCallback onConflictReload;
+  final VoidCallback onConflictKeepMine;
+  final void Function(int) onTabSelect;
+  final void Function(SheetToolbarAction) onToolbarAction;
+  final void Function(String?) onTextColor;
+  final void Function(String?) onFillColor;
+  final void Function(String?) onNumberFormat;
+  final VoidCallback onEditLink;
+  final VoidCallback onRemoveLink;
+  final void Function(String msg, {bool error}) onSnack;
+  final VoidCallback onFormulaChanged;
+  final VoidCallback onFormulaSubmit;
+  final void Function(FormulaFn) onInsertFunction;
+  final void Function(int row, int col) onTapCell;
+  final void Function(int row, int col) onExtendSelection;
+  final void Function(int row, int col) onStartSelection;
+  final void Function(SheetHeaderAction action, int index) onHeaderAction;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) return LzSkeleton.list(count: 5);
+    if (error != null) return LzErrorState(message: error!, onRetry: onRetry);
+    final s = sheet;
+    if (s == null) return const SizedBox.shrink();
+    return Column(
+      children: [
+        if (conflict != null)
+          SheetConflictBanner(
+            onReload: onConflictReload,
+            onKeepMine: onConflictKeepMine,
+          ),
+        if (s.sheetNames.length > 1)
+          SheetTabs(
+            sheetNames: s.sheetNames,
+            activeIndex: s.activeIndex,
+            onSelect: onTabSelect,
+          ),
+        if (sel != null)
+          SheetToolbar(
+            anchorStyle: anchorStyle,
+            canUndo: canUndo,
+            canRedo: canRedo,
+            frozen: s.frozen,
+            hasSelection: true,
+            onAction: onToolbarAction,
+            onTextColor: onTextColor,
+            onFillColor: onFillColor,
+            onNumberFormat: onNumberFormat,
+          ),
+        if (sel != null && sel!.isSingle)
+          LinkChip(
+            sheet: s,
+            sel: sel!,
+            onEdit: onEditLink,
+            onRemove: onRemoveLink,
+            onSnack: onSnack,
+          ),
+        SheetFormulaBar(
+          cellRef: sel != null
+              ? '${colToLetter(sel!.anchorCol)}${sel!.anchorRow + 1}'
+              : '—',
+          controller: formulaCtrl,
+          focusNode: formulaFocus,
+          hasSel: sel != null,
+          onChanged: onFormulaChanged,
+          onSubmitted: onFormulaSubmit,
+          onApply: onFormulaSubmit,
+        ),
+        if (suggestions.isNotEmpty)
+          SheetFormulaHelper(
+            suggestions: suggestions,
+            onTap: onInsertFunction,
+          ),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) => SheetEditorGrid(
+              sheet: s,
+              rows: gridRows,
+              cols: gridCols,
+              sel: sel,
+              viewportWidth: constraints.maxWidth,
+              onTapCell: onTapCell,
+              onExtendSelection: onExtendSelection,
+              onStartSelection: onStartSelection,
+              onHeaderAction: onHeaderAction,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

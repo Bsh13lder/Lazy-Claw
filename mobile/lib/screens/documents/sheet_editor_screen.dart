@@ -16,7 +16,6 @@ import 'export_password_dialog.dart';
 import 'formula_helper.dart';
 import 'sheet_conflict_banner.dart';
 import 'sheet_grid.dart';
-import 'sheet_formula_bar.dart';
 import 'sheet_link_ui.dart';
 import 'sheet_selection.dart';
 import 'sheet_toolbar.dart';
@@ -123,17 +122,16 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
   Future<void> _revalidateIfIdle() async {
     if (_saveTimer != null || _saving || _conflict != null) return;
     try {
-      final detail = await ref
-          .read(documentsRepositoryProvider)
+      final d = await ref.read(documentsRepositoryProvider)
           .getPayload(DocKind.sheets, widget.id);
       if (!mounted) return;
       setState(() {
-        _sheet = UniverSheet.fromWorkbook(detail.payload);
-        _baseUpdatedAt = detail.updatedAt;
+        _sheet = UniverSheet.fromWorkbook(d.payload);
+        _baseUpdatedAt = d.updatedAt;
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(detail.payload, detail.name);
+      await _cacheWorkbook(d.payload, d.name);
     } catch (_) {
       // Revalidation is best-effort; keep showing the current state.
     }
@@ -174,59 +172,52 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     if (cache != null) {
       cached = await cache.getDoc(DocKind.sheets.api, widget.id);
       if (cached != null && mounted) {
+        // Show cached copy immediately; _baseUpdatedAt stays null until the
+        // network path below delivers the authoritative server value.
         setState(() {
           _sheet = UniverSheet.fromWorkbook(cached!.payload);
           _loading = false;
           _error = null;
-          // _baseUpdatedAt intentionally left unchanged — we still need the
-          // server value from the network path below.
         });
       }
     }
     if (cached == null) setState(() { _loading = true; _error = null; });
     try {
-      final detail = await ref.read(documentsRepositoryProvider).getPayload(DocKind.sheets, widget.id);
+      final d = await ref.read(documentsRepositoryProvider)
+          .getPayload(DocKind.sheets, widget.id);
       if (!mounted) return;
       setState(() {
-        _sheet = UniverSheet.fromWorkbook(detail.payload);
-        _baseUpdatedAt = detail.updatedAt;
+        _sheet = UniverSheet.fromWorkbook(d.payload);
+        _baseUpdatedAt = d.updatedAt;
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(detail.payload, detail.name);
+      await _cacheWorkbook(d.payload, d.name);
     } catch (_) {
       if (!mounted) return;
       if (cached == null) setState(() { _error = 'Could not open this sheet. Pull to retry.'; _loading = false; });
     }
   }
 
-  /// Light refetch used after an AI edit to re-base `_baseUpdatedAt` without
-  /// disturbing the sheet state (we already adopted the AI snapshot locally).
+  /// Light refetch to re-base [_baseUpdatedAt] after an AI edit (AI bumps
+  /// updated_at server-side, so the next autosave would 409 without this).
   Future<void> _rebaseFromServer() async {
     try {
-      final detail = await ref
-          .read(documentsRepositoryProvider)
+      final d = await ref.read(documentsRepositoryProvider)
           .getPayload(DocKind.sheets, widget.id);
-      if (mounted) _baseUpdatedAt = detail.updatedAt;
+      if (mounted) _baseUpdatedAt = d.updatedAt;
     } catch (_) {
-      // Fall back to LWW (null base) — the next save will succeed without CAS.
-      _baseUpdatedAt = null;
+      _baseUpdatedAt = null; // LWW fallback: next save skips CAS check.
     }
   }
 
-  /// Best-effort write of the current workbook into the on-device cache so the
-  /// next open is instant. Never throws into the editor.
+  /// Best-effort write of the current workbook into the on-device cache.
   Future<void> _cacheWorkbook(Map<String, dynamic> workbook, String name) async {
     try {
       await ref.read(documentCacheDaoProvider)?.putDoc(
-            kind: DocKind.sheets.api,
-            id: widget.id,
-            name: name,
-            payloadJson: jsonEncode(workbook),
-          );
-    } catch (_) {
-      // Caching is best-effort.
-    }
+          kind: DocKind.sheets.api, id: widget.id,
+          name: name, payloadJson: jsonEncode(workbook));
+    } catch (_) {}
   }
 
   // ── Selection ────────────────────────────────────────────────────────────────
@@ -244,8 +235,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     _formulaFocus.requestFocus();
   }
 
-  /// Grid dimensions currently rendered — mirrors the rows/cols computed in
-  /// [_buildBody] so selection extension can clamp to the visible grid.
+  /// Grid dimensions passed to [SheetEditorBody] / used for clamping selections.
   (int, int) _gridDims() {
     final sheet = _sheet;
     if (sheet == null) return (_minRows, _minCols);
@@ -298,15 +288,13 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       if (link != null) {
         if (link.display != null) {
           // Markdown branch: update display text + refresh formula bar.
-          next = next.setCell(r, c, value: link.display);
-          next = next.setLink(r, c, link.url, display: link.display);
+          next = next.setCell(r, c, value: link.display)
+              .setLink(r, c, link.url, display: link.display);
           _formulaCtrl.text = link.display!;
-          _formulaCtrl.selection = TextSelection.collapsed(
-            offset: link.display!.length,
-          );
+          _formulaCtrl.selection =
+              TextSelection.collapsed(offset: link.display!.length);
         } else {
-          // Bare URL branch.
-          next = next.setLink(r, c, link.url);
+          next = next.setLink(r, c, link.url); // Bare URL branch.
         }
       }
     }
@@ -315,15 +303,12 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
 
     if (isFormula) {
       try {
-        final repo = ref.read(documentsRepositoryProvider);
-        final recalced = await repo.recalc(widget.id, next.toWorkbook());
+        final recalced = await ref.read(documentsRepositoryProvider)
+            .recalc(widget.id, next.toWorkbook());
         if (!mounted) return;
-        setState(() => _sheet = UniverSheet.fromWorkbook(
-              recalced,
-              active: next.activeIndex,
-            ));
+        setState(() => _sheet = UniverSheet.fromWorkbook(recalced, active: next.activeIndex));
       } catch (_) {
-        // Keep the formula; values fill in on the next successful recalc/save.
+        // Keep the formula; values fill in on next successful recalc/save.
       }
     }
     _scheduleSave();
@@ -338,13 +323,13 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       case SheetToolbarAction.redo:
         _doRedo();
       case SheetToolbarAction.bold:
-        _applyStyleToggle('bl', _anchorStyle.bold);
+        _applyStylePatch({'bl': _anchorStyle.bold ? 0 : 1});
       case SheetToolbarAction.italic:
-        _applyStyleToggle('it', _anchorStyle.italic);
+        _applyStylePatch({'it': _anchorStyle.italic ? 0 : 1});
       case SheetToolbarAction.underline:
-        _applyStyleUnderlineToggle(_anchorStyle.underline);
+        _applyStylePatch({'ul': _anchorStyle.underline ? {'s': 0} : {'s': 1}});
       case SheetToolbarAction.strike:
-        _applyStyleStrikeToggle(_anchorStyle.strike);
+        _applyStylePatch({'st': _anchorStyle.strike ? {'s': 0} : {'s': 1}});
       case SheetToolbarAction.wrapToggle:
         _applyStylePatch({'tb': _anchorStyle.wrap ? null : 3});
       case SheetToolbarAction.alignLeft:
@@ -458,32 +443,12 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     await _recalcIfFormulas(next);
   }
 
-  /// Column width dialog: reads current width from columnData (fallback 88),
+  /// Column width dialog: reads current width via [resolveCurrentColWidth],
   /// shows slider via [promptColWidth], applies on confirm.
   Future<void> _showColWidthDialog(UniverSheet sheet, int col) async {
-    // Read current width from columnData, fallback to default 88.
-    final wb = sheet.rawWorkbook;
-    final sheetsMap = wb['sheets'];
-    double currentW = 88.0;
-    if (sheetsMap is Map) {
-      final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList()
-          ?? (sheetsMap).keys.cast<String>().toList();
-      final idx = sheet.activeIndex.clamp(0, order.isEmpty ? 0 : order.length - 1);
-      final sheetId = order.isEmpty ? '' : order[idx];
-      final sheetData = sheetsMap[sheetId];
-      if (sheetData is Map) {
-        final colData = sheetData['columnData'];
-        if (colData is Map) {
-          final entry = colData[col.toString()];
-          if (entry is Map && entry['w'] is num) {
-            currentW = (entry['w'] as num).toDouble();
-          }
-        }
-      }
-    }
-
     if (!mounted) return;
-    final chosen = await promptColWidth(context, currentW);
+    final chosen = await promptColWidth(
+        context, resolveCurrentColWidth(sheet, col));
     if (chosen == null || !mounted) return;
     _pushUndo();
     final next = _sheet!.setColWidth(col, chosen);
@@ -547,11 +512,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       } else {
         _pushUndo();
         setState(() {
-          _sheet = UniverSheet.fromWorkbook(
-            result.snapshot,
-            active: sheet.activeIndex,
-          );
-          // Re-base from the updated_at returned by the server.
+          _sheet = UniverSheet.fromWorkbook(result.snapshot, active: sheet.activeIndex);
           if (result.updatedAt != null) _baseUpdatedAt = result.updatedAt;
         });
         await _cacheWorkbook(result.snapshot, widget.name);
@@ -564,18 +525,6 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     } finally {
       if (mounted) setState(() => _saving = false);
     }
-  }
-
-  void _applyStyleToggle(String key, bool currentlyOn) {
-    _applyStylePatch({key: currentlyOn ? 0 : 1});
-  }
-
-  void _applyStyleUnderlineToggle(bool currentlyOn) {
-    _applyStylePatch({'ul': currentlyOn ? {'s': 0} : {'s': 1}});
-  }
-
-  void _applyStyleStrikeToggle(bool currentlyOn) {
-    _applyStylePatch({'st': currentlyOn ? {'s': 0} : {'s': 1}});
   }
 
   void _applyTextColor(String? rgb) {
@@ -622,13 +571,10 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     setState(() => _saving = true);
     try {
       final workbook = sheet.toWorkbook();
-      final newUpdatedAt = await ref
-          .read(documentsRepositoryProvider)
-          .save(DocKind.sheets, widget.id, workbook,
-              // name: null — server keeps its stored name; avoids stale-rename clobber.
-              baseUpdatedAt: _baseUpdatedAt);
-      // Re-base from the fresh updated_at the server returned.
-      _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
+      // name: null — server keeps its stored name; avoids stale-rename clobber.
+      final newAt = await ref.read(documentsRepositoryProvider)
+          .save(DocKind.sheets, widget.id, workbook, baseUpdatedAt: _baseUpdatedAt);
+      _baseUpdatedAt = newAt ?? _baseUpdatedAt; // re-base on server's returned value
       await _cacheWorkbook(workbook, widget.name);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } on DocConflictException catch (e) {
@@ -694,19 +640,14 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
 
   // ── Export ───────────────────────────────────────────────────────────────────
 
-  static const _xlsxMime =
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
   Future<void> _export(String format, String ext, String mime) async {
     final pw = await promptExportPassword(context);
     if (pw == null || !mounted) return;
     final encrypted = pw.isNotEmpty;
     setState(() => _saving = true);
     try {
-      final bytes = await ref.read(documentsRepositoryProvider).exportBytes(
-            DocKind.sheets, widget.id, format,
-            password: encrypted ? pw : null,
-          );
+      final bytes = await ref.read(documentsRepositoryProvider)
+          .exportBytes(DocKind.sheets, widget.id, format, password: encrypted ? pw : null);
       await shareDocumentBytes(
         bytes: bytes,
         stem: widget.name,
@@ -774,131 +715,76 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
 
   @override
   Widget build(BuildContext context) {
-    final sheet = _sheet;
-    final suggestions = filterFormulas(_catalog, _formulaCtrl.text);
+    final (rows, cols) = _gridDims();
     return LzScaffold(
       appBar: LzAppBar(
         title: widget.name,
         actions: [
-          if (_saving)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
-              child: Center(
-                child: SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.accent,
-                  ),
-                ),
-              ),
-            ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.ios_share, color: AppColors.textSecondary),
-            tooltip: 'Export / share',
-            color: AppColors.bgSurfaceElevated,
-            onSelected: (v) {
-              if (v == 'xlsx') {
-                _export('xlsx', 'xlsx', _xlsxMime);
-              } else if (v == 'csv') {
-                _export('csv', 'csv', 'text/csv');
-              } else if (v == 'convert_links') {
-                _bulkConvertLinks();
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'xlsx', child: Text('Export as Excel (.xlsx)')),
-              PopupMenuItem(value: 'csv', child: Text('Export as CSV (.csv)')),
-              PopupMenuDivider(),
-              PopupMenuItem(
-                value: 'convert_links',
-                child: Text('Convert URLs to links'),
-              ),
-            ],
-          ),
-          LzIconButton(
-            icon: Icons.auto_awesome,
-            tooltip: 'Ask AI to edit',
-            accent: true,
-            onPressed: _applying ? null : _openAi,
+          SheetAppBarActions(
+            saving: _saving,
+            applying: _applying,
+            onExport: _export,
+            onConvertLinks: _bulkConvertLinks,
+            onAi: _openAi,
           ),
         ],
       ),
       body: Stack(
         children: [
-          Column(
-            children: [
-              // ── Conflict banner (above everything else) ──────────────────
-              if (_conflict != null)
-                SheetConflictBanner(
-                  onReload: _resolveConflictReload,
-                  onKeepMine: _resolveConflictKeepMine,
-                ),
-              if (sheet != null && sheet.sheetNames.length > 1)
-                SheetTabs(
-                  sheetNames: sheet.sheetNames,
-                  activeIndex: sheet.activeIndex,
-                  onSelect: (i) => setState(() {
-                    _sheet = sheet.withActiveIndex(i);
-                    _sel = null;
-                    _formulaCtrl.clear();
-                  }),
-                ),
-              if (sheet != null && _sel != null)
-                SheetToolbar(
-                  anchorStyle: _anchorStyle,
-                  canUndo: _undo.isNotEmpty,
-                  canRedo: _redo.isNotEmpty,
-                  frozen: sheet.frozen,
-                  hasSelection: _sel != null,
-                  onAction: _handleToolbarAction,
-                  onTextColor: _applyTextColor,
-                  onFillColor: _applyFillColor,
-                  onNumberFormat: _applyNumberFormat,
-                ),
-              if (sheet != null && _sel != null && _sel!.isSingle)
-                LinkChip(
-                  sheet: sheet,
-                  sel: _sel!,
-                  onEdit: _showLinkDialog,
-                  onRemove: () {
-                    if (_sel == null || _sheet == null) return;
-                    _pushUndo();
-                    setState(() {
-                      _sheet = _sheet!.removeLink(
-                        _sel!.anchorRow,
-                        _sel!.anchorCol,
-                      );
-                    });
-                    _scheduleSave();
-                  },
-                  onSnack: _snack,
-                ),
-              if (sheet != null)
-                SheetFormulaBar(
-                  cellRef: _sel != null
-                      ? '${colToLetter(_sel!.anchorCol)}${_sel!.anchorRow + 1}'
-                      : '—',
-                  controller: _formulaCtrl,
-                  focusNode: _formulaFocus,
-                  hasSel: _sel != null,
-                  onChanged: () => setState(() {}),
-                  onSubmitted: _commit,
-                  onApply: _commit,
-                ),
-              if (suggestions.isNotEmpty)
-                SheetFormulaHelper(
-                  suggestions: suggestions,
-                  onTap: _insertFunction,
-                ),
-              Expanded(child: _buildBody()),
-            ],
+          SheetEditorBody(
+            loading: _loading,
+            error: _error,
+            onRetry: _load,
+            sheet: _sheet,
+            sel: _sel,
+            anchorStyle: _anchorStyle,
+            canUndo: _undo.isNotEmpty,
+            canRedo: _redo.isNotEmpty,
+            conflict: _conflict,
+            suggestions: filterFormulas(_catalog, _formulaCtrl.text),
+            formulaCtrl: _formulaCtrl,
+            formulaFocus: _formulaFocus,
+            gridRows: rows,
+            gridCols: cols,
+            onConflictReload: _resolveConflictReload,
+            onConflictKeepMine: _resolveConflictKeepMine,
+            onTabSelect: (i) {
+              setState(() {
+                _sheet = _sheet!.withActiveIndex(i);
+                _sel = null;
+                _formulaCtrl.clear();
+              });
+            },
+            onToolbarAction: _handleToolbarAction,
+            onTextColor: _applyTextColor,
+            onFillColor: _applyFillColor,
+            onNumberFormat: _applyNumberFormat,
+            onEditLink: _showLinkDialog,
+            onRemoveLink: _removeSelectedLink,
+            onSnack: _snack,
+            onFormulaChanged: () => setState(() {}),
+            onFormulaSubmit: _commit,
+            onInsertFunction: _insertFunction,
+            onTapCell: _selectCell,
+            onExtendSelection: _extendSelectionTo,
+            onStartSelection: _startSelectionFrom,
+            onHeaderAction: _onHeaderAction,
           ),
           if (_applying) const AiApplyingOverlay(),
         ],
       ),
     );
+  }
+
+  void _removeSelectedLink() {
+    final sel = _sel;
+    final sheet = _sheet;
+    if (sel == null || sheet == null) return;
+    _pushUndo();
+    setState(() {
+      _sheet = sheet.removeLink(sel.anchorRow, sel.anchorCol);
+    });
+    _scheduleSave();
   }
 
   void _insertFunction(FormulaFn f) {
@@ -910,28 +796,5 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       _formulaCtrl.selection = TextSelection.collapsed(offset: next.length);
     });
     _formulaFocus.requestFocus();
-  }
-
-  Widget _buildBody() {
-    if (_loading) return LzSkeleton.list(count: 5);
-    if (_error != null) return LzErrorState(message: _error!, onRetry: _load);
-    final sheet = _sheet;
-    if (sheet == null) return const SizedBox.shrink();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final (rows, cols) = _gridDims();
-        return SheetEditorGrid(
-          sheet: sheet,
-          rows: rows,
-          cols: cols,
-          sel: _sel,
-          viewportWidth: constraints.maxWidth,
-          onTapCell: _selectCell,
-          onExtendSelection: _extendSelectionTo,
-          onStartSelection: _startSelectionFrom,
-          onHeaderAction: _onHeaderAction,
-        );
-      },
-    );
   }
 }

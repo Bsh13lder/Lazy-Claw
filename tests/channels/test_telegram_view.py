@@ -9,6 +9,7 @@ from lazyclaw.channels.telegram_view import (
     Step,
     chunk_message,
     escape_html,
+    html_to_plain,
     render_error,
     render_footer,
     render_reply,
@@ -27,6 +28,12 @@ def test_escape_html_preserves_anchor_but_escapes_ampersand_in_href():
     out = escape_html('see <a href="http://x/?a=1&b=2">link</a> now')
     assert '<a href="http://x/?a=1&amp;b=2">link</a>' in out
     assert out.startswith("see ")
+
+
+def test_html_to_plain_reverses_escape_and_anchors():
+    html = escape_html('go <a href="http://x/?a=1&b=2">here</a> now & wait')
+    plain = html_to_plain(html)
+    assert plain == "go here (http://x/?a=1&b=2) now & wait"
 
 
 def test_footermeta_and_step_are_frozen():

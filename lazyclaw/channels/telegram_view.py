@@ -43,6 +43,19 @@ def escape_html(text: str) -> str:
     return text
 
 
+def html_to_plain(text: str) -> str:
+    """Reverse ``escape_html`` for the plain-text fallback path.
+
+    Turns ``<a href="u">t</a>`` into ``t (u)`` and unescapes entities, so a
+    Telegram HTML ``BadRequest`` can be retried as readable plain text instead
+    of a dropped message.
+    """
+    text = _ANCHOR_RE.sub(r"\2 (\1)", text)
+    return (
+        text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    )
+
+
 @dataclass(frozen=True)
 class FooterMeta:
     """Inputs for the reply footer."""

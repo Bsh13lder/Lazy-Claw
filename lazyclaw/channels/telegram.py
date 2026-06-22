@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 
 from lazyclaw.channels.base import ChannelAdapter, OutboundMessage
+from lazyclaw.channels import telegram_view as _view
 from lazyclaw.config import Config
 from lazyclaw.permissions.models import SENSITIVE_SKILL_DEFAULTS
 from lazyclaw.runtime.agent import Agent
@@ -91,15 +92,31 @@ def _friendly_model_name(model: str | None) -> str:
     return model.replace("claude-", "").split("-2025")[0][:24]
 
 
-async def _telegram_send_with_retry(coro_factory, max_retries=_SEND_MAX_RETRIES):
+async def _telegram_send_with_retry(
+    coro_factory, max_retries=_SEND_MAX_RETRIES, plain_factory=None,
+):
     """Retry a Telegram send on transient network errors.
 
     *coro_factory* is a zero-arg callable that returns a new awaitable each
     time (lambdas work: ``lambda: bot.send_message(...)``).
+
+    *plain_factory* (optional) is a zero-arg callable used ONCE if the send
+    fails with ``BadRequest`` (malformed HTML/markdown entities → Telegram
+    400). Retrying as plain text means a parse error degrades the message
+    instead of silently dropping it.
     """
     for attempt in range(max_retries):
         try:
             return await coro_factory()
+        except telegram.error.BadRequest as exc:
+            if plain_factory is not None:
+                logger.warning(
+                    "Telegram send BadRequest (%s) — retrying as plain text", exc,
+                )
+                return await _telegram_send_with_retry(
+                    plain_factory, max_retries=max_retries,
+                )
+            raise
         except (telegram.error.NetworkError, telegram.error.TimedOut) as exc:
             if attempt < max_retries - 1:
                 delay = _SEND_RETRY_BASE_DELAY * (attempt + 1)
@@ -132,11 +149,6 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
     text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
     return text
-
-
-def _has_html_links(text: str) -> bool:
-    """Check if text contains HTML anchor tags."""
-    return '<a href="' in text
 
 
 def _build_expense_keyboard(user_id: str) -> "InlineKeyboardMarkup | None":
@@ -180,23 +192,6 @@ def _build_expense_keyboard(user_id: str) -> "InlineKeyboardMarkup | None":
             "📥 Inbox", callback_data=f"expense:inbox:{pending.token}",
         )])
     return InlineKeyboardMarkup(rows)
-
-
-def _prepare_html(text: str) -> str:
-    """Escape HTML entities in text but preserve <a> tags for Telegram HTML mode."""
-    # Extract <a> tags and replace with placeholders
-    _link_re = re.compile(r'<a\s+href="[^"]*">[^<]*</a>')
-    placeholders: list[str] = []
-    def _save_link(m: re.Match) -> str:
-        placeholders.append(m.group(0))
-        return f"\x00LINK{len(placeholders) - 1}\x00"
-    text = _link_re.sub(_save_link, text)
-    # Escape HTML entities in the remaining text
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # Restore <a> tags
-    for i, link in enumerate(placeholders):
-        text = text.replace(f"\x00LINK{i}\x00", link)
-    return text
 
 
 class _TelegramCallback:
@@ -353,22 +348,24 @@ class _TelegramCallback:
         elapsed = int(time.monotonic() - self._started)
 
         if not self._team_specialists:
-            # Simple mode
-            lines = [f"\U0001f504 Working ({elapsed}s)"]
-
+            # Simple mode \u2014 render via the shared view language (\u2699\ufe0f card).
+            steps: list[_view.Step] = []
             if self.current_phase == "thinking":
-                lines.append(
-                    f"\n\U0001f9e0 {self.current_model}, step {self.current_iteration}"
-                )
+                steps.append(_view.Step(
+                    f"{self.current_model}, step {self.current_iteration}", "active",
+                ))
             elif self.current_phase == "tool":
-                lines.append(f"\U0001f527 {self.current_tool}")
+                steps.append(_view.Step(self.current_tool, "active"))
             elif self.current_phase == "streaming":
-                lines.append("\u270d\ufe0f Writing response...")
+                steps.append(_view.Step("writing response", "active"))
             elif self.current_phase == "merging":
-                lines.append("\U0001f500 Merging results...")
+                steps.append(_view.Step("merging results", "active"))
 
-            lines.append(f"\n\U0001f4ca {self.llm_call_count} LLM \u2502 {self.total_tokens:,} tokens")
-            return "\n".join(lines)
+            text = _view.render_status(f"Working ({elapsed}s)", steps)
+            return (
+                f"{text}\n  \U0001f4ca {self.llm_call_count} LLM \u00b7 "
+                f"{self.total_tokens:,} tokens"
+            )
 
         # Team mode — specialist grid
         lines = [f"\U0001f916 Team ({elapsed}s)", ""]
@@ -422,26 +419,12 @@ class _TelegramCallback:
         overload → Claude CLI). Surfacing this prevents the silent "why am
         I suddenly getting Haiku?" confusion.
         """
-        elapsed_s = time.monotonic() - self._started
-        parts = [f"\u2705 {elapsed_s:.1f}s"]
-        if self.llm_call_count:
-            parts.append(f"{self.llm_call_count} LLM")
-        if self.total_tokens:
-            parts.append(f"{self.total_tokens:,} tokens")
-        model_label = _friendly_model_name(self.final_model)
-        if self.fallback_reason:
-            reason_label = {
-                "overloaded": "Sonnet overloaded",
-                "auth": "auth error",
-                "cli_failed": "CLI failed",
-                "local_failed": "local model failed",
-                "worker_failed": "worker failed",
-            }.get(self.fallback_reason, self.fallback_reason)
-            chip = f"\u26a0\ufe0f fallback \u2192 {model_label or '?'} ({reason_label})"
-            parts.append(chip)
-        elif model_label:
-            parts.append(model_label)
-        return " \u2502 ".join(parts)
+        return _view.render_footer(_view.FooterMeta(
+            model_label=_friendly_model_name(self.final_model) or None,
+            tool_count=self.tool_count,
+            elapsed_s=time.monotonic() - self._started,
+            fallback_reason=self.fallback_reason,
+        ))
 
     def _build_error_footer(self) -> str:
         """Build footer for error messages."""
@@ -2051,48 +2034,28 @@ class TelegramAdapter(ChannelAdapter):
             response = _strip_markdown(response)
             footer = callback._build_footer()
 
-            # Use HTML parse_mode when response contains embedded links
-            use_html = _has_html_links(response)
-            if use_html:
-                response = _prepare_html(response)
-            parse_mode = "HTML" if use_html else None
-
-            full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
+            # One consistent render path: HTML everywhere (escape_html keeps
+            # <a href> links and fixes the &-in-href bug), footer reserved by
+            # chunk_message so no chunk can exceed 4096. Each send carries a
+            # plain-text fallback so a parse error degrades instead of dropping.
+            body = _view.escape_html(response)
+            chunks = _view.chunk_message(body, footer, limit=4096)
 
             # Expense-choice keyboard: when add_expense couldn't resolve a
             # project/task unambiguously, it stashed candidates here. Attach
-            # the inline keyboard so the user can pick with one tap.
+            # the inline keyboard (on the last chunk) so the user can pick.
             expense_markup = _build_expense_keyboard(user_id)
 
-            # Split long messages (4096 char limit), footer on last chunk
-            if len(full_response) <= 4096:
+            for i, chunk in enumerate(chunks):
+                markup = expense_markup if i == len(chunks) - 1 else None
                 await _telegram_send_with_retry(
-                    lambda: update.message.reply_text(
-                        full_response, parse_mode=parse_mode,
-                        reply_markup=expense_markup,
-                    )
+                    (lambda c=chunk, m=markup: update.message.reply_text(
+                        c, parse_mode=_view.PARSE_MODE, reply_markup=m,
+                    )),
+                    plain_factory=(lambda c=chunk, m=markup: update.message.reply_text(
+                        _view.html_to_plain(c), reply_markup=m,
+                    )),
                 )
-            else:
-                # Send response chunks, footer on last one
-                resp_chunks = []
-                for i in range(0, len(response), 4000):
-                    resp_chunks.append(response[i : i + 4000])
-                for i, chunk in enumerate(resp_chunks):
-                    if i == len(resp_chunks) - 1:
-                        # Last chunk gets footer + the expense keyboard (if any)
-                        chunk_with_footer = f"{chunk}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
-                        await _telegram_send_with_retry(
-                            lambda c=chunk_with_footer: update.message.reply_text(
-                                c, parse_mode=parse_mode,
-                                reply_markup=expense_markup,
-                            )
-                        )
-                    else:
-                        await _telegram_send_with_retry(
-                            lambda c=chunk: update.message.reply_text(
-                                c, parse_mode=parse_mode,
-                            )
-                        )
             logger.debug("Telegram: reply sent to chat %s", chat_id)
 
         except Exception as e:
@@ -2103,11 +2066,12 @@ class TelegramAdapter(ChannelAdapter):
             await callback._stop_typing()
             await callback._delete_status()
             try:
+                # Friendly card only \u2014 never paste the raw exception into chat.
+                # Full error is in the logger.error above (with traceback).
                 error_footer = callback._build_error_footer()
                 error_msg = (
-                    f"\u274c Something went wrong.\n\n"
-                    f"{str(e)[:200]}\n\n"
-                    f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{error_footer}"
+                    f"{_view.render_error('generic')}\n\n"
+                    f"{_view.DIVIDER}\n{error_footer}"
                 )
                 await _telegram_send_with_retry(
                     lambda: update.message.reply_text(error_msg)

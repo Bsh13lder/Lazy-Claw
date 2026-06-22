@@ -34,6 +34,7 @@ from lazyclaw.browser.action_planner import (
 )
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.channels.telegram_view import render_error as _render_error
 
 logger = logging.getLogger(__name__)
 
@@ -3576,6 +3577,7 @@ class Agent:
         _pivot_nudged: bool = False
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
+        _brain_errored = False  # True when a caught brain failure must end the turn
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
         _tool_call_hit_count: dict[str, int] = {}  # how many times cache returned the same result this turn
         _denied_approvals: set[str] = set()  # "skill_name:args_hash" — user-denied this turn
@@ -4136,21 +4138,19 @@ class Agent:
                                 streamed_content = ""
                                 continue
                         logger.error("Chat failed: %s", exc, exc_info=True)
-                        # Sanitize 429 payloads — never paste raw provider JSON
-                        # into the user-facing message.
+                        # Never paste raw internals (exception text, provider
+                        # JSON) into the user-facing message — emit a friendly
+                        # error card instead. Full error stays in the log above.
                         if _is_rate_limit_exception(exc):
-                            _user_msg = (
-                                "Brain is rate-limited right now. "
-                                "Retry in a minute, or set a fallback model "
-                                "with `/mode` so this re-routes automatically."
-                            )
+                            _user_msg = _render_error("rate_limit")
                         else:
-                            _user_msg = f"Sorry, an error occurred: {exc}"
+                            _user_msg = _render_error("brain")
                         response = _LLMResp(
                             content=_user_msg,
                             model="unknown",
                             tool_calls=[],
                         )
+                        _brain_errored = True
                 else:
                     # No tools — stream for real-time output
                     # Buffer <think>...</think> and <taor_plan>...</taor_plan> — don't show to user
@@ -4268,22 +4268,35 @@ class Agent:
                                 continue
                         logger.error("Streaming failed: %s", exc, exc_info=True)
                         await cb.on_event(AgentEvent("stream_done", "", {}))
+                        # Same friendly-card treatment as the chat path — no raw
+                        # exception text leaks into the user's chat.
                         if _is_rate_limit_exception(exc):
-                            _user_msg = (
-                                "Brain is rate-limited right now. "
-                                "Retry in a minute, or set a fallback model "
-                                "with `/mode` so this re-routes automatically."
-                            )
+                            _user_msg = _render_error("rate_limit")
                         else:
-                            _user_msg = f"Sorry, an error occurred: {exc}"
+                            _user_msg = _render_error("brain")
                         response = _LLMResp(
                             content=_user_msg,
                             model="unknown",
                             tool_calls=[],
                         )
+                        _brain_errored = True
 
                 if response is None:
                     response = _LLMResp(content=streamed_content or "No response received.", model="unknown")
+
+                if _brain_errored:
+                    # A caught brain failure (chat or stream path) already built
+                    # the friendly error card. Return it as the final answer and
+                    # STOP — re-looping just re-sends identical messages for an
+                    # identical failure (the 12-calls-in-70s spiral observed
+                    # 2026-06-22). Rate-limit escalation runs earlier via
+                    # `continue`, so it is unaffected. Mirrors the fast-dispatch
+                    # early-return below (stream_done + done, unregister delegate).
+                    await cb.on_event(AgentEvent("stream_done", "", {}))
+                    await cb.on_event(AgentEvent("done", "", {}))
+                    if _delegate_registered:
+                        self.registry.unregister("delegate")
+                    return response.content
 
                 logger.info(
                     "LLM response: model=%s, content_len=%d, tool_calls=%d",

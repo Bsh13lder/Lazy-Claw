@@ -86,19 +86,29 @@ def test_both_failure_paths_set_the_flag():
     )
 
 
-def test_guard_returns_and_breaks_the_loop():
-    """The guard must early-RETURN on _brain_errored (not fall through to the
-    nudge/iteration logic) — that is what kills the spiral."""
+def test_guard_appends_and_breaks_not_early_return():
+    """The guard must append the error card to all_new_messages and BREAK —
+    NOT early-return. An early return skips the post-loop agent_messages
+    persistence, crashes in the finally on an unbound `content`, and leaks the
+    foreground TeamLead task (regression caught 2026-06-22 adversarial review).
+    """
     src = _agent_source()
-    # The guard sits right after the `if response is None:` convergence point.
     anchor = src.find("if _brain_errored:")
     assert anchor != -1, "Missing the `if _brain_errored:` guard"
-    # Within the guard block, there must be a return of the error card content
-    # before any further loop iteration runs.
     block = src[anchor:anchor + 1400]
-    assert "return response.content" in block, (
-        "The _brain_errored guard must RETURN the error card (terminating the "
-        "turn) — otherwise the loop spirals on repeated brain failures."
+    assert "all_new_messages.append(" in block, (
+        "The guard must append the error card to all_new_messages so the "
+        "post-loop persist block writes the turn to agent_messages."
+    )
+    # The guard must break out of the loop (terminating the spiral) and must
+    # NOT early-return out of the function (which skipped persistence + finally).
+    assert "\n                    break" in block, (
+        "The _brain_errored guard must `break` to flow through the post-loop "
+        "persist + teardown."
+    )
+    assert "return response.content" not in block, (
+        "The guard must NOT early-return — that skips persistence, crashes in "
+        "the finally on unbound `content`, and leaks the foreground task."
     )
 
 

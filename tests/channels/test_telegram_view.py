@@ -78,6 +78,54 @@ def test_chunk_message_no_footer():
     assert "".join(chunks) == body
 
 
+def test_chunk_message_footer_never_dropped_at_boundary():
+    # Regression (#4): a final segment landing in (last_budget, limit] used to
+    # be emitted as a footer-less `limit`-sized chunk, silently dropping the
+    # footer. body=limit with a real footer hits exactly that window.
+    footer = "F" * 10
+    chunks = chunk_message("x" * 100, footer, limit=100)
+    assert all(len(c) <= 100 for c in chunks)
+    assert footer in chunks[-1], "footer was dropped on the boundary case"
+    assert not any(footer in c for c in chunks[:-1])
+    # body fully preserved
+    last_body = chunks[-1].split(f"\n\n{DIVIDER}\n")[0]
+    assert "".join(chunks[:-1]) + last_body == "x" * 100
+
+
+def test_chunk_message_does_not_split_html_entity():
+    # Regression (#3): a cut must not land inside an `&...;` entity.
+    body = ("a" * 78) + "&amp;" + ("b" * 60)
+    chunks = chunk_message(body, "", limit=80)
+    assert all(len(c) <= 80 for c in chunks)
+    assert "".join(chunks) == body
+    for c in chunks:
+        # every '&' in an escaped chunk must keep its terminating ';'
+        idx = c.find("&")
+        while idx != -1:
+            assert ";" in c[idx:idx + 6], f"chunk split an entity: ...{c[idx:idx+6]!r}"
+            idx = c.find("&", idx + 1)
+
+
+def test_chunk_message_does_not_split_anchor_tag():
+    body = ("a" * 70) + '<a href="http://example.com/x">link</a>' + ("b" * 60)
+    chunks = chunk_message(body, "", limit=80)
+    assert all(len(c) <= 80 for c in chunks)
+    assert "".join(chunks) == body
+    # no chunk ends in the middle of a tag (unterminated '<')
+    for c in chunks:
+        lt = c.rfind("<")
+        if lt != -1:
+            assert ">" in c[lt:], f"chunk split a tag: ...{c[lt:]!r}"
+
+
+def test_escape_html_strips_nul_sentinel_collision():
+    # Regression (#5): literal \x00LINK0\x00 in input must not be rewritten
+    # into a saved anchor.
+    out = escape_html('\x00LINK0\x00 and <a href="http://x">y</a>')
+    assert '<a href="http://x">y</a>' in out
+    assert "LINK0" in out  # the literal text survives as text, not a link
+
+
 # ── render_footer / render_reply ─────────────────────────────────────────
 
 def test_render_footer_basic():

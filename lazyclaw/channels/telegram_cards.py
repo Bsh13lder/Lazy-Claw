@@ -44,8 +44,11 @@ def render_reminder_card(task: dict) -> str:
     due = task.get("due_human") or task.get("reminder_human")
     if due:
         meta.append(f"⏰ {due}")
-    nag_count = task.get("nag_count") or 0
-    if nag_count and nag_count > 0:
+    try:
+        nag_count = int(task.get("nag_count") or 0)
+    except (TypeError, ValueError):
+        nag_count = 0
+    if nag_count > 0:
         meta.append(f"reminder #{nag_count + 1}")
 
     if meta:

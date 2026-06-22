@@ -4286,17 +4286,24 @@ class Agent:
 
                 if _brain_errored:
                     # A caught brain failure (chat or stream path) already built
-                    # the friendly error card. Return it as the final answer and
-                    # STOP — re-looping just re-sends identical messages for an
-                    # identical failure (the 12-calls-in-70s spiral observed
-                    # 2026-06-22). Rate-limit escalation runs earlier via
-                    # `continue`, so it is unaffected. Mirrors the fast-dispatch
-                    # early-return below (stream_done + done, unregister delegate).
+                    # the friendly error card. Ship it as the final answer and
+                    # STOP the loop — re-looping just re-sends identical messages
+                    # for an identical failure (the 12-calls-in-70s spiral
+                    # observed 2026-06-22). Rate-limit escalation runs earlier
+                    # via `continue`, so it is unaffected.
+                    #
+                    # Append + break (NOT an early return): this MUST flow through
+                    # the post-loop block so the turn is persisted to
+                    # agent_messages and the finally teardown runs. An early
+                    # return here skipped persistence (dropping both the user
+                    # message and the reply from history), crashed in the finally
+                    # on an unbound `content`, and leaked the foreground TeamLead
+                    # task. Mirrors the normal final-answer exit below.
                     await cb.on_event(AgentEvent("stream_done", "", {}))
-                    await cb.on_event(AgentEvent("done", "", {}))
-                    if _delegate_registered:
-                        self.registry.unregister("delegate")
-                    return response.content
+                    all_new_messages.append(
+                        LLMMessage(role="assistant", content=response.content)
+                    )
+                    break
 
                 logger.info(
                     "LLM response: model=%s, content_len=%d, tool_calls=%d",

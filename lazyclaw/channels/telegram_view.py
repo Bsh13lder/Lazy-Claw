@@ -28,6 +28,9 @@ def escape_html(text: str) -> str:
     Unlike the old ``_prepare_html``, the href value AND the link text are
     escaped (an unescaped ``&`` inside an href made Telegram reject the message).
     """
+    # Strip NUL bytes up front so literal input can never collide with the
+    # \x00LINK sentinel used to stash links during escaping.
+    text = text.replace("\x00", "")
     placeholders: list[str] = []
 
     def _save(m: "re.Match[str]") -> str:
@@ -74,12 +77,33 @@ class Step:
     state: Literal["done", "active", "pending"] = "active"
 
 
+def _safe_cut(s: str, limit: int) -> int:
+    """Return a cut index ``<= limit`` for HTML-escaped ``s`` that does not
+    split an entity (``&...;``) or a tag (``<...>``). Falls back to ``limit``
+    if backing off would make zero progress (a single token longer than limit).
+    """
+    if len(s) <= limit:
+        return len(s)
+    cut = limit
+    # Back out of an unterminated entity: a '&' with no ';' before the cut.
+    amp = s.rfind("&", 0, cut)
+    if amp != -1 and s.find(";", amp, cut) == -1:
+        cut = amp
+    # Back out of an unterminated tag: a '<' with no '>' before the cut.
+    lt = s.rfind("<", 0, cut)
+    if lt != -1 and s.find(">", lt, cut) == -1:
+        cut = min(cut, lt)
+    return cut if cut > 0 else limit
+
+
 def chunk_message(body: str, footer: str, limit: int = 4096) -> list[str]:
     """Split ``body`` into Telegram-safe chunks; append footer to the LAST chunk.
 
-    Reserves the footer block length so the final chunk can never exceed
-    ``limit`` (fixes the old telegram.py overflow where a ~4000-char last chunk
-    plus footer blew past 4096 and Telegram rejected the message).
+    Guarantees: every chunk is ``<= limit``, the footer appears ONLY on the
+    final chunk and is NEVER dropped, and (for HTML-escaped input) no cut lands
+    inside an entity or tag. Fixes the original overflow (a ~4000-char last
+    chunk + footer blew past 4096) AND the footer-drop bug where a final
+    segment landing in ``(last_budget, limit]`` silently lost the footer.
     """
     suffix = f"\n\n{DIVIDER}\n{footer}" if footer else ""
     if len(body) + len(suffix) <= limit:
@@ -96,9 +120,14 @@ def chunk_message(body: str, footer: str, limit: int = 4096) -> list[str]:
         if remaining <= last_budget:
             chunks.append(body[i:] + suffix)
             return chunks
-        # Otherwise emit a full-size intermediate chunk (no footer).
-        chunks.append(body[i : i + limit])
-        i += limit
+        # NOT the final chunk. Cap the slice so it never exceeds limit AND so a
+        # remainder that would otherwise have no footer room is left enough for
+        # a valid final chunk: when only `last_budget < remaining <= limit`
+        # is left, slicing `last_budget` (not limit) reserves footer room.
+        budget = limit if remaining > limit else last_budget
+        cut = _safe_cut(body[i:], budget)
+        chunks.append(body[i : i + cut])
+        i += cut
     return chunks
 
 

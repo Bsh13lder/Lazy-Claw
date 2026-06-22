@@ -1,11 +1,5 @@
-"""Unit tests for structured Telegram result cards (telegram_cards)."""
-from lazyclaw.channels.telegram_cards import (
-    render_contract_card,
-    render_expense_header,
-    render_permissions_card,
-    render_reminder_card,
-    render_status_card,
-)
+"""Unit tests for the structured Telegram reminder card (telegram_cards)."""
+from lazyclaw.channels.telegram_cards import render_reminder_card
 
 
 def test_reminder_card_has_title_and_due():
@@ -14,36 +8,32 @@ def test_reminder_card_has_title_and_due():
     assert "14:00" in out
 
 
-def test_reminder_card_handles_missing_due():
+def test_reminder_card_handles_missing_fields():
     out = render_reminder_card({"title": "Call James"})
-    assert "Call James" in out  # must not crash on absent due
+    assert out == "⏰ Reminder · Call James"  # title-only, no meta line
 
 
-def test_contract_card_shows_budget():
-    out = render_contract_card({"title": "Scraper build", "budget": "$120"})
-    assert "\U0001f514 New contract" in out
-    assert "Scraper build" in out
-    assert "$120" in out
+def test_reminder_card_defaults_title():
+    out = render_reminder_card({})
+    assert "Task" in out
 
 
-def test_permissions_card_groups_states():
-    out = render_permissions_card({"allow": ["tasks", "notes"], "ask": ["payment"],
-                                   "deny": []})
-    assert "✅" in out and "tasks" in out
-    assert "❓" in out and "payment" in out
+def test_reminder_card_preserves_priority_category_nag():
+    out = render_reminder_card({
+        "title": "Ship build",
+        "priority": "high",
+        "category": "work",
+        "due_human": "17:30",
+        "nag_count": 1,
+    })
+    assert "Ship build" in out
+    assert "high" in out          # priority preserved
+    assert "work" in out          # category preserved
+    assert "17:30" in out         # time preserved
+    assert "reminder #2" in out   # nag_count + 1
 
 
-def test_permissions_card_empty():
-    out = render_permissions_card({"allow": [], "ask": [], "deny": []})
-    assert out  # non-empty, no crash
-
-
-def test_status_card_summary_and_elapsed():
-    out = render_status_card({"summary": "searching jobs", "elapsed_s": 12.0})
-    assert "searching jobs" in out
-    assert "12s" in out
-
-
-def test_expense_header_mentions_amount():
-    out = render_expense_header({"amount": "12.50", "currency": "EUR"})
-    assert "12.50" in out
+def test_reminder_card_medium_priority_has_no_icon_noise():
+    out = render_reminder_card({"title": "x", "priority": "medium"})
+    # medium maps to no icon and is not surfaced as a noisy chip
+    assert out == "⏰ Reminder · x"

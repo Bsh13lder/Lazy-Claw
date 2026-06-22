@@ -1780,13 +1780,17 @@ class HeartbeatDaemon:
                 except Exception:
                     logger.warning("Failed to format local time for reminder notification", exc_info=True)
 
-                # Build notification text
-                _pri_icon = {"urgent": "\U0001f534", "high": "\U0001f7e0", "medium": "", "low": "\U0001f7e2"}.get(_priority, "")
-                _cat_tag = f" [{_category}]" if _category else ""
-                _time_tag = f" \u23f0 {_local_time}" if _local_time else ""
-                nag_label = f"\n\U0001f50a Reminder #{nag_count + 1}" if nag_count > 0 else ""
+                # Build notification text \u2014 structured reminder card (keeps
+                # priority / category / time / nag in a clean two-line layout).
+                from lazyclaw.channels.telegram_cards import render_reminder_card
 
-                msg_text = f"\U0001f514 {_pri_icon}{title}{_cat_tag}{_time_tag}{nag_label}"
+                msg_text = render_reminder_card({
+                    "title": title,
+                    "priority": _priority,
+                    "category": _category,
+                    "due_human": _local_time,
+                    "nag_count": nag_count,
+                })
 
                 # Build inline keyboard
                 try:

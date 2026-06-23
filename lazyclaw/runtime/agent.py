@@ -35,6 +35,7 @@ from lazyclaw.browser.action_planner import (
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 from lazyclaw.channels.telegram_view import render_error as _render_error
+from lazyclaw.runtime.consolidation_guidance import is_consolidation_turn
 
 logger = logging.getLogger(__name__)
 
@@ -1206,6 +1207,25 @@ def _specialist_first_tool_allowed(name: str | None) -> bool:
     if n in _QUICK_INLINE_BUDGET_WRITES:
         return False
     return _is_readonly_inspection(name)
+
+
+def _is_inline_mutation(name: str | None) -> bool:
+    """True iff ``name`` is a non-meta tool that actually MUTATES state.
+
+    The thin-router 1-inline-action cap and the specialist-first stall
+    anchor must fire ONLY on a genuine mutation. A read-only inspection
+    (``read_sheet``, ``list_sheets``, channel reads, …) must NOT consume
+    the inline-action budget — otherwise a legitimate read-then-write flow
+    (``read_sheet`` → ``set_cells``) becomes impossible: reading the sheet
+    trips the cap, which then suppresses the write tool and the edit silently
+    dies into a background task (2026-06-23 "Locals" sheet-edit incident).
+    Mirrors the auto-promote read-only exemption (``_is_readonly_inspection``)
+    so the two failsafes stay consistent — a pure read is never "the inline
+    action"; only the first real mutation is.
+    """
+    if not name or name in _META_TOOLS:
+        return False
+    return not _is_readonly_inspection(name)
 
 
 def _specialist_first_filter_pass(
@@ -2501,6 +2521,11 @@ class Agent:
                 permission_checker=self.executor._checker if self.executor else None,
                 callback=cb,
                 team_lead=self._team_lead,
+                # Proactive result delivery: give delegate the lane-queue-backed
+                # runner + chat session so a fire-and-forget specialist's result
+                # consolidates into a follow-up reply (mirrors dispatch_subagents).
+                task_runner=self._task_runner,
+                chat_session_id=chat_session_id,
             )
             self.registry.register(delegate_skill)
             _delegate_registered = True
@@ -3385,6 +3410,16 @@ class Agent:
         # Build context — keep recent messages, compact old ones.
         # Filter error messages so LLM doesn't reference past failures.
         _clean_history = _filter_error_messages(history)
+        # MiniMax router brains mimic their own prior "I only have N tools /
+        # no browser / you do it yourself" narration and re-refuse forever
+        # (2026-06-23 idealista loop). DROP those denial turns so the loop
+        # can't re-seed. Verified: dropping restores delegation; a marker
+        # would just get mimicked. Gated to MiniMax — Claude is unaffected.
+        if _is_minimax_brain:
+            from lazyclaw.runtime.context_journal_filter import (
+                drop_capability_denial_history,
+            )
+            _clean_history = drop_capability_denial_history(_clean_history)
         if needs_tools:
             chat_history = _compact_history(_clean_history, keep_recent=4)
         else:
@@ -3700,7 +3735,14 @@ class Agent:
         _specialist_first = _specialist_first_enabled(
             _os.environ.get(_SPECIALIST_FIRST_BRAIN_ENV),
         )
-        if _specialist_first and needs_tools and tools:
+        # The synthetic brain fan-out consolidation turn carries the full
+        # result set in its prompt and must SYNTHESIZE a summary (or
+        # re-delegate once on failure). It must NOT be forced into
+        # SPECIALIST-FIRST routing — telling a "write a summary" turn to
+        # "delegate everything" made the brain re-delegate/thrash and dump raw
+        # ugly text to Telegram instead of a clean summary (2026-06-23).
+        _is_consolidation = is_consolidation_turn(message)
+        if _specialist_first and needs_tools and tools and not _is_consolidation:
             # One short router note at turn start — same plain-system-
             # message mechanism the cap/AUTO-PROMOTE guidance uses.
             # Injected here (before the loop) so it fires exactly ONCE
@@ -3709,6 +3751,11 @@ class Agent:
                 role="system", content=_SPECIALIST_FIRST_GUIDANCE,
             ))
             logger.info("SPECIALIST-FIRST: router guidance injected")
+        elif _specialist_first and _is_consolidation:
+            logger.info(
+                "SPECIALIST-FIRST: bypassed for consolidation turn "
+                "(brain synthesizes summary, not router)"
+            )
         _promote_iter: int | None = None
         # Thin-router cap engagement tracking — mirrors AUTO-PROMOTE's
         # (_force_dispatch_only, _promote_iter) pair. The cap only narrows
@@ -3942,7 +3989,10 @@ class Agent:
                 # reads stay fast and inline; mutating/domain tools are never
                 # offered — the brain must delegate them. Filter first; the
                 # thin-router cap below then applies to what's left.
-                if _specialist_first and tools:
+                # Consolidation turns are exempt: they synthesize a summary
+                # from the prompt and keep their full toolset (delegate is
+                # needed for the failure re-delegation path).
+                if _specialist_first and tools and not _is_consolidation:
                     _sf_kept = [
                         t for t in tools
                         if _specialist_first_filter_pass(
@@ -3982,7 +4032,7 @@ class Agent:
                 if (
                     _specialist_first
                     and _sf_stall_iter is None
-                    and any(n not in _META_TOOLS for n in _called_tool_names)
+                    and any(_is_inline_mutation(n) for n in _called_tool_names)
                 ):
                     _sf_stall_iter = iteration
 
@@ -3993,7 +4043,7 @@ class Agent:
                     _thin_router
                     and not _force_dispatch_only
                     and tools
-                    and any(n not in _META_TOOLS for n in _called_tool_names)
+                    and any(_is_inline_mutation(n) for n in _called_tool_names)
                 ):
                     _meta_only = [
                         t for t in tools
@@ -4089,10 +4139,42 @@ class Agent:
                 # capture tool calls. MLX streaming drops tool_calls in many cases.
                 # For pure chat (no tools), stream for real-time UX.
                 if tools:
+                    # SDK parity for MiniMax dispatch: the Claude (SDK) brain
+                    # reliably emits the delegate/run_background call when the
+                    # runtime narrows its tools for dispatch; MiniMax M3 instead
+                    # narrates ("want me to open...?") with tool_calls=0. When
+                    # the runtime has ALREADY mandated a dispatch this iteration
+                    # (AUTO-PROMOTE → run_background only, or thin-router →
+                    # meta-only), force tool_choice so M3 physically cannot
+                    # answer in text. Gated to MiniMax brains; Claude/SDK is
+                    # unaffected (it already dispatches + uses a different
+                    # transport). See agent investigation 2026-06-22.
+                    _forced_tc = None
+                    if _is_minimax_brain:
+                        _names_now = {
+                            t.get("function", {}).get("name") for t in tools
+                        }
+                        if _force_dispatch_only and _names_now == {"run_background"}:
+                            _forced_tc = {"type": "tool", "name": "run_background"}
+                        elif (
+                            _thin_router_capped
+                            and _names_now
+                            and _names_now <= _META_TOOLS
+                        ):
+                            # Narrowed to meta-only after one inline action —
+                            # must call a dispatch/meta tool, never bail to text.
+                            _forced_tc = {"type": "any"}
+                    _chat_kwargs = dict(kwargs)
+                    if _forced_tc is not None:
+                        _chat_kwargs["tool_choice"] = _forced_tc
+                        logger.info(
+                            "MINIMAX dispatch-force: tool_choice=%s on %d tools "
+                            "(iter=%d)", _forced_tc, len(tools), iteration,
+                        )
                     try:
                         response = await self.eco_router.chat(
                             messages, user_id=user_id, model=iter_model,
-                            role=_iter_role, **kwargs
+                            role=_iter_role, **_chat_kwargs
                         )
                         if response.content:
                             # Strip <plan>/<taor_plan> tags and <think>... thinking blocks

@@ -356,6 +356,101 @@ def is_stale_provider_error(text: str | None) -> bool:
     return bool(text) and STALE_PROVIDER_ERROR_RE.search(text) is not None
 
 
+# ── Capability-denial refusal-loop drop (2026-06-23) ──────────────────
+#
+# Router brains (esp. MiniMax M2.7 / M3 under LAZYCLAW_SPECIALIST_FIRST_BRAIN
+# + LAZYCLAW_THIN_ROUTER, where the brain's toolset is meta-only by design)
+# sometimes NARRATE a tool-capability self-denial instead of emitting a
+# `delegate` call: "I literally only have 5 tools", "I don't have a browser /
+# sheet writer", "you open it in your Brave yourself". With tool_calls=0 that
+# text is persisted as assistant history; the NEXT turn the brain loads it,
+# mimics the refusal, and re-refuses — a self-perpetuating loop that never
+# executes the user's request (the 2026-06-23 idealista incident: ~9-12 turns,
+# zero tools fired, escalating to insults).
+#
+# Verified live (M3 on api.minimax.io/anthropic, 2026-06-23): with this
+# polluted history present the brain refuses 3/3; DROPPING the denial turns
+# entirely restores delegation 3/3. Replacing with a marker FAILS — the brain
+# mimics the marker text and still refuses (1/3 acted). So we DROP, never mark.
+#
+# Patterns are deliberately narrow (tool-capability self-description shapes) so
+# legitimate "I don't have access to your <password>" clarifying questions and
+# normal replies are NOT dropped. A row that actually called a tool is never
+# dropped (its denial phrasing is just preamble to a real `delegate`).
+_CAPABILITY_DENIAL_RE = re.compile(
+    r"i\s+(?:literally\s+)?only\s+have\s+\d+\s+tool"          # "I only have 5 tools"
+    r"|my\s+(?:entire\s+)?(?:tool\s*set|tool\s+list|tools)\b[^.]{0,40}?(?:\bis\b|\bare\b|:)"  # "my toolset is", "my tools:"
+    r"|(?:i\s+have\s+no|no)\s+browser\b"                      # "no browser" / "I have no browser"
+    r"|i\s+(?:do\s+not|don'?t)\s+have\s+(?:a|an|the|any)?\s*browser\b"  # "I don't have a browser"
+    r"|(?:sheet|csv)\W{0,3}(?:writer|creator|tool|saver)\b"   # "sheet writer/creator/tool"
+    r"|(?:those\s+)?tools?\s+(?:weren'?t|were\s+not)\s+injected"  # "tools weren't injected"
+    r"|not\s+with\s+the\s+tools\s+i\s+have\b"
+    r"|\bdo\s+it\s+(?:manually|yourself)\b"
+    r"|you\s+open\s+\S+[^.]*\bin\s+your\s+(?:brave|browser|chrome)\b"  # "you open X in your Brave"
+    r"|you'?ll\s+need\s+to\s+(?:do|open|handle)\b[^.]*\b(?:manually|yourself)\b",
+    re.IGNORECASE,
+)
+
+
+def is_capability_denial(text: str | None) -> bool:
+    """True when assistant *text* is a tool-capability self-denial refusal.
+
+    Targets the narrow set of self-description shapes that seed the MiniMax
+    router refusal loop ("I only have N tools", "no browser", "do it
+    yourself"). Returns ``False`` for empty text and for generic
+    "I don't have access to <X>" phrasing that is not a tool-capability
+    denial — so clarifying questions are never mistaken for refusals.
+    """
+    return bool(text) and _CAPABILITY_DENIAL_RE.search(text) is not None
+
+
+def drop_capability_denial_history(
+    messages: list | None,
+    *,
+    scan_limit: int | None = _QUARANTINE_SCAN_LIMIT,
+) -> list:
+    """Return a NEW list with capability-denial assistant narration DROPPED.
+
+    Only ``role="assistant"`` rows with NO tool_calls (pure-text refusals)
+    that match :func:`is_capability_denial` within the trailing ``scan_limit``
+    window are removed. Rows that actually called a tool, and every
+    user/tool/system row, pass through untouched.
+
+    DROP (not replace): verified 2026-06-23 that the brain mimics any marker
+    text left in an assistant slot and re-refuses, whereas removing the row
+    entirely restores delegation. Pure: input never mutated, never raises.
+    """
+    if not messages:
+        return list(messages or ())
+    n = len(messages)
+    scan_start = 0 if scan_limit is None else max(0, n - scan_limit)
+    out: list = []
+    dropped = 0
+    for idx, msg in enumerate(messages):
+        try:
+            if idx >= scan_start and getattr(msg, "role", None) == "assistant":
+                has_calls = bool(getattr(msg, "tool_calls", None))
+                content = getattr(msg, "content", None) or ""
+                if not has_calls and is_capability_denial(content):
+                    dropped += 1
+                    if dropped == 1:
+                        logger.info(
+                            "[history-filter] dropped capability-denial assistant "
+                            "message at index=%d: %r", idx, content[:80],
+                        )
+                    else:
+                        logger.debug(
+                            "[history-filter] dropped capability-denial at index=%d",
+                            idx,
+                        )
+                    continue
+        except Exception:
+            # A pathological row must never crash context build.
+            pass
+        out.append(msg)
+    return out
+
+
 def neutralize_stale_errors(messages: list) -> list:
     """Replace stale provider-error content (assistant OR tool rows) with a
     neutral marker so a PAST failure can't be read as a live blocker.

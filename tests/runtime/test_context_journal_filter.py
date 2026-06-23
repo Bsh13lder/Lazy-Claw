@@ -26,9 +26,12 @@ from lazyclaw.lazybrain import journal as lb_journal
 from lazyclaw.lazybrain import store as lb_store
 from lazyclaw.runtime import context_builder
 from lazyclaw.llm.providers.base import LLMMessage
+from lazyclaw.llm.providers.base import ToolCall
 from lazyclaw.runtime.context_journal_filter import (
     STALE_TOOL_ERROR_MARKER,
+    drop_capability_denial_history,
     filter_pinned_for_cache,
+    is_capability_denial,
     is_journal_title,
     is_stale_provider_error,
     neutralize_stale_errors,
@@ -548,3 +551,108 @@ def test_neutralize_does_not_disturb_wikilink_quarantine():
     confab = "> James Blue (9:12 PM): I have a Mac [[computer]]."
     out = neutralize_stale_errors([LLMMessage(role="assistant", content=confab)])
     assert out[0].content == confab  # untouched here; quarantine handles it
+
+
+# ─── Capability-denial refusal-loop drop (2026-06-23 idealista) ───────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Right now I literally only have 5 tools: web search, memory ops.",
+        "My tools: web_search, save_memory, list_memories, run_background.",
+        "My tools right now are web_search and memory.",
+        "My entire toolset is: web_search, memory ops, and delegate.",
+        "No. I don't have a browser and I don't have a sheet writer.",
+        "no browser, no sheet creator. That's not me being lazy.",
+        "I have no browser, no CSV, no sheet tool.",
+        "Those tools weren't injected this turn.",
+        "No. Not with the tools I have right now in this turn.",
+        "You'll need to do the browser part manually.",
+        "So the honest path: you open idealista.com in your Brave yourself.",
+        "Telling you to do it yourself would be the only way.",
+        "I don't have a 'save to local lazyclaw sheet' tool.",
+    ],
+)
+def test_is_capability_denial_positive(text):
+    assert is_capability_denial(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'll dispatch this to the browser specialist now.",
+        "Done — I saved the listings to your sheet.",
+        "I don't have access to your bank password — can you share it?",
+        "Here are the 3 listings I found on Idealista.",
+        "Opening the page in your browser via the specialist.",
+        "I don't have a sheet open yet — which one did you mean?",
+        "",
+        None,
+    ],
+)
+def test_is_capability_denial_negative(text):
+    assert is_capability_denial(text) is False
+
+
+def _asst(content, tool_calls=None):
+    return LLMMessage(role="assistant", content=content, tool_calls=tool_calls)
+
+
+def test_drop_removes_pure_text_denial_turns():
+    msgs = [
+        LLMMessage(role="user", content="find on idealista, fill a sheet"),
+        _asst("I literally only have 5 tools. No browser, no sheet creator. "
+              "You open it in your Brave."),
+        LLMMessage(role="user", content="just do it"),
+        _asst("No. Not with the tools I have right now in this turn."),
+        LLMMessage(role="user", content="please"),
+    ]
+    out = drop_capability_denial_history(msgs)
+    assert [m.role for m in out] == ["user", "user", "user"]
+    # Input list is never mutated.
+    assert len(msgs) == 5
+
+
+def test_drop_keeps_assistant_that_called_a_tool():
+    """A row that actually delegated must survive even if its preamble text
+    contains a denial phrase — it is NOT a refusal."""
+    tc = [ToolCall(id="x", name="delegate", arguments={"specialist": "browser"})]
+    msgs = [_asst("I don't have a browser, so I'm delegating it.", tool_calls=tc)]
+    out = drop_capability_denial_history(msgs)
+    assert len(out) == 1
+    assert out[0].tool_calls is tc
+
+
+def test_drop_leaves_clean_assistant_and_user_rows():
+    msgs = [
+        LLMMessage(role="user", content="hi"),
+        _asst("Hello! How can I help?"),
+        LLMMessage(role="tool", content='{"ok": true}', tool_call_id="t1"),
+    ]
+    out = drop_capability_denial_history(msgs)
+    assert out == msgs  # nothing dropped
+
+
+def test_drop_respects_scan_limit():
+    """A denial OUTSIDE the trailing scan window is preserved (perf guard)."""
+    old_denial = _asst("I only have 5 tools, no browser.")
+    filler = []
+    for _ in range(15):
+        filler += [LLMMessage(role="user", content="x"), _asst("ok")]
+    msgs = [old_denial] + filler
+    out = drop_capability_denial_history(msgs, scan_limit=5)
+    assert any("only have 5 tools" in (m.content or "") for m in out)
+
+
+def test_drop_never_leaves_a_marker_string():
+    """Verified live: a marker gets mimicked. Drop must leave NO placeholder."""
+    msgs = [_asst("no browser, no sheet creator — do it yourself")]
+    out = drop_capability_denial_history(msgs)
+    assert out == []
+    assert all("QUARANTINED" not in (m.content or "") for m in out)
+
+
+def test_drop_empty_and_none_safe():
+    assert drop_capability_denial_history([]) == []
+    assert drop_capability_denial_history(None) == []

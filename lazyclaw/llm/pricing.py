@@ -18,8 +18,10 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     # MiniMax — Token Plan subscription (flat monthly fee, no per-token billing).
     # Plus $20/mo = 4,500 M2.7 req / 5h. Max $50/mo = 15,000 / 5h.
     # Keys cover both capitalizations the registry uses (MiniMax-M2.7 vs minimax-m2.5).
+    "MiniMax-M3": {"input": 0.0, "output": 0.0},
     "MiniMax-M2.7": {"input": 0.0, "output": 0.0},
     "MiniMax-Text-01": {"input": 0.0, "output": 0.0},
+    "minimax-m3": {"input": 0.0, "output": 0.0},
     "minimax-m2.7": {"input": 0.0, "output": 0.0},
     "minimax-m2.7-highspeed": {"input": 0.0, "output": 0.0},
     "minimax-m2.5": {"input": 0.0, "output": 0.0},

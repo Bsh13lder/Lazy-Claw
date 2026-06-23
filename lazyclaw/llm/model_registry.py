@@ -51,13 +51,16 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "fallback": "claude-cli",
     },
     "minimax": {
-        # MiniMax Token Plan ($20/mo Plus = 4,500 M2.7 req / 5h).
-        # M2.7 brain + worker through Anthropic-compat endpoint. Falls
-        # back to Haiku when the rolling 5-hour quota is hit so the
-        # agent never goes dead mid-loop.
-        "brain":    "MiniMax-M2.7",
+        # MiniMax Token Plan ($20/mo Plus). ALL roles on MiniMax — no
+        # dependency on the unfunded Anthropic key. M3 brain (1M ctx,
+        # multimodal, strongest agentic) + M2.7 worker + M2.5 fallback.
+        # Routed through MiniMax's Anthropic-compatible endpoint
+        # (api.minimax.io/anthropic) via AnthropicProvider — the proven
+        # structured-tool path. Vision (M3 image input) will ride the same
+        # endpoint's image blocks (pending live verification with a key).
+        "brain":    "MiniMax-M3",
         "worker":   "MiniMax-M2.7",
-        "fallback": "claude-haiku-4-5-20251001",
+        "fallback": "minimax-m2.5",
     },
 }
 
@@ -263,6 +266,19 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
     # at 1:1 since 2026-03-18 (the "highspeed = 2 requests" clause was dropped).
     # minimax-m2.5 / MiniMax-Text-01 are reachable on the same endpoint but use a
     # separate daily quota — not part of the Token Plan request bucket.
+    "MiniMax-M3": ModelProfile(
+        name="MiniMax-M3",
+        display_name="MiniMax M3",
+        provider="minimax",
+        is_local=False,
+        ram_mb=0,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="🧠",
+        max_context=1000000,   # 1M total (in+out); >512K input doubles PAYG price
+        tool_calling=True,
+        role="brain",
+    ),
     "MiniMax-M2.7": ModelProfile(
         name="MiniMax-M2.7",
         display_name="MiniMax M2.7",

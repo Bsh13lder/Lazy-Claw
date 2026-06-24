@@ -3,8 +3,7 @@
 The mirror image of ``lazyclaw/audio/stt.py`` (speech-to-TEXT): this skill
 takes text and produces an audio file, then delivers it to the user the same
 way the ``send_*`` file-producing skills do — a Telegram document attachment
-when Telegram is configured, with a web-download link always returned as a
-fallback.
+when Telegram is configured, with a clear message when it isn't.
 
 API (official MiniMax intl host, June 2026):
     POST https://api.minimax.io/v1/t2a_v2
@@ -95,8 +94,8 @@ class TextToSpeechSkill(BaseSkill):
             "Convert text into spoken audio via MiniMax TTS and send it to the "
             "user (e.g. 'read this out loud', 'turn this into a voice note', "
             "'narrate this paragraph'). Delivers an mp3 as a Telegram document "
-            "when Telegram is configured; always returns a web download link "
-            "too. Pick a voice_id, speaking speed (0.5-2), model, and format."
+            "when Telegram is configured. Pick a voice_id, speaking speed "
+            "(0.5-2), model, and format."
         )
 
     @property
@@ -344,10 +343,11 @@ class TextToSpeechSkill(BaseSkill):
             )
 
     async def _deliver(self, clean: dict, audio: bytes) -> str:
-        """Deliver the audio file via Telegram, with a web-download fallback.
+        """Deliver the audio file via Telegram.
 
-        Mirrors ``send_sheet``: push the bytes as a Telegram document when
-        configured, and always surface a web download link.
+        Mirrors ``generate_image``: push the bytes as a Telegram document when
+        Telegram is configured; otherwise return a clear message explaining how
+        to configure delivery. (No web download link is produced.)
         """
         from lazyclaw.notifications.push import push_telegram_document
 

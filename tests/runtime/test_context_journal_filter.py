@@ -595,6 +595,42 @@ def test_is_capability_denial_negative(text):
     assert is_capability_denial(text) is False
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 2026-06-24 audit: these legitimate replies WRONGLY matched the
+        # over-broad alternations and were being dropped from history.
+        # 1. Offering automation — NOT a self-denial.
+        "I can do it manually if you want, or automate it",
+        # 2. A "my tools:" PREFIX that introduces an ACTION, not an
+        #    enumeration/count of the toolset.
+        "My tools: I will now search the web for you",
+        # 3. Money-mover SAFETY advice (the user does the payment by design,
+        #    not because the brain lacks a tool).
+        "You'll need to do the payment manually for safety",
+    ],
+)
+def test_is_capability_denial_audit_false_positives(text):
+    """Regression: the three audit-verified false positives must NOT be
+    classified as tool-capability self-denials. Dropping them broke
+    money-mover safety advice + legitimate automation offers."""
+    assert is_capability_denial(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # TRUE denials that MUST still match after the regex is tightened.
+        "I only have 5 tools and none of them open a browser.",
+        "I don't have a browser tool — you'll have to do it yourself.",
+        "No browser, no sheet creator. That's the toolset.",
+        "I can't automate this — the tools weren't injected.",
+    ],
+)
+def test_is_capability_denial_true_denials_still_match(text):
+    assert is_capability_denial(text) is True
+
+
 def _asst(content, tool_calls=None):
     return LLMMessage(role="assistant", content=content, tool_calls=tool_calls)
 

@@ -144,3 +144,66 @@ async def test_create_with_client_id_replay_after_delete_returns_row(cfg):
     # Outbox replay of the same create must not raise / duplicate.
     again = await store.create_sheet(cfg, "u1", "X", sheet_id=cid)
     assert again["id"] == cid
+
+
+# ── Save-after-soft-delete: tombstone-aware UPDATE (no zombie rows) ───────
+
+
+async def test_save_after_soft_delete_raises_not_found(cfg):
+    """A save targeting a tombstoned id must surface as not-found (404),
+    not silently mutate the hidden row. The row must NOT be undeleted."""
+    created = await store.create_sheet(cfg, "u1", "Doomed")
+    sid = created["id"]
+    assert await store.delete_sheet(cfg, "u1", sid) is True
+
+    from lazyclaw.sheets.snapshot import blank_workbook
+
+    with pytest.raises(LookupError):
+        await store.save_sheet(cfg, "u1", "Resurrected", blank_workbook("x"), sheet_id=sid)
+
+    # Still tombstoned + still hidden — no auto-undelete.
+    assert await store.get_sheet(cfg, "u1", sid) is None
+    assert await store.list_sheets(cfg, "u1") == []
+    async with db_session(cfg) as db:
+        cur = await db.execute(
+            "SELECT deleted_at FROM sheets WHERE id = ?", (sid,)
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None, "deleted_at must remain set (no undelete)"
+
+
+# ── Foreign-id probe surfaces a clean not-found, not a PK collision ──────
+
+
+async def test_save_with_foreign_id_raises_not_found(cfg):
+    created = await store.create_sheet(cfg, "u1", "Owned by u1")
+    sid = created["id"]
+    from lazyclaw.sheets.snapshot import blank_workbook
+
+    with pytest.raises(LookupError):
+        await store.save_sheet(cfg, "u2", "Steal", blank_workbook("x"), sheet_id=sid)
+
+
+# ── PUT/autosave (UPDATE path) returns include created_at ────────────────
+
+
+async def test_update_return_includes_created_at(cfg):
+    created = await store.create_sheet(cfg, "u1", "Doc")
+    sid = created["id"]
+    from lazyclaw.sheets.snapshot import blank_workbook
+
+    updated = await store.save_sheet(cfg, "u1", None, blank_workbook("x"), sheet_id=sid)
+    assert updated is not None
+    assert "created_at" in updated
+    assert updated["created_at"] == created["created_at"]
+
+
+async def test_insert_on_missing_id_return_includes_created_at(cfg):
+    """An UPDATE-path INSERT (unknown but free id) also carries created_at."""
+    cid = "44444444-4444-4444-4444-444444444444"
+    from lazyclaw.sheets.snapshot import blank_workbook
+
+    out = await store.save_sheet(cfg, "u1", "Fresh", blank_workbook("x"), sheet_id=cid)
+    assert out is not None
+    assert out["created_at"] == out["updated_at"]

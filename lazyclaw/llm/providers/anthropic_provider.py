@@ -462,6 +462,13 @@ class AnthropicProvider(BaseLLMProvider):
             current_tool: dict | None = None
             # Track input usage from message_start (has cache stats)
             _input_usage: dict = {}
+            # Anthropic's protocol emits one ``message_delta`` per stream, but a
+            # MiniMax compat adapter (or a buggy server) emitting two would
+            # double-count the diagnostics counters AND yield two terminal
+            # done=True chunks — consumers treat the FIRST done as end-of-stream.
+            # This once-guard makes the terminal yield + counter pump fire
+            # exactly once per stream.
+            _emitted_done = False
 
             async for event in stream:
                 if event.type == "message_start":
@@ -512,6 +519,11 @@ class AnthropicProvider(BaseLLMProvider):
                         current_tool = None
 
                 elif event.type == "message_delta":
+                    if _emitted_done:
+                        # A duplicate terminal event — ignore so counters and
+                        # the done=True chunk fire exactly once.
+                        continue
+                    _emitted_done = True
                     usage = None
                     if hasattr(event, "usage") and event.usage:
                         # message_delta has output_tokens; input comes from message_start

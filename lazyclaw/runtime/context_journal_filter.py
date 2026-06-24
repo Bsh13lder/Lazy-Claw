@@ -377,17 +377,32 @@ def is_stale_provider_error(text: str | None) -> bool:
 # legitimate "I don't have access to your <password>" clarifying questions and
 # normal replies are NOT dropped. A row that actually called a tool is never
 # dropped (its denial phrasing is just preamble to a real `delegate`).
+# 2026-06-24 tightening: every alternation requires an inability/denial cue
+# adjacent to the capability. The previous version dropped legitimate replies —
+# money-mover safety advice ("do the payment manually for safety"), automation
+# offers ("I can do it manually ... or automate it"), and any "my tools:" prefix
+# that introduced an ACTION rather than an enumeration of the toolset.
 _CAPABILITY_DENIAL_RE = re.compile(
     r"i\s+(?:literally\s+)?only\s+have\s+\d+\s+tool"          # "I only have 5 tools"
-    r"|my\s+(?:entire\s+)?(?:tool\s*set|tool\s+list|tools)\b[^.]{0,40}?(?:\bis\b|\bare\b|:)"  # "my toolset is", "my tools:"
+    # "my tools:/are/is" ONLY when it enumerates the toolset — the introducer
+    # must be followed (within a short window) by a comma list or an
+    # underscore-bearing tool name. A "my tools: I will ..." action phrase has
+    # neither and is NOT a denial.
+    r"|my\s+(?:entire\s+)?(?:tool\s*set|tool\s+list|tools)\b[^.]{0,12}?(?:\bis\b|\bare\b|:)[^.]{0,40}?[,_]"
     r"|(?:i\s+have\s+no|no)\s+browser\b"                      # "no browser" / "I have no browser"
     r"|i\s+(?:do\s+not|don'?t)\s+have\s+(?:a|an|the|any)?\s*browser\b"  # "I don't have a browser"
+    r"|i\s+(?:can'?t|cannot|can\s+not)\s+(?:automate|do\s+(?:this|that|it))\b"  # "I can't automate this"
     r"|(?:sheet|csv)\W{0,3}(?:writer|creator|tool|saver)\b"   # "sheet writer/creator/tool"
     r"|(?:those\s+)?tools?\s+(?:weren'?t|were\s+not)\s+injected"  # "tools weren't injected"
     r"|not\s+with\s+the\s+tools\s+i\s+have\b"
-    r"|\bdo\s+it\s+(?:manually|yourself)\b"
+    r"|\bdo\s+it\s+yourself\b"                                # full hand-back ("do it yourself")
     r"|you\s+open\s+\S+[^.]*\bin\s+your\s+(?:brave|browser|chrome)\b"  # "you open X in your Brave"
-    r"|you'?ll\s+need\s+to\s+(?:do|open|handle)\b[^.]*\b(?:manually|yourself)\b",
+    # "you'll need to do/open/handle ... yourself" (full hand-back) OR the same
+    # framing that names a tool-capability noun before "manually". Bare
+    # "...manually for safety" with no capability noun is safety advice, NOT a
+    # self-denial, so it must NOT match.
+    r"|you'?ll\s+need\s+to\s+(?:do|open|handle)\b[^.]*\byourself\b"
+    r"|you'?ll\s+need\s+to\s+(?:do|open|handle)\b[^.]*\b(?:browser|sheet|csv|tool|page|site|website|portal)\b[^.]*\bmanually\b",
     re.IGNORECASE,
 )
 

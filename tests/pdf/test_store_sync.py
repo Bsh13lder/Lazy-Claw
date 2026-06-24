@@ -143,3 +143,52 @@ async def test_create_with_client_id_replay_after_delete_returns_row(cfg):
     await store.delete_pdf(cfg, "u1", cid)
     again = await store.create_pdf(cfg, "u1", "x.pdf", make_text_pdf(), pdf_id=cid)
     assert again["id"] == cid
+
+
+# ── Save-after-soft-delete: tombstone-aware UPDATE (no zombie rows) ───────
+
+
+async def test_save_after_soft_delete_raises_not_found(cfg):
+    meta = await store.save_pdf(cfg, "u1", "doomed.pdf", make_text_pdf())
+    pid = meta["id"]
+    assert await store.delete_pdf(cfg, "u1", pid) is True
+
+    with pytest.raises(LookupError):
+        await store.save_pdf(cfg, "u1", "resurrected.pdf", make_text_pdf(), pdf_id=pid)
+
+    assert await store.get_pdf(cfg, "u1", pid) is None
+    assert await store.list_pdfs(cfg, "u1") == []
+    async with db_session(cfg) as db:
+        cur = await db.execute("SELECT deleted_at FROM pdf_files WHERE id = ?", (pid,))
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None, "deleted_at must remain set (no undelete)"
+
+
+# ── Foreign-id probe surfaces a clean not-found, not a PK collision ──────
+
+
+async def test_save_with_foreign_id_raises_not_found(cfg):
+    meta = await store.save_pdf(cfg, "u1", "owned.pdf", make_text_pdf())
+    pid = meta["id"]
+    with pytest.raises(LookupError):
+        await store.save_pdf(cfg, "u2", "steal.pdf", make_text_pdf(), pdf_id=pid)
+
+
+# ── PUT/autosave (UPDATE path) returns include created_at ────────────────
+
+
+async def test_update_return_includes_created_at(cfg):
+    meta = await store.save_pdf(cfg, "u1", "doc.pdf", make_text_pdf())
+    pid = meta["id"]
+    updated = await store.save_pdf(cfg, "u1", "doc.pdf", make_text_pdf(), pdf_id=pid)
+    assert updated is not None
+    assert "created_at" in updated
+    assert updated["created_at"] == meta["created_at"]
+
+
+async def test_insert_on_missing_id_return_includes_created_at(cfg):
+    cid = "44444444-4444-4444-4444-444444444444"
+    out = await store.save_pdf(cfg, "u1", "fresh.pdf", make_text_pdf(), pdf_id=cid)
+    assert out is not None
+    assert out["created_at"] == out["updated_at"]

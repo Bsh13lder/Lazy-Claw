@@ -193,31 +193,70 @@ async def save_pdf(
             "updated_at": now,
         }
 
+    # UPDATE path — read the existing LIVE row first. The ``deleted_at IS NULL``
+    # guard makes the save tombstone-aware: a save targeting a soft-deleted id
+    # is treated as not-found (same surface as list/get), never mutating the
+    # hidden row. We do NOT auto-undelete.
     async with db_session(config) as db:
         cur = await db.execute(
-            "UPDATE pdf_files SET name = ?, payload = ?, pages = ?, updated_at = ? "
-            "WHERE id = ? AND user_id = ?",
-            (name, enc, pages, now, pdf_id, user_id),
+            "SELECT tags, created_at FROM pdf_files "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (pdf_id, user_id),
         )
-        if cur.rowcount == 0:
-            # Caller passed an id that doesn't exist (or isn't theirs) → create.
+        existing = await cur.fetchone()
+
+    if existing is None:
+        # The user-scoped (live-only) SELECT returned nothing.  Before
+        # inserting, check whether this id already exists at all — for a
+        # different user OR as our own tombstone — and surface the same
+        # "not found" surface as a missing PDF to avoid leaking the existence
+        # of foreign/tombstoned rows (and to prevent a PK IntegrityError /
+        # zombie-row resurrection).
+        async with db_session(config) as db:
+            probe = await db.execute(
+                "SELECT 1 FROM pdf_files WHERE id = ?", (pdf_id,)
+            )
+            existing_any = await probe.fetchone()
+        if existing_any is not None:
+            raise LookupError("pdf not found")
+
+        # Unknown but free id (e.g. client-minted) → create.
+        async with db_session(config) as db:
             await db.execute(
                 "INSERT INTO pdf_files (id, user_id, name, payload, pages, tags, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (pdf_id, user_id, name, enc, pages, "[]", now, now),
             )
+            await db.commit()
+        return {
+            "id": pdf_id,
+            "name": name,
+            "pages": pages,
+            "tags": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    stored_tags_raw, stored_created_at = existing
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE pdf_files SET name = ?, payload = ?, pages = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (name, enc, pages, now, pdf_id, user_id),
+        )
         await db.commit()
 
-    # Re-fetch tags to preserve any existing value (save_pdf doesn't change tags)
-    async with db_session(config) as db:
-        cur2 = await db.execute(
-            "SELECT tags FROM pdf_files WHERE id = ? AND user_id = ?",
-            (pdf_id, user_id),
-        )
-        tags_row = await cur2.fetchone()
-    existing_tags = _parse_tags(tags_row[0] if tags_row else None)
+    # Preserve any existing tags (save_pdf doesn't change tags).
+    existing_tags = _parse_tags(stored_tags_raw)
 
-    return {"id": pdf_id, "name": name, "pages": pages, "tags": existing_tags, "updated_at": now}
+    return {
+        "id": pdf_id,
+        "name": name,
+        "pages": pages,
+        "tags": existing_tags,
+        "created_at": stored_created_at,
+        "updated_at": now,
+    }
 
 
 async def _get_meta_row_any_state(

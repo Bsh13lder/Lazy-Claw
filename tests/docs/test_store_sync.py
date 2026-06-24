@@ -134,3 +134,60 @@ async def test_create_with_client_id_replay_after_delete_returns_row(cfg):
     await store.delete_doc(cfg, "u1", cid)
     again = await store.create_doc(cfg, "u1", "X", doc_id=cid)
     assert again["id"] == cid
+
+
+# ── Save-after-soft-delete: tombstone-aware UPDATE (no zombie rows) ───────
+
+
+async def test_save_after_soft_delete_raises_not_found(cfg):
+    created = await store.create_doc(cfg, "u1", "Doomed")
+    did = created["id"]
+    assert await store.delete_doc(cfg, "u1", did) is True
+
+    from lazyclaw.docs.snapshot import blank_document
+
+    with pytest.raises(LookupError):
+        await store.save_doc(cfg, "u1", "Resurrected", blank_document("x"), doc_id=did)
+
+    assert await store.get_doc(cfg, "u1", did) is None
+    assert await store.list_docs(cfg, "u1") == []
+    async with db_session(cfg) as db:
+        cur = await db.execute("SELECT deleted_at FROM docs WHERE id = ?", (did,))
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None, "deleted_at must remain set (no undelete)"
+
+
+# ── Foreign-id probe surfaces a clean not-found, not a PK collision ──────
+
+
+async def test_save_with_foreign_id_raises_not_found(cfg):
+    created = await store.create_doc(cfg, "u1", "Owned by u1")
+    did = created["id"]
+    from lazyclaw.docs.snapshot import blank_document
+
+    with pytest.raises(LookupError):
+        await store.save_doc(cfg, "u2", "Steal", blank_document("x"), doc_id=did)
+
+
+# ── PUT/autosave (UPDATE path) returns include created_at ────────────────
+
+
+async def test_update_return_includes_created_at(cfg):
+    created = await store.create_doc(cfg, "u1", "Doc")
+    did = created["id"]
+    from lazyclaw.docs.snapshot import blank_document
+
+    updated = await store.save_doc(cfg, "u1", None, blank_document("x"), doc_id=did)
+    assert updated is not None
+    assert "created_at" in updated
+    assert updated["created_at"] == created["created_at"]
+
+
+async def test_insert_on_missing_id_return_includes_created_at(cfg):
+    cid = "44444444-4444-4444-4444-444444444444"
+    from lazyclaw.docs.snapshot import blank_document
+
+    out = await store.save_doc(cfg, "u1", "Fresh", blank_document("x"), doc_id=cid)
+    assert out is not None
+    assert out["created_at"] == out["updated_at"]

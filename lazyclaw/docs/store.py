@@ -183,25 +183,31 @@ async def save_doc(
             "updated_at": now,
         }
 
-    # UPDATE path — read existing row for name/tags preservation + conflict check
+    # UPDATE path — read existing row for name/tags preservation + conflict
+    # check. The ``deleted_at IS NULL`` guard makes the save tombstone-aware:
+    # a save targeting a soft-deleted id is treated as not-found (same surface
+    # as list/get), never mutating the hidden row. We do NOT auto-undelete.
     async with db_session(config) as db:
         cur = await db.execute(
-            "SELECT name, tags, updated_at FROM docs WHERE id = ? AND user_id = ?",
+            "SELECT name, tags, updated_at, created_at FROM docs "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (doc_id, user_id),
         )
         existing = await cur.fetchone()
 
     if existing is None:
-        # The user-scoped SELECT returned nothing.  Before inserting, check
-        # whether this id belongs to a different user — if so, surface the
-        # same "not found" surface as a missing doc to avoid leaking the
-        # existence of foreign rows (and to prevent a PK IntegrityError).
+        # The user-scoped (live-only) SELECT returned nothing.  Before
+        # inserting, check whether this id already exists at all — for a
+        # different user OR as our own tombstone — and surface the same
+        # "not found" surface as a missing doc to avoid leaking the existence
+        # of foreign/tombstoned rows (and to prevent a PK IntegrityError /
+        # zombie-row resurrection).
         async with db_session(config) as db:
             probe = await db.execute(
                 "SELECT 1 FROM docs WHERE id = ?", (doc_id,)
             )
-            foreign = await probe.fetchone()
-        if foreign is not None:
+            existing_any = await probe.fetchone()
+        if existing_any is not None:
             raise LookupError("doc not found")
 
         effective_name = _clean_name(name)
@@ -217,10 +223,11 @@ async def save_doc(
             "id": doc_id,
             "name": effective_name,
             "tags": _parse_tags(effective_tags),
+            "created_at": now,
             "updated_at": now,
         }
 
-    stored_name, stored_tags_raw, stored_updated_at = existing
+    stored_name, stored_tags_raw, stored_updated_at, stored_created_at = existing
 
     # Conflict detection (CAS)
     if base_updated_at is not None and base_updated_at != stored_updated_at:
@@ -244,6 +251,7 @@ async def save_doc(
         "id": doc_id,
         "name": effective_name,
         "tags": _parse_tags(effective_tags_raw),
+        "created_at": stored_created_at,
         "updated_at": now,
     }
 

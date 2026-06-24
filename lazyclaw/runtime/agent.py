@@ -1283,6 +1283,46 @@ def _is_inline_mutation(name: str | None) -> bool:
     return not _is_readonly_inspection(name)
 
 
+# Foreground non-meta "work" budget. After this many non-meta tool calls
+# (reads + domain) in one foreground turn, the thin-router cap arms EVEN
+# WITHOUT a mutation — braking the read-heavy inline grind that the
+# mutation-gated cap can't catch (2026-06-24 "check workspace mcp" ran 8
+# inline read iterations; reads never satisfy _is_inline_mutation,
+# AUTO-PROMOTE is off under the prod flags, so nothing braked it). 3 keeps
+# quick 1-2 read answers fully inline; the 4th work call forces delegate.
+_FG_WORK_CALL_BUDGET = 3
+
+
+def _should_thin_router_cap(
+    *,
+    thin_router: bool,
+    force_dispatch_only: bool,
+    has_tools: bool,
+    cap_by_mutation: bool,
+    work_calls: int,
+    budget: int = _FG_WORK_CALL_BUDGET,
+) -> tuple[bool, str | None]:
+    """Decide whether to narrow the brain to meta-only (force delegate).
+
+    Returns ``(should_cap, reason)``. The cap arms when thin-router is on,
+    no dispatch is already forced, tools exist, AND either:
+      * a real mutation has happened this turn (the original 1-inline-action
+        rule), OR
+      * the foreground non-meta work-call ``budget`` is reached — the
+        read-grind brake that implements "anticipate >N tool calls →
+        dispatch" without a mutation.
+
+    Pure: no side effects. ``reason`` is ``None`` when not capping.
+    """
+    if not (thin_router and not force_dispatch_only and has_tools):
+        return False, None
+    if cap_by_mutation:
+        return True, "1 inline action"
+    if work_calls >= budget:
+        return True, f"{work_calls} work calls ≥ budget {budget}"
+    return False, None
+
+
 def _specialist_first_filter_pass(
     name: str | None,
     exempt: set[str] | frozenset[str],
@@ -3767,6 +3807,12 @@ class Agent:
         # promotion on pure-read intents like list_tasks / list_jobs.
         _PROMOTE_BG_AT_ITER = 1
         _called_tool_names: set[str] = set()
+        # Running count of NON-meta tool calls this foreground turn (reads +
+        # domain). Drives the work-call budget brake (_FG_WORK_CALL_BUDGET) so
+        # read-heavy multi-step turns dispatch instead of grinding inline.
+        # NOTE: _called_tool_names is a SET (distinct names) — useless as a
+        # call counter — so this integer is tracked separately.
+        _fg_work_calls = 0
         _promoted_to_bg = False
         # Hard-enforce AUTO-PROMOTE: when set, the next iteration's tool list
         # is narrowed to ONLY ``run_background`` so the brain physically can't
@@ -4094,12 +4140,20 @@ class Agent:
                 # THIN-ROUTER: at most ONE inline domain (non-meta) tool call
                 # per turn; once made, narrow to meta-only so a 2nd domain call
                 # is impossible and the brain MUST delegate. Default off.
-                if (
-                    _thin_router
-                    and not _force_dispatch_only
-                    and tools
-                    and any(_is_inline_mutation(n) for n in _called_tool_names)
-                ):
+                # ALSO arms after _FG_WORK_CALL_BUDGET non-meta calls with NO
+                # mutation — the read-grind brake (reads never satisfy
+                # _is_inline_mutation, so without this a read-heavy turn never
+                # caps; 2026-06-24 "check workspace mcp" 8-iteration grind).
+                _cap_now, _cap_reason = _should_thin_router_cap(
+                    thin_router=_thin_router,
+                    force_dispatch_only=_force_dispatch_only,
+                    has_tools=bool(tools),
+                    cap_by_mutation=any(
+                        _is_inline_mutation(n) for n in _called_tool_names
+                    ),
+                    work_calls=_fg_work_calls,
+                )
+                if _cap_now:
                     _meta_only = [
                         t for t in tools
                         if t.get("function", {}).get("name") in _META_TOOLS
@@ -4107,8 +4161,8 @@ class Agent:
                     if _meta_only and len(_meta_only) != len(tools):
                         logger.info(
                             "THIN-ROUTER: tools narrowed %d → %d (meta-only) "
-                            "after 1 inline action — brain must delegate",
-                            len(tools), len(_meta_only),
+                            "— %s; brain must delegate",
+                            len(tools), len(_meta_only), _cap_reason,
                         )
                         _tr_other = {
                             t.get("function", {}).get("name")
@@ -4531,6 +4585,13 @@ class Agent:
                 # Track tool names this turn for the auto-promote heuristic.
                 for _tc in response.tool_calls or []:
                     _called_tool_names.add(_tc.name)
+                # Count non-meta "work" calls (reads + domain) toward the
+                # foreground work-call budget. Meta/dispatch calls don't count —
+                # the budget brakes grinding, not delegation/search.
+                _fg_work_calls += sum(
+                    1 for _tc in (response.tool_calls or [])
+                    if _tc.name not in _META_TOOLS
+                )
 
                 # If no tools were provided but LLM returned tool_calls
                 # (hallucination from history patterns), ignore them

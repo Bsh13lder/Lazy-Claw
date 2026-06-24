@@ -24,12 +24,15 @@ import '../chat/chat_controller.dart';
 import '../chat/chat_message.dart';
 import '../chat/chat_socket.dart';
 import '../core/config/server_config.dart';
+import '../local_ai/local_ai_providers.dart';
 import '../notifications/local_notifications.dart';
 import '../notifications/notifications_service.dart';
 import '../providers/auth_provider.dart';
 import '../repositories/chat_history_repository.dart';
 import '../ui/ui.dart';
 import 'chat/bg_task_card.dart';
+import 'chat/chat_backend.dart';
+import 'chat/chat_backend_switcher.dart';
 import 'chat/chat_bubble.dart';
 import 'chat/connect_error.dart';
 import 'chat/mode_switcher.dart';
@@ -158,8 +161,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   void _send() {
     final t = _input.text.trim();
-    if (t.isEmpty || !_connected) return;
-    ref.read(chatControllerProvider.notifier).send(t);
+    if (t.isEmpty) return;
+    final backend = ref.read(chatBackendProvider);
+    if (backend != null) {
+      // Local backend: guard on the model being ready (the server's
+      // `_connected` flag is irrelevant on-device).
+      if (ref.read(localAiControllerProvider).phase != LocalAiPhase.ready) {
+        return;
+      }
+      ref.read(localChatControllerProvider.notifier).send(t);
+    } else {
+      if (!_connected) return;
+      ref.read(chatControllerProvider.notifier).send(t);
+    }
     _input.clear();
     // Scroll to bottom after sending.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -186,24 +200,44 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
     });
 
-    final messages = ref.watch(chatControllerProvider);
+    // ── Backend routing seam ───────────────────────────────────────────────
+    // `null` backend = server agent (default); non-null = an on-device model.
+    final backend = ref.watch(chatBackendProvider);
+    final isLocal = backend != null;
+    final ai = isLocal ? ref.watch(localAiControllerProvider) : null;
+    final localReady = ai?.phase == LocalAiPhase.ready;
+
+    final messages = isLocal
+        ? ref.watch(localChatControllerProvider)
+        : ref.watch(chatControllerProvider);
+
+    // Input is enabled when the server socket is connected (server) or the
+    // chosen model is loaded and ready (local).
+    final inputEnabled = isLocal ? localReady : _connected;
 
     return LzScaffold(
       resizeToAvoidBottomInset: true,
-      appBar: _buildAppBar(),
-      banner: _connectError != null
-          ? LzBanner.error(
-              message: _connectError!,
-              safeAreaTop: false,
-              action: TextButton(
-                onPressed: _connect,
-                child: Text(
-                  'Retry',
-                  style: AppText.label.copyWith(color: AppColors.error),
-                ),
-              ),
-            )
-          : null,
+      appBar: _buildAppBar(isLocal: isLocal),
+      banner: isLocal
+          ? (ai?.phase == LocalAiPhase.error
+              ? LzBanner.error(
+                  message: ai?.error ?? 'Failed to load the on-device model.',
+                  safeAreaTop: false,
+                )
+              : null)
+          : _connectError != null
+              ? LzBanner.error(
+                  message: _connectError!,
+                  safeAreaTop: false,
+                  action: TextButton(
+                    onPressed: _connect,
+                    child: Text(
+                      'Retry',
+                      style: AppText.label.copyWith(color: AppColors.error),
+                    ),
+                  ),
+                )
+              : null,
       body: Column(
         children: [
           // ── Chat ⇄ Inbox segment toggle ────────────────────────────────
@@ -230,27 +264,41 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     // Message list
                     Expanded(
                       child: messages.isEmpty
-                          ? _EmptyConversation(connected: _connected)
+                          ? _EmptyConversation(
+                              connected: inputEnabled,
+                              localLoading: isLocal && !localReady,
+                            )
                           : _MessageList(
                               messages: messages,
                               scrollController: _scrollController,
-                              onApprove: (id, ok) => ref
-                                  .read(chatControllerProvider.notifier)
-                                  .respondApproval(id, ok),
-                              onSend: (text) => ref
-                                  .read(chatControllerProvider.notifier)
-                                  .send(text),
+                              // Local chat emits no approvals — no-op when local.
+                              onApprove: isLocal
+                                  ? (_, _) {}
+                                  : (id, ok) => ref
+                                      .read(chatControllerProvider.notifier)
+                                      .respondApproval(id, ok),
+                              onSend: (text) => isLocal
+                                  ? ref
+                                      .read(localChatControllerProvider.notifier)
+                                      .send(text)
+                                  : ref
+                                      .read(chatControllerProvider.notifier)
+                                      .send(text),
                             ),
                     ),
                     // Input bar — shows a stop button while a turn streams.
                     _InputBar(
                       controller: _input,
-                      connected: _connected,
+                      connected: inputEnabled,
+                      localLoading: isLocal && !localReady,
                       streaming:
                           messages.any((m) => m.streaming),
                       onSend: _send,
-                      onCancel: () =>
-                          ref.read(chatControllerProvider.notifier).cancel(),
+                      onCancel: () => isLocal
+                          ? ref
+                              .read(localChatControllerProvider.notifier)
+                              .cancel()
+                          : ref.read(chatControllerProvider.notifier).cancel(),
                     ),
                   ],
                 ),
@@ -265,7 +313,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   // ── App bar with connection dot ────────────────────────────────────────────
 
-  PreferredSizeWidget _buildAppBar() {
+  PreferredSizeWidget _buildAppBar({required bool isLocal}) {
     final dot = _connected
         ? const LzStatusDot.success(size: 9, glow: true)
         : _connectError != null
@@ -286,10 +334,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               visualDensity: VisualDensity.compact,
               onPressed: () => context.push('/activity'),
             ),
-            // Operating-mode switcher (shared agentModeProvider — same state as
-            // the Settings screen). Tappable pill → bottom-sheet picker.
-            const ModeSwitcher(),
+            // Chat backend switcher (Server ⇄ on-device local model).
+            const ChatBackendSwitcher(),
             const SizedBox(width: AppSpacing.sm),
+            // Operating-mode switcher (shared agentModeProvider — same state as
+            // the Settings screen). Server-only: Ask/Plan/Action/Execute don't
+            // apply to the on-device path.
+            if (!isLocal) ...[
+              const ModeSwitcher(),
+              const SizedBox(width: AppSpacing.sm),
+            ],
             dot,
             const SizedBox(width: AppSpacing.xs),
             Text(
@@ -395,11 +449,24 @@ class _MessageList extends StatelessWidget {
 // ── Empty state ────────────────────────────────────────────────────────────
 
 class _EmptyConversation extends StatelessWidget {
-  const _EmptyConversation({required this.connected});
+  const _EmptyConversation({
+    required this.connected,
+    this.localLoading = false,
+  });
   final bool connected;
+
+  /// True when an on-device model is still loading (local backend, not ready).
+  final bool localLoading;
 
   @override
   Widget build(BuildContext context) {
+    if (localLoading) {
+      return const LzEmptyState(
+        icon: Icons.chat_bubble_outline_rounded,
+        title: 'Loading model…',
+        hint: 'The on-device model will be ready in a moment.',
+      );
+    }
     return LzEmptyState(
       icon: Icons.chat_bubble_outline_rounded,
       title: connected ? 'Start a conversation' : 'Connecting to LazyClaw…',
@@ -419,10 +486,15 @@ class _InputBar extends StatefulWidget {
     required this.streaming,
     required this.onSend,
     required this.onCancel,
+    this.localLoading = false,
   });
 
   final TextEditingController controller;
   final bool connected;
+
+  /// True when the local backend is loading its model — the input is disabled
+  /// (`connected == false`) and the hint reads "Loading model…".
+  final bool localLoading;
 
   /// True while an agent turn is streaming — shows the stop button and the
   /// side-note hint (a message sent mid-turn becomes a side-note serverside).
@@ -499,7 +571,9 @@ class _InputBarState extends State<_InputBar> {
                     cursorColor: AppColors.accent,
                     decoration: InputDecoration(
                       hintText: !widget.connected
-                          ? 'Connecting…'
+                          ? (widget.localLoading
+                              ? 'Loading model…'
+                              : 'Connecting…')
                           : widget.streaming
                               ? 'Agent is working — type to add a side-note'
                               : 'Message LazyClaw…',

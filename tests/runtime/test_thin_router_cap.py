@@ -35,10 +35,10 @@ def test_thin_router_narrows_to_meta_only() -> None:
     restricts tools to _META_TOOLS after an inline domain call."""
     assert "THIN-ROUTER" in _AGENT_SRC, "expected a THIN-ROUTER narrowing block"
     idx = _AGENT_SRC.index("THIN-ROUTER")
-    # Window widened 2026-06-24: the work-call budget trigger
-    # (_should_thin_router_cap) added lines between the block header and the
-    # narrow/suppress statements.
-    window = _AGENT_SRC[idx:idx + 2400]
+    # Window widened 2026-06-24: the work-call budget trigger + dispatch-only
+    # narrowing added lines between the block header and the narrow/suppress
+    # statements.
+    window = _AGENT_SRC[idx:idx + 3200]
     assert "_thin_router" in window
     assert "_META_TOOLS" in window
     assert "_suppressed_tool_names" in window, (

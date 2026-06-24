@@ -12,7 +12,9 @@ brain is forced to delegate the rest.
 from __future__ import annotations
 
 from lazyclaw.runtime.agent import (
+    _DISPATCH_ONLY_TOOLS,
     _FG_WORK_CALL_BUDGET,
+    _META_TOOLS,
     _should_thin_router_cap,
 )
 
@@ -20,6 +22,18 @@ from lazyclaw.runtime.agent import (
 def test_budget_is_three():
     """1-2 tool reads stay inline; the 4th work call forces dispatch."""
     assert _FG_WORK_CALL_BUDGET == 3
+
+
+def test_dispatch_only_is_strict_handoff_subset():
+    """The budget cap narrows to ONLY the hand-off tools — no search_tools /
+    web_search / recall, so the brain can't thrash tool-discovery."""
+    assert _DISPATCH_ONLY_TOOLS == {
+        "delegate", "dispatch_subagents", "run_background",
+    }
+    assert _DISPATCH_ONLY_TOOLS < _META_TOOLS  # strict subset
+    assert "search_tools" not in _DISPATCH_ONLY_TOOLS
+    assert "web_search" not in _DISPATCH_ONLY_TOOLS
+    assert "recall_memories" not in _DISPATCH_ONLY_TOOLS
 
 
 def test_no_cap_when_thin_router_off():

@@ -15,9 +15,9 @@ _SRC = (Path(__file__).parent.parent.parent / "lazyclaw" / "runtime" / "agent.py
 def test_cap_sets_engaged_flag() -> None:
     # The cap block must record that it engaged (so the failsafe can key on it).
     idx = _SRC.index("THIN-ROUTER")
-    # Window widened 2026-06-24: the work-call budget trigger added lines
-    # between the block header and the _thin_router_capped assignment.
-    window = _SRC[idx:idx + 2400]
+    # Window widened 2026-06-24: the work-call budget + dispatch-only
+    # narrowing added lines between the block header and _thin_router_capped.
+    window = _SRC[idx:idx + 3200]
     assert "_thin_router_capped" in window, (
         "the cap block must set a cap-engaged flag for the failsafe"
     )

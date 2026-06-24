@@ -185,6 +185,16 @@ _META_TOOLS = frozenset({
     "get_agent_status",
 })
 
+# The hand-off subset of _META_TOOLS. When the foreground WORK-call budget
+# caps a read-grind, the brain is narrowed to ONLY these — dropping
+# search_tools / web_search / recall so it can't keep thrashing tool-discovery
+# and MUST delegate to a worker (2026-06-24 workspace-mail turn: 6×
+# search_tools + a non-existent tool, 13 iterations, 1670-char noise reply
+# instead of a clean delegate-and-summarize).
+_DISPATCH_ONLY_TOOLS = frozenset({
+    "delegate", "dispatch_subagents", "run_background",
+})
+
 # Specialist-first brain (ADR-0005 Phase 5a): behind this flag the brain
 # only ever sees meta tools + read-only inspections — every iteration,
 # including iteration 0. Quick reads ("check my upwork messages") stay
@@ -4144,30 +4154,38 @@ class Agent:
                 # mutation — the read-grind brake (reads never satisfy
                 # _is_inline_mutation, so without this a read-heavy turn never
                 # caps; 2026-06-24 "check workspace mcp" 8-iteration grind).
+                _cap_by_mutation = any(
+                    _is_inline_mutation(n) for n in _called_tool_names
+                )
                 _cap_now, _cap_reason = _should_thin_router_cap(
                     thin_router=_thin_router,
                     force_dispatch_only=_force_dispatch_only,
                     has_tools=bool(tools),
-                    cap_by_mutation=any(
-                        _is_inline_mutation(n) for n in _called_tool_names
-                    ),
+                    cap_by_mutation=_cap_by_mutation,
                     work_calls=_fg_work_calls,
                 )
                 if _cap_now:
+                    # Mutation cap → meta-only (brain may still search/recall
+                    # while delegating the next ACTION). Budget cap (read-grind)
+                    # → DISPATCH-ONLY: drop search_tools/web_search/recall so the
+                    # brain can't keep thrashing tool-discovery and MUST hand off
+                    # to a worker (2026-06-24 workspace-mail 13-iter noise turn).
+                    _narrow_set = _META_TOOLS if _cap_by_mutation else _DISPATCH_ONLY_TOOLS
+                    _narrow_label = "meta-only" if _cap_by_mutation else "dispatch-only"
                     _meta_only = [
                         t for t in tools
-                        if t.get("function", {}).get("name") in _META_TOOLS
+                        if t.get("function", {}).get("name") in _narrow_set
                     ]
                     if _meta_only and len(_meta_only) != len(tools):
                         logger.info(
-                            "THIN-ROUTER: tools narrowed %d → %d (meta-only) "
+                            "THIN-ROUTER: tools narrowed %d → %d (%s) "
                             "— %s; brain must delegate",
-                            len(tools), len(_meta_only), _cap_reason,
+                            len(tools), len(_meta_only), _narrow_label, _cap_reason,
                         )
                         _tr_other = {
                             t.get("function", {}).get("name")
                             for t in tools
-                            if t.get("function", {}).get("name") not in _META_TOOLS
+                            if t.get("function", {}).get("name") not in _narrow_set
                         }
                         _tr_other.discard(None)
                         _suppressed_tool_names |= _tr_other  # type: ignore[arg-type]

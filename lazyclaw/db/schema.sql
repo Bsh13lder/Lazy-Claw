@@ -696,7 +696,8 @@ CREATE TABLE IF NOT EXISTS sheets (
     payload     TEXT NOT NULL,
     tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now'))
+    updated_at  TEXT DEFAULT (datetime('now')),
+    deleted_at  TEXT  -- soft-delete tombstone for offline sync; NULL = live
 );
 CREATE INDEX IF NOT EXISTS idx_sheets_user
 ON sheets(user_id, updated_at);
@@ -713,7 +714,8 @@ CREATE TABLE IF NOT EXISTS docs (
     payload     TEXT NOT NULL,
     tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now'))
+    updated_at  TEXT DEFAULT (datetime('now')),
+    deleted_at  TEXT  -- soft-delete tombstone for offline sync; NULL = live
 );
 CREATE INDEX IF NOT EXISTS idx_docs_user
 ON docs(user_id, updated_at);
@@ -731,7 +733,8 @@ CREATE TABLE IF NOT EXISTS pdf_files (
     pages       INTEGER,
     tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now'))
+    updated_at  TEXT DEFAULT (datetime('now')),
+    deleted_at  TEXT  -- soft-delete tombstone for offline sync; NULL = live
 );
 CREATE INDEX IF NOT EXISTS idx_pdf_files_user
 ON pdf_files(user_id, updated_at);

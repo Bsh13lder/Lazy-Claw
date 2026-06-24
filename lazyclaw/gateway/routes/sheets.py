@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -26,6 +27,7 @@ from lazyclaw.sheets.store import (
     create_sheet,
     delete_sheet,
     get_sheet,
+    get_sheet_changes,
     list_sheets,
     save_sheet,
 )
@@ -42,12 +44,32 @@ def _safe_filename(name: str) -> str:
     base = re.sub(r"[^A-Za-z0-9._ -]", "_", name or "").strip() or "sheet"
     return base[:80]
 
+
+def _validate_client_id(client_id: str | None) -> str | None:
+    """Validate an optional client-supplied id is a real UUID, else 400.
+
+    Offline-first clients mint UUIDs locally so create is idempotent on replay.
+    A non-UUID id is rejected at the boundary rather than landing a junk row.
+    """
+    if client_id is None:
+        return None
+    try:
+        UUID(client_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="id must be a valid UUID")
+    return client_id
+
+
 _config = load_config()
 
 router = APIRouter(prefix="/api/sheets", tags=["sheets"])
 
 
 class CreateSheetBody(BaseModel):
+    # Optional client-minted UUID for offline-first idempotent replay. When
+    # provided and the id already exists for this user, the existing sheet is
+    # returned instead of creating a duplicate.
+    id: str | None = Field(default=None, max_length=128)
     name: str = Field(default="Untitled sheet", max_length=120)
 
 
@@ -84,9 +106,34 @@ async def create_sheet_route(
     body: CreateSheetBody,
     user: User = Depends(get_current_user),
 ):
-    """Create a new blank sheet."""
-    sheet = await create_sheet(_config, user.id, body.name)
+    """Create a new blank sheet.
+
+    Accepts an optional client-minted ``id`` (UUID) for offline-first replay:
+    a second POST with the same id returns the existing sheet (idempotent),
+    never a duplicate.
+    """
+    client_id = _validate_client_id(body.id)
+    sheet = await create_sheet(_config, user.id, body.name, sheet_id=client_id)
     return {"sheet": sheet}
+
+
+@router.get("/changes")
+async def sheet_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 / server timestamp. Only sheets changed after this are "
+            "returned (live + tombstones). Omit for a full sync. Use the `now` "
+            "field from the previous response as the next `since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients (index rows only, no payload).
+
+    Returns ``{sheets: [...live...], deleted: [...ids...], now: "<iso>"}``.
+    """
+    return await get_sheet_changes(_config, user.id, since=since)
 
 
 @router.get("/{sheet_id}")

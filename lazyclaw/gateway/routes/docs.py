@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -24,6 +25,7 @@ from lazyclaw.docs.store import (
     create_doc,
     delete_doc,
     get_doc,
+    get_doc_changes,
     list_docs,
     save_doc,
 )
@@ -39,12 +41,31 @@ def _safe_filename(name: str) -> str:
     return base[:80]
 
 
+def _validate_client_id(client_id: str | None) -> str | None:
+    """Validate an optional client-supplied id is a real UUID, else 400.
+
+    Offline-first clients mint UUIDs locally so create is idempotent on replay.
+    A non-UUID id is rejected at the boundary rather than landing a junk row.
+    """
+    if client_id is None:
+        return None
+    try:
+        UUID(client_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="id must be a valid UUID")
+    return client_id
+
+
 _config = load_config()
 
 router = APIRouter(prefix="/api/docs", tags=["docs"])
 
 
 class CreateDocBody(BaseModel):
+    # Optional client-minted UUID for offline-first idempotent replay. When
+    # provided and the id already exists for this user, the existing doc is
+    # returned instead of creating a duplicate.
+    id: str | None = Field(default=None, max_length=128)
     name: str = Field(default="Untitled doc", max_length=120)
 
 
@@ -77,9 +98,34 @@ async def create_doc_route(
     body: CreateDocBody,
     user: User = Depends(get_current_user),
 ):
-    """Create a new blank doc."""
-    doc = await create_doc(_config, user.id, body.name)
+    """Create a new blank doc.
+
+    Accepts an optional client-minted ``id`` (UUID) for offline-first replay:
+    a second POST with the same id returns the existing doc (idempotent),
+    never a duplicate.
+    """
+    client_id = _validate_client_id(body.id)
+    doc = await create_doc(_config, user.id, body.name, doc_id=client_id)
     return {"doc": doc}
+
+
+@router.get("/changes")
+async def doc_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 / server timestamp. Only docs changed after this are "
+            "returned (live + tombstones). Omit for a full sync. Use the `now` "
+            "field from the previous response as the next `since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients (index rows only, no payload).
+
+    Returns ``{docs: [...live...], deleted: [...ids...], now: "<iso>"}``.
+    """
+    return await get_doc_changes(_config, user.id, since=since)
 
 
 @router.get("/{doc_id}")

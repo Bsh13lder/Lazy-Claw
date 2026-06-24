@@ -41,7 +41,12 @@ def _sheets_aad(user_id: str) -> bytes:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Microsecond-precision ISO-8601 UTC (mirrors tasks store). The offline-sync
+    # /changes feed compares ``updated_at > since`` with a STRICT ``>``; second
+    # granularity would silently drop a change made in the same second as the
+    # last pull. Microseconds make the cursor reliable. CAS only does string
+    # equality on this value, so the format change is transparent there.
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _clean_name(name: str | None) -> str:
@@ -74,11 +79,15 @@ def _parse_tags(raw: str | None) -> list[str]:
 
 
 async def list_sheets(config: Config, user_id: str) -> list[dict[str, Any]]:
-    """Plaintext index: id, name, tags, timestamps (no payload)."""
+    """Plaintext index: id, name, tags, timestamps (no payload).
+
+    Soft-deleted rows (``deleted_at`` not NULL) are filtered out — they only
+    surface through :func:`get_sheet_changes` so offline clients learn of deletes.
+    """
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name, tags, created_at, updated_at FROM sheets "
-            "WHERE user_id = ? ORDER BY updated_at DESC",
+            "WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
             (user_id,),
         )
         data = await rows.fetchall()
@@ -97,12 +106,15 @@ async def list_sheets(config: Config, user_id: str) -> list[dict[str, Any]]:
 async def get_sheet(
     config: Config, user_id: str, sheet_id: str
 ) -> dict[str, Any] | None:
-    """Fetch + decrypt one sheet (payload is the Univer snapshot dict)."""
+    """Fetch + decrypt one sheet (payload is the Univer snapshot dict).
+
+    Soft-deleted rows return ``None`` (same surface as a missing sheet).
+    """
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name, payload, tags, created_at, updated_at "
-            "FROM sheets WHERE id = ? AND user_id = ?",
+            "FROM sheets WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (sheet_id, user_id),
         )
         row = await rows.fetchone()
@@ -236,18 +248,114 @@ async def save_sheet(
 
 
 async def create_sheet(
-    config: Config, user_id: str, name: str
+    config: Config, user_id: str, name: str, sheet_id: str | None = None
 ) -> dict[str, Any]:
-    """Create a new blank sheet and return its index row."""
+    """Create a new blank sheet and return its index row.
+
+    ``sheet_id`` may be a client-minted UUID for offline-first idempotent
+    replay. When provided and a row with that id already exists for this user
+    (including a soft-deleted one), the existing row is returned unchanged —
+    a second POST with the same id never duplicates the sheet.
+    """
     name = _clean_name(name)
-    return await save_sheet(config, user_id, name, blank_workbook(name))
+    if sheet_id is not None:
+        existing = await _get_index_row_any_state(config, user_id, sheet_id)
+        if existing is not None:
+            return existing
+    return await save_sheet(config, user_id, name, blank_workbook(name), sheet_id=sheet_id)
+
+
+async def _get_index_row_any_state(
+    config: Config, user_id: str, sheet_id: str
+) -> dict[str, Any] | None:
+    """Index row (no payload) for ``sheet_id`` regardless of tombstone state.
+
+    Used by the idempotent client-id create path so a replay returns the live
+    row even if it was previously soft-deleted (the row is still there).
+    """
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT id, name, tags, created_at, updated_at FROM sheets "
+            "WHERE id = ? AND user_id = ?",
+            (sheet_id, user_id),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "tags": _parse_tags(row[2]),
+        "created_at": row[3],
+        "updated_at": row[4],
+    }
 
 
 async def delete_sheet(config: Config, user_id: str, sheet_id: str) -> bool:
+    """Soft-delete a sheet: set ``deleted_at`` + bump ``updated_at``; keep the row.
+
+    The row is preserved so the offline-sync /changes delta feed can tell
+    clients the sheet was deleted. ``list_sheets``/``get_sheet`` filter
+    ``deleted_at IS NULL``. Returns True when a live row was found and
+    tombstoned; False when it didn't exist or was already deleted (idempotent).
+    """
+    now = _now()
     async with db_session(config) as db:
         cur = await db.execute(
-            "DELETE FROM sheets WHERE id = ? AND user_id = ?",
-            (sheet_id, user_id),
+            "UPDATE sheets SET deleted_at = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (now, now, sheet_id, user_id),
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+async def get_sheet_changes(
+    config: Config, user_id: str, since: str | None
+) -> dict[str, Any]:
+    """Delta feed for offline-first clients (mirrors tasks ``get_task_changes``).
+
+    Returns rows where ``updated_at > since`` (tombstones included so clients
+    learn of deletes). When ``since`` is None/empty, all rows are returned.
+
+    Response shape::
+
+        {
+            "sheets":  [<live index rows, no payload>],
+            "deleted": [<id, ...>],   # ids of soft-deleted rows
+            "now":     "<server timestamp>",  # use as next `since`
+        }
+    """
+    now_iso = _now()
+    async with db_session(config) as db:
+        if since:
+            cur = await db.execute(
+                "SELECT id, name, tags, created_at, updated_at, deleted_at "
+                "FROM sheets WHERE user_id = ? AND updated_at > ? "
+                "ORDER BY updated_at ASC",
+                (user_id, since),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT id, name, tags, created_at, updated_at, deleted_at "
+                "FROM sheets WHERE user_id = ? ORDER BY updated_at ASC",
+                (user_id,),
+            )
+        rows = await cur.fetchall()
+
+    live: list[dict[str, Any]] = []
+    deleted: list[str] = []
+    for r in rows:
+        if r[5] is not None:
+            deleted.append(r[0])
+        else:
+            live.append(
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "tags": _parse_tags(r[2]),
+                    "created_at": r[3],
+                    "updated_at": r[4],
+                }
+            )
+    return {"sheets": live, "deleted": deleted, "now": now_iso}

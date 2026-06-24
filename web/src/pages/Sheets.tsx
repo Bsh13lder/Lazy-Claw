@@ -18,7 +18,9 @@ import {
   defaultTheme,
   LocaleType,
   mergeLocales,
+  WrapStrategy,
   type FUniver,
+  type IStyleData,
 } from "@univerjs/presets";
 import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
 import UniverPresetSheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
@@ -49,6 +51,38 @@ import DocAiPopover from "../components/DocAiPopover";
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 const AUTOSAVE_MS = 800;
+
+/**
+ * Bug 2 (content overflow) — apply a workbook-level default wrap strategy so
+ * that long cell text wraps INSIDE its cell (and the row auto-grows) instead of
+ * bleeding into empty neighbours and "becoming a mess".
+ *
+ * `defaultStyle` (Univer `IStyleData`) is the broadest fallback in the style
+ * cascade (cell → row → column → worksheet → workbook). Setting `tb` (the
+ * wrap-strategy key) to {@link WrapStrategy.WRAP} only affects cells that have
+ * no explicit wrap of their own, so existing per-cell styling is preserved.
+ *
+ * We inject it into the snapshot *before* `createWorkbook` rather than calling
+ * the `setDefaultStyle` facade afterwards: the facade dispatches a mutation
+ * command that would fire our change listeners and trigger a spurious autosave
+ * on every open. As part of the snapshot, the default instead persists on the
+ * next genuine edit via the normal dirty/scheduleSave path.
+ *
+ * Returns a NEW payload object (immutable) — never mutates the input.
+ */
+function withWrapDefault<T extends { defaultStyle?: unknown }>(payload: T): T {
+  const existing = payload.defaultStyle;
+  // A string defaultStyle references a named style id the user explicitly
+  // chose — leave it untouched rather than clobbering it.
+  if (typeof existing === "string") return payload;
+  const baseStyle = (existing ?? {}) as Partial<IStyleData>;
+  // Respect an existing explicit wrap strategy if one is already set.
+  if (baseStyle.tb !== undefined && baseStyle.tb !== null) return payload;
+  return {
+    ...payload,
+    defaultStyle: { ...baseStyle, tb: WrapStrategy.WRAP },
+  };
+}
 
 /**
  * Sheets — private encrypted spreadsheets backed by the embedded Univer editor.
@@ -141,6 +175,9 @@ export default function Sheets() {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const sheetId = activeId; // capture for the closure / cleanup
+    // Event subscriptions are torn down on unmount/remount so listeners don't
+    // accumulate across the keyed Univer lifecycles.
+    const eventDisposers: Array<{ dispose: () => void }> = [];
 
     const flush = (): Promise<void> => {
       const api = apiRef.current;
@@ -223,15 +260,31 @@ export default function Sheets() {
       dirtyRef.current = false;
 
       univerAPI.createWorkbook(
-        doc.payload as unknown as Parameters<FUniver["createWorkbook"]>[0],
+        withWrapDefault(
+          doc.payload as { defaultStyle?: unknown },
+        ) as unknown as Parameters<FUniver["createWorkbook"]>[0],
       );
-      univerAPI.addEvent(univerAPI.Event.SheetValueChanged, scheduleSave);
+      // Cell value edits fire SheetValueChanged; column/row resize, insert,
+      // delete, hide and reorder fire SheetSkeletonChanged (Bug 1 — those
+      // structural changes were never persisted before). Capture both
+      // disposables so they're cleaned up on unmount/remount.
+      eventDisposers.push(
+        univerAPI.addEvent(univerAPI.Event.SheetValueChanged, scheduleSave),
+        univerAPI.addEvent(univerAPI.Event.SheetSkeletonChanged, scheduleSave),
+      );
     })();
 
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
       flush(); // persist anything edited inside the debounce window
+      for (const d of eventDisposers) {
+        try {
+          d.dispose();
+        } catch {
+          /* listener already gone */
+        }
+      }
       try {
         univerRef.current?.dispose();
       } catch {

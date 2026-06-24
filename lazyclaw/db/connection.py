@@ -225,6 +225,15 @@ async def init_db(config: Config) -> None:
             ("sheets", "tags", "ALTER TABLE sheets ADD COLUMN tags TEXT DEFAULT '[]'"),
             ("docs", "tags", "ALTER TABLE docs ADD COLUMN tags TEXT DEFAULT '[]'"),
             ("pdf_files", "tags", "ALTER TABLE pdf_files ADD COLUMN tags TEXT DEFAULT '[]'"),
+            # Document offline-sync tombstones (feat/flutter-mobile) ───────────
+            # deleted_at: NULL = live, non-NULL = soft-deleted. The mobile app
+            # learns of deletes through each domain's /changes delta feed instead
+            # of rows silently vanishing from list responses. updated_at already
+            # exists on sheets/docs/pdf_files and is bumped on every save, so the
+            # changes feed keys off (updated_at > since) OR a tombstone.
+            ("sheets", "deleted_at", "ALTER TABLE sheets ADD COLUMN deleted_at TEXT"),
+            ("docs", "deleted_at", "ALTER TABLE docs ADD COLUMN deleted_at TEXT"),
+            ("pdf_files", "deleted_at", "ALTER TABLE pdf_files ADD COLUMN deleted_at TEXT"),
         ]
         for table, column, sql in migrations:
             try:

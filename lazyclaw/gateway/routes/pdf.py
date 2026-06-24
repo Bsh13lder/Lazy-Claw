@@ -20,8 +20,9 @@ path wins.
 from __future__ import annotations
 
 import re
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -29,7 +30,14 @@ from lazyclaw.config import load_config
 from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.pdf import ops
-from lazyclaw.pdf.store import delete_pdf, get_pdf, list_pdfs, save_pdf, update_pdf_meta
+from lazyclaw.pdf.store import (
+    create_pdf,
+    delete_pdf,
+    get_pdf,
+    get_pdf_changes,
+    list_pdfs,
+    update_pdf_meta,
+)
 from lazyclaw.runtime.doc_specialist import ai_edit_document
 
 _config = load_config()
@@ -55,6 +63,21 @@ def _safe_filename(name: str) -> str:
     return base[:120]
 
 
+def _validate_client_id(client_id: str | None) -> str | None:
+    """Validate an optional client-supplied id is a real UUID, else 400.
+
+    Offline-first clients mint UUIDs locally so import is idempotent on replay.
+    A non-UUID id is rejected at the boundary rather than landing a junk row.
+    """
+    if client_id is None or client_id == "":
+        return None
+    try:
+        UUID(client_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="id must be a valid UUID")
+    return client_id
+
+
 def _meta(row: dict) -> dict:
     """Strip any bytes from a store row, returning only the index shape."""
     return {
@@ -77,17 +100,44 @@ async def list_pdfs_route(user: User = Depends(get_current_user)):
 @router.post("/import")
 async def import_pdf_route(
     file: UploadFile = File(...),
+    id: str | None = Form(default=None),
     user: User = Depends(get_current_user),
 ):
-    """Import a PDF upload as a new encrypted file."""
+    """Import a PDF upload as a new encrypted file.
+
+    Accepts an optional client-minted ``id`` (UUID form field) for offline-first
+    replay: a second import with the same id returns the existing file
+    (idempotent), never a duplicate.
+    """
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
     if not ops.is_pdf(data):
         raise HTTPException(status_code=400, detail="File is not a PDF")
+    client_id = _validate_client_id(id)
     stem = (file.filename or "document.pdf").rsplit("/", 1)[-1] or "document.pdf"
-    row = await save_pdf(_config, user.id, stem, data)
+    row = await create_pdf(_config, user.id, stem, data, pdf_id=client_id)
     return {"file": _meta(row)}
+
+
+@router.get("/changes")
+async def pdf_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 / server timestamp. Only PDFs changed after this are "
+            "returned (live metadata + tombstones, no bytes). Omit for a full "
+            "sync. Use the `now` field from the previous response as `since`."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients (metadata only, never the bytes).
+
+    Returns ``{files: [...live...], deleted: [...ids...], now: "<iso>"}``.
+    The mobile client fetches each PDF's bytes lazily via ``/api/pdf/{id}/raw``.
+    """
+    return await get_pdf_changes(_config, user.id, since=since)
 
 
 @router.get("/{pdf_id}")

@@ -31,7 +31,12 @@ class ApiClient {
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        // Skip ngrok's free-tier browser-warning interstitial so API calls go
+        // straight through. Harmless on the LAN/gateway path (ignored there).
+        'ngrok-skip-browser-warning': 'true',
+      },
     ));
 
     _dio.interceptors.add(CookieManager(_cookieJar));

@@ -1,9 +1,6 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../constants/app_constants.dart';
 
 class ServerConfig {
-  static const _storage = FlutterSecureStorage();
-
   static String normalizeBaseUrl(String raw) {
     var v = raw.trim();
     if (!v.startsWith('http://') && !v.startsWith('https://')) {
@@ -21,9 +18,19 @@ class ServerConfig {
     return '$ws/ws/chat';
   }
 
-  static Future<String> load() async =>
-      (await _storage.read(key: kSecureBaseUrlKey)) ?? kDefaultBaseUrl;
+  // Locked build: the server URL is baked into [kDefaultBaseUrl] (the ngrok
+  // tunnel) and cannot be changed from inside the app. The app talks to exactly
+  // ONE host so the session cookie + auth cache stay consistent on WiFi and
+  // mobile data alike — no URL flipping, no per-host re-login. load()/save() and
+  // the startup resolver all return that single URL.
+  static Future<String> load() async => kDefaultBaseUrl;
 
-  static Future<void> save(String baseUrl) async =>
-      _storage.write(key: kSecureBaseUrlKey, value: normalizeBaseUrl(baseUrl));
+  static Future<void> save(String baseUrl) async {
+    // no-op: server URL is locked in this build
+  }
+
+  /// Single, fixed gateway used at startup. Always the baked tunnel URL — the
+  /// Mac runs the ngrok service (launchd, auto-restart), so this is reachable on
+  /// WiFi and cellular alike.
+  static Future<String> resolveBaseUrl() async => kDefaultBaseUrl;
 }

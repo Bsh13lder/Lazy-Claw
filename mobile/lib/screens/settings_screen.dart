@@ -6,13 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:workmanager/workmanager.dart';
 
-import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
 import '../core/due_date.dart';
 import '../core/reminder_lead.dart';
 import '../core/self_update.dart';
 import '../notifications/local_notifications.dart';
+import 'settings/keyboard_install.dart';
+import 'local_ai/local_models_screen.dart';
 import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
@@ -29,15 +30,6 @@ import '../repositories/settings_repository.dart';
 import '../ui/ui.dart';
 import 'settings/conflicts_sheet.dart';
 import 'settings/settings_prefs.dart';
-
-// ── Connection-test provider ─────────────────────────────────────────────────
-
-/// Auto-dispose async provider that fires a one-shot ping via [Reachability].
-/// Invalidated by the "Test connection" button or after a URL save.
-final _connectionTestProvider = FutureProvider.autoDispose<bool>((ref) {
-  final reach = ref.watch(reachabilityProvider);
-  return reach.refresh();
-});
 
 // ── Sync-all notifier ────────────────────────────────────────────────────────
 
@@ -131,16 +123,11 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  final _urlController = TextEditingController();
-  bool _savingUrl = false;
-  String? _urlError;
-  bool _testingConnection = false;
   bool _checkingUpdate = false;
 
   @override
   void initState() {
     super.initState();
-    _urlController.text = ref.read(baseUrlProvider);
     // Silently check for a newer build when Settings opens and populate the
     // shared provider so the "Update available" tile can surface itself. We do
     // NOT show the dialog automatically — that would be intrusive on every open.
@@ -159,51 +146,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   void dispose() {
-    _urlController.dispose();
     super.dispose();
-  }
-
-  // ── URL actions ───────────────────────────────────────────────────────────
-
-  Future<void> _saveUrl() async {
-    final raw = _urlController.text.trim();
-    if (raw.isEmpty) {
-      setState(() => _urlError = 'URL cannot be empty');
-      return;
-    }
-    setState(() {
-      _savingUrl = true;
-      _urlError = null;
-    });
-    try {
-      final normalized = ServerConfig.normalizeBaseUrl(raw);
-      await ServerConfig.save(normalized);
-      ref.read(baseUrlProvider.notifier).state = normalized;
-      _urlController.text = normalized;
-      ref.invalidate(_connectionTestProvider);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gateway URL saved')),
-        );
-      }
-    } catch (e) {
-      setState(() => _urlError = e.toString());
-    } finally {
-      if (mounted) setState(() => _savingUrl = false);
-    }
-  }
-
-  Future<void> _testConnection() async {
-    if (_testingConnection) return;
-    setState(() => _testingConnection = true);
-    // Persist the current input before probing.
-    final currentText = _urlController.text.trim();
-    if (currentText != ref.read(baseUrlProvider)) {
-      await _saveUrl();
-    }
-    ref.invalidate(_connectionTestProvider);
-    await ref.read(_connectionTestProvider.future).catchError((_) => false);
-    if (mounted) setState(() => _testingConnection = false);
   }
 
   // ── Logout ────────────────────────────────────────────────────────────────
@@ -361,6 +304,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  // ── AI Keyboard actions ───────────────────────────────────────────────────
+
+  /// Download + install the AI Keyboard companion APK, reusing the same
+  /// `ota_update` flow the app's self-updater uses (just pointed at the
+  /// keyboard endpoint). The OS prompts for "install unknown apps" + Install.
+  Future<void> _installKeyboard() => showKeyboardInstallDialog(context, ref);
+
+  /// Open the Android system keyboard / input-method settings so the user can
+  /// turn the freshly-installed keyboard on. Falls back to a guidance SnackBar
+  /// when the system screen can't be launched.
+  Future<void> _enableKeyboard() async {
+    final opened = await openInputMethodSettings();
+    if (!mounted || opened) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Go to Settings → System → Languages & input → On-screen keyboard '
+          '→ Manage keyboards, then turn on AI Keyboard.',
+        ),
+        duration: Duration(seconds: 6),
+      ),
+    );
+  }
+
   // ── Home-screen widget / shortcut help (MIUI / HyperOS) ────────────────────
 
   /// Doc-only dialog: how to surface the Quick-Capture home-screen widget and
@@ -470,9 +437,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           AppSpacing.vGap(AppSpacing.xl),
 
-          // 5. Android-only battery/autostart help
+          // 5. Android-only battery/autostart help + AI Keyboard installer
           if (Platform.isAndroid) ...[
             _buildAndroidSection(),
+            AppSpacing.vGap(AppSpacing.xl),
+            _buildKeyboardSection(),
+            AppSpacing.vGap(AppSpacing.xl),
+            _buildLocalAiSection(),
             AppSpacing.vGap(AppSpacing.xl),
           ],
 
@@ -538,11 +509,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Widget _buildServerSection({required bool isReachable}) {
-    final connTest = ref.watch(_connectionTestProvider);
     final dot = isReachable
         ? const LzStatusDot.success(glow: true)
         : const LzStatusDot.error();
 
+    // Locked build: the gateway is pinned to the secure remote-access tunnel
+    // (see kDefaultBaseUrl). Shown read-only — it cannot be changed from inside
+    // the app, so the phone only ever talks to this one address.
     return LzSection(
       title: 'Server',
       child: LzCard(
@@ -550,7 +523,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Reachability status dot
             Row(
               children: [
                 dot,
@@ -558,97 +530,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 Text(
                   isReachable ? 'Connected' : 'Unreachable',
                   style: AppText.caption.copyWith(
-                    color:
-                        isReachable ? AppColors.success : AppColors.error,
+                    color: isReachable ? AppColors.success : AppColors.error,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                const Spacer(),
+                const Icon(Icons.lock_outline,
+                    size: 16, color: AppColors.textSecondary),
               ],
             ),
             const SizedBox(height: AppSpacing.md),
-
-            // URL editor
-            TextField(
-              controller: _urlController,
-              style: AppText.body,
-              decoration: InputDecoration(
-                labelText: 'Gateway URL',
-                labelStyle: AppText.caption,
-                hintText: kDefaultBaseUrl,
-                hintStyle: AppText.caption,
-                errorText: _urlError,
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: AppRadii.rMd,
-                  borderSide:
-                      const BorderSide(color: AppColors.borderDefault),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: AppRadii.rMd,
-                  borderSide: const BorderSide(color: AppColors.accent),
-                ),
-                errorBorder: OutlineInputBorder(
-                  borderRadius: AppRadii.rMd,
-                  borderSide: const BorderSide(color: AppColors.error),
-                ),
-                focusedErrorBorder: OutlineInputBorder(
-                  borderRadius: AppRadii.rMd,
-                  borderSide: const BorderSide(color: AppColors.error),
-                ),
-                filled: true,
-                fillColor: AppColors.bgSurfaceHover,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.md,
-                  vertical: AppSpacing.md,
-                ),
-                suffixIcon: _savingUrl
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : IconButton(
-                        icon: const Icon(Icons.save_outlined,
-                            color: AppColors.accent),
-                        tooltip: 'Save URL',
-                        onPressed: _saveUrl,
-                      ),
-              ),
-              keyboardType: TextInputType.url,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => _saveUrl(),
-            ),
-            const SizedBox(height: AppSpacing.md),
-
-            // Test connection
-            LzButton.secondary(
-              label: _testingConnection ? 'Testing…' : 'Test connection',
-              icon: Icons.wifi_tethering,
-              onPressed: _testingConnection ? null : _testConnection,
-              loading: _testingConnection,
-              expand: true,
-            ),
-
-            if (connTest.hasValue) ...[
-              const SizedBox(height: AppSpacing.sm),
-              Text(
-                connTest.value == true
-                    ? 'Ping succeeded — server is reachable.'
-                    : 'Ping failed — check URL and network.',
-                style: AppText.caption.copyWith(
-                  color: connTest.value == true
-                      ? AppColors.success
-                      : AppColors.error,
-                ),
-              ),
-            ],
+            Text('Gateway', style: AppText.caption),
             const SizedBox(height: AppSpacing.xs),
+            SelectableText(kDefaultBaseUrl, style: AppText.body),
+            const SizedBox(height: AppSpacing.sm),
             Text(
-              'Restart the app after changing the server URL.',
-              style: AppText.caption,
+              'Locked to the secure remote-access tunnel for this build.',
+              style: AppText.caption.copyWith(color: AppColors.textSecondary),
             ),
           ],
         ),
@@ -1165,6 +1063,125 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onPressed: _showWidgetHelp,
                 ),
               ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── AI Keyboard section ───────────────────────────────────────────────────
+
+  /// A single, self-contained card for the AI Keyboard companion app: an icon +
+  /// title + one-line subtitle, then two actions — install/update the keyboard
+  /// APK (served over the LAN, reusing the self-update OTA flow) and open the
+  /// system input-method settings to enable it.
+  Widget _buildKeyboardSection() {
+    return LzSection(
+      title: 'AI Keyboard',
+      child: LzCard(
+        color: AppColors.bgSurfaceElevated,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: AppColors.accent.withValues(alpha: 0.16),
+                    borderRadius: AppRadii.rMd,
+                  ),
+                  child: const Icon(Icons.keyboard_alt_outlined,
+                      size: 20, color: AppColors.accent),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('AI Keyboard', style: AppText.label),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Private on-device keyboard — offline grammar & '
+                        'rewrite, 100% on your phone.',
+                        style: AppText.caption,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.md),
+            LzButton.primary(
+              label: 'Install / Update keyboard',
+              icon: Icons.download,
+              onPressed: _installKeyboard,
+              expand: true,
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            LzButton.secondary(
+              label: 'Enable in Android settings',
+              icon: Icons.settings_outlined,
+              onPressed: _enableKeyboard,
+              expand: true,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Local AI (on-device LLM) ──────────────────────────────────────────────
+
+  Widget _buildLocalAiSection() {
+    return LzSection(
+      title: 'Local AI',
+      child: LzCard(
+        color: AppColors.bgSurfaceElevated,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: AppColors.accent.withValues(alpha: 0.16),
+                    borderRadius: AppRadii.rMd,
+                  ),
+                  child: const Icon(Icons.memory_outlined,
+                      size: 20, color: AppColors.accent),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Local AI', style: AppText.label),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Run an AI model on this phone and chat fully offline — '
+                        'nothing leaves the device.',
+                        style: AppText.caption,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.md),
+            LzButton.primary(
+              label: 'Manage local models',
+              icon: Icons.memory,
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LocalModelsScreen()),
+              ),
+              expand: true,
             ),
           ],
         ),

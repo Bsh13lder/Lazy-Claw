@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/auth_provider.dart';
-import 'server_setup_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -25,14 +24,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('LazyClaw'), actions: [
-        IconButton(
-          icon: const Icon(Icons.dns),
-          tooltip: 'Server',
-          onPressed: () => Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const ServerSetupScreen())),
-        ),
-      ]),
+      appBar: AppBar(title: const Text('LazyClaw')),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(children: [

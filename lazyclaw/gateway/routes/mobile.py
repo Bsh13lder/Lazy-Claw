@@ -33,6 +33,14 @@ def _version_path() -> Path:
     return _APK_DIR / "version.json"
 
 
+def _keyboard_apk_path() -> Path:
+    return _APK_DIR / "keyboard.apk"
+
+
+def _keyboard_version_path() -> Path:
+    return _APK_DIR / "keyboard-version.json"
+
+
 @router.get("/version")
 async def mobile_version() -> JSONResponse:
     vp = _version_path()
@@ -50,4 +58,24 @@ async def mobile_apk() -> FileResponse:
         ap,
         media_type="application/vnd.android.package-archive",
         filename="lazyclaw.apk",
+    )
+
+
+@router.get("/keyboard-version")
+async def keyboard_version() -> JSONResponse:
+    vp = _keyboard_version_path()
+    if not vp.exists() or not _keyboard_apk_path().exists():
+        raise HTTPException(status_code=404, detail="No keyboard build published")
+    return JSONResponse(json.loads(vp.read_text()))
+
+
+@router.get("/keyboard-apk")
+async def keyboard_apk() -> FileResponse:
+    ap = _keyboard_apk_path()
+    if not ap.exists():
+        raise HTTPException(status_code=404, detail="No keyboard APK published")
+    return FileResponse(
+        ap,
+        media_type="application/vnd.android.package-archive",
+        filename="ai-keyboard.apk",
     )

@@ -59,7 +59,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   AuthNotifier(
     this._repo, {
     AuthUserCache? cache,
-    this.meTimeout = const Duration(seconds: 5),
+    this.meTimeout = const Duration(seconds: 12),
     String Function()? baseUrl,
   })  : _cache = cache ?? SecureAuthUserCache(),
         // Fail closed: without a real base URL the cache never matches.

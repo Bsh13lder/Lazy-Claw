@@ -42,6 +42,14 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // The phone is arm64. Native-assets (llamadart's llama.cpp .so) get built
+        // for every host architecture and `--target-platform` does NOT filter
+        // them, so without this the APK also ships ~110 MB of useless x86_64
+        // libs. Restrict packaging to arm64-v8a.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {

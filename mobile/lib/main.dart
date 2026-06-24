@@ -16,6 +16,7 @@ import 'notifications/notifications_service.dart';
 import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
 import 'providers/budgets_provider.dart';
+import 'providers/documents_provider.dart';
 import 'providers/notes_provider.dart';
 import 'providers/tasks_provider.dart';
 import 'sync/background_sync.dart';
@@ -37,7 +38,34 @@ Future<void> main() async {
     return true; // handled — keep the app alive
   };
 
-  final baseUrl = await ServerConfig.load();
+  // Replace Flutter's blank/black release error placeholder with a readable,
+  // screenshot-able dump (exception + stack) so a build-time crash is VISIBLE
+  // on-screen instead of a black screen. The error is also recorded by
+  // FlutterError.onError above (Settings → Recent errors). Native crashes
+  // (e.g. a .so SIGSEGV) still bypass this and need `adb logcat`.
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Container(
+        color: const Color(0xFF0d0d0d),
+        alignment: Alignment.topLeft,
+        padding: const EdgeInsets.fromLTRB(16, 64, 16, 16),
+        child: SingleChildScrollView(
+          child: Text(
+            'LazyClaw hit an error — please screenshot this:\n\n'
+            '${details.exceptionAsString()}\n\n'
+            '${details.stack ?? ''}',
+            style: const TextStyle(
+                color: Color(0xFFff9090), fontSize: 12, height: 1.3),
+          ),
+        ),
+      ),
+    );
+  };
+
+  // The app is locked to a single gateway (the ngrok tunnel) so the session
+  // cookie + auth cache stay consistent on WiFi and cellular alike.
+  final baseUrl = await ServerConfig.resolveBaseUrl();
 
   // Open the encrypted offline DB up front so the Tasks tab is instant and
   // works with the backend unreachable. The resilient path retries the file DB
@@ -127,6 +155,9 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
       await ref.read(tasksProvider.notifier).syncNow();
       await ref.read(notesProvider.notifier).syncNow();
       await ref.read(budgetsProvider.notifier).syncNow();
+      // Documents (Sheets/Docs/PDF): drain outbox + pull /changes so web-created
+      // / edited docs surface on mobile and local-first edits push.
+      await syncAllDocuments(ref.read);
       // Catch up on server notifications on each resume + ~30-min tick.
       await pullNotificationsFeed(ref.read(apiClientProvider));
     });

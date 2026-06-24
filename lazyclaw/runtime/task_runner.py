@@ -46,6 +46,7 @@ from lazyclaw.crypto.encryption import encrypt, decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime.consolidation_guidance import (
+    CONSOLIDATION_TURN_PREFIX,
     COHERENCE_LOG_TAG,
     build_failure_guidance,
     draft_claims_success,
@@ -1298,7 +1299,7 @@ class TaskRunner:
         _any_succeeded = any(r.success for r in group.results)
 
         lines = [
-            f"[Background fan-out complete — {len(group.results)} tasks finished]",
+            f"{CONSOLIDATION_TURN_PREFIX} — {len(group.results)} tasks finished]",
             "",
             "Results from background tasks you spawned earlier:",
             "",

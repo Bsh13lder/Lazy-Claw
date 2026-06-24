@@ -93,6 +93,8 @@ class DelegateSkill(BaseSkill):
         permission_checker=None,
         callback: AgentCallback | None = None,
         team_lead: TeamLead | None = None,
+        task_runner=None,
+        chat_session_id: str | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -100,6 +102,11 @@ class DelegateSkill(BaseSkill):
         self._permission_checker = permission_checker
         self._callback = callback
         self._team_lead = team_lead
+        # Lane-queue-backed runner + originating chat session — used to
+        # consolidate the background specialist's result into a follow-up
+        # reply on the right channel (None → legacy background_done path).
+        self._task_runner = task_runner
+        self._chat_session_id = chat_session_id
 
     # Specialists run multi-step browser loops — 60s default is too short
     timeout = 300
@@ -240,6 +247,27 @@ class DelegateSkill(BaseSkill):
                 },
             ))
 
+        # Proactive result delivery: register a consolidation fan-out group so
+        # the specialist's result is delivered to the originating channel when
+        # it settles — the SAME machinery dispatch_subagents/run_background use.
+        # A bare delegate previously fired background_done on the foreground
+        # turn's already-exited callback, so a Telegram user waiting on the
+        # result got nothing (2026-06-23 "Locals" sheet: edit completed, report
+        # orphaned). No-op (→ legacy background_done path) when no lane-queue-
+        # backed runner is wired (e.g. CLI / tests).
+        _tr = self._task_runner
+        _fanout_group_id: str | None = None
+        if _tr is not None and getattr(_tr, "_lane_queue", None) is not None:
+            _fanout_group_id = uuid.uuid4().hex[:12]
+            try:
+                _tr.register_subagent_fanout(
+                    _fanout_group_id, user_id, [task_id],
+                    self._callback, self._chat_session_id,
+                )
+            except Exception:
+                logger.debug("delegate fanout register failed", exc_info=True)
+                _fanout_group_id = None
+
         # Wrap callback so per-tool events also drive team_lead.update_step,
         # surfacing the specialist's current tool in the activity panel.
         wrapped_callback = self._callback
@@ -303,6 +331,17 @@ class DelegateSkill(BaseSkill):
                         self._team_lead.fail(task_id, error=str(exc))
                     except Exception:
                         logger.debug("team_lead.fail crashed", exc_info=True)
+                # Settle the consolidation fan-out (failure) so its synthetic
+                # turn fires and tells the user; else fall through to the legacy
+                # background_failed terminal event below.
+                if _fanout_group_id is not None and _tr is not None:
+                    try:
+                        _tr.record_subagent_result(
+                            task_id, name=spec.display_name,
+                            success=False, error=str(exc),
+                        )
+                    except Exception:
+                        logger.debug("delegate fanout record (crash) failed", exc_info=True)
                 if self._callback:
                     try:
                         await self._callback.on_event(AgentEvent(
@@ -314,15 +353,16 @@ class DelegateSkill(BaseSkill):
                                 "error": str(exc),
                             },
                         ))
-                        await self._callback.on_event(AgentEvent(
-                            "background_failed",
-                            f"Specialist {spec.display_name} failed",
-                            {
-                                "task_id": task_id,
-                                "name": spec.name,
-                                "error": str(exc),
-                            },
-                        ))
+                        if _fanout_group_id is None:
+                            await self._callback.on_event(AgentEvent(
+                                "background_failed",
+                                f"Specialist {spec.display_name} failed",
+                                {
+                                    "task_id": task_id,
+                                    "name": spec.name,
+                                    "error": str(exc),
+                                },
+                            ))
                     except Exception:
                         logger.debug("delegate-bg done event failed", exc_info=True)
                 return
@@ -386,6 +426,27 @@ class DelegateSkill(BaseSkill):
                         "team_lead complete/fail crashed", exc_info=True,
                     )
 
+            # Proactive delivery: when a consolidation fan-out is registered,
+            # settle it with the specialist's result — TaskRunner fires ONE
+            # synthetic brain turn that delivers it to the originating channel
+            # (the path run_background/dispatch_subagents already use). Without
+            # this, delegate's terminal background_done fired on the foreground
+            # turn's already-dead callback → a Telegram user waiting on the
+            # result got nothing (2026-06-23 "Locals" sheet: edit done, report
+            # orphaned).
+            if _fanout_group_id is not None and _tr is not None:
+                try:
+                    _tr.record_subagent_result(
+                        task_id,
+                        name=spec.display_name,
+                        success=result.success,
+                        result=result.result or "",
+                        error=result.error or "",
+                        duration_ms=result.duration_ms,
+                    )
+                except Exception:
+                    logger.debug("delegate fanout record failed", exc_info=True)
+
             if not self._callback:
                 return
             try:
@@ -400,31 +461,33 @@ class DelegateSkill(BaseSkill):
                         "error": result.error,
                     },
                 ))
-                # Fire bg terminal event so chat_ws routes the result
-                # through the same surface as run_background. The brain
-                # absorbs it as a side-note on its next turn.
-                if result.success:
-                    await self._callback.on_event(AgentEvent(
-                        "background_done",
-                        f"Specialist {spec.display_name} completed",
-                        {
-                            "task_id": task_id,
-                            "name": spec.name,
-                            "result": result.result or "",
-                            "duration_ms": result.duration_ms,
-                            "tools_used": list(result.tools_used),
-                        },
-                    ))
-                else:
-                    await self._callback.on_event(AgentEvent(
-                        "background_failed",
-                        f"Specialist {spec.display_name} failed",
-                        {
-                            "task_id": task_id,
-                            "name": spec.name,
-                            "error": result.error or "",
-                        },
-                    ))
+                # Legacy terminal events ONLY when not consolidating — else the
+                # fan-out's synthetic delivery turn would double-send. (chat_ws
+                # routes these to the bg surface; the brain absorbs them on its
+                # next turn.)
+                if _fanout_group_id is None:
+                    if result.success:
+                        await self._callback.on_event(AgentEvent(
+                            "background_done",
+                            f"Specialist {spec.display_name} completed",
+                            {
+                                "task_id": task_id,
+                                "name": spec.name,
+                                "result": result.result or "",
+                                "duration_ms": result.duration_ms,
+                                "tools_used": list(result.tools_used),
+                            },
+                        ))
+                    else:
+                        await self._callback.on_event(AgentEvent(
+                            "background_failed",
+                            f"Specialist {spec.display_name} failed",
+                            {
+                                "task_id": task_id,
+                                "name": spec.name,
+                                "error": result.error or "",
+                            },
+                        ))
             except Exception:
                 logger.debug("delegate-bg terminal event failed", exc_info=True)
 
@@ -438,6 +501,18 @@ class DelegateSkill(BaseSkill):
         # Return immediately — foreground turn is now free for the next
         # user message. The specialist's result lands as a side-note on
         # the brain's next turn (via chat_ws subagent-terminal pump).
+        if _fanout_group_id is not None:
+            # Consolidation is wired: the result is delivered automatically
+            # when the specialist settles — the brain must NOT promise to do
+            # it "on my next reply" (there may be no next user turn).
+            return (
+                f"Started {spec.display_name} in the background. When it "
+                f"finishes, its result is delivered to the user automatically "
+                f"as a follow-up reply — you do NOT need to chase it. For THIS "
+                f"turn, give a brief honest status (e.g. 'On it — "
+                f"{spec.display_name} is working; I'll send the result "
+                f"shortly'). You can keep typing in the meantime."
+            )
         return (
             f"Started {spec.display_name} in the background. The "
             f"specialist is working on your task — I'll fold the result "

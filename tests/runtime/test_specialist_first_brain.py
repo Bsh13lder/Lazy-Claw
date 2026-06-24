@@ -300,15 +300,21 @@ def test_sf_stall_anchor_initialized_per_turn() -> None:
     assert "_sf_stall_iter: int | None = None" in _SRC
 
 
-def test_sf_stall_anchor_armed_on_first_non_meta_call() -> None:
-    """Mirror the cap engagement exactly: anchor at the top of the
-    iteration after the first non-meta call was seen."""
+def test_sf_stall_anchor_armed_on_first_inline_mutation() -> None:
+    """Anchor at the top of the iteration after the first inline MUTATION.
+
+    (2026-06-23 sheet-edit fix) Read-only inspections no longer arm the
+    anchor — only a genuine mutation does — so a read-then-write flow
+    (``read_sheet`` → ``set_cells``) stays inline. The condition keys on
+    ``_is_inline_mutation``, not the old bare ``n not in _META_TOOLS`` which
+    wrongly counted reads.
+    """
     idx = _SRC.index("_sf_stall_iter = iteration")
     head = _SRC.rindex("if (", 0, idx)
     cond = _SRC[head:idx]
     assert "_specialist_first" in cond
     assert "_sf_stall_iter is None" in cond
-    assert "any(n not in _META_TOOLS for n in _called_tool_names)" in cond
+    assert "any(_is_inline_mutation(n) for n in _called_tool_names)" in cond
 
 
 def test_failsafe_arms_under_specialist_first_alone() -> None:

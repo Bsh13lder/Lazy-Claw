@@ -18,6 +18,26 @@ from __future__ import annotations
 
 import re
 
+# Stable prefix of the synthetic consolidation-turn message that
+# task_runner._consolidate enqueues. Single-sourced here so the producer
+# (task_runner) and the detector (agent.py routing) can never drift apart —
+# drift would silently re-break the SPECIALIST-FIRST exemption below.
+CONSOLIDATION_TURN_PREFIX = "[Background fan-out complete"
+
+
+def is_consolidation_turn(message: str | None) -> bool:
+    """True if ``message`` is the synthetic brain fan-out consolidation turn.
+
+    Such turns carry the full result set in the prompt and must SYNTHESIZE a
+    summary (or re-delegate once on failure) — they must NOT be forced into
+    SPECIALIST-FIRST routing, which would tell the brain to delegate every-
+    thing and produce raw thrash instead of a clean summary (2026-06-23).
+    """
+    if not message:
+        return False
+    return message.lstrip().startswith(CONSOLIDATION_TURN_PREFIX)
+
+
 FAILURE_GUIDANCE_HEADER = "[ORCHESTRATOR GUIDANCE — SUBAGENT FAILURE]"
 
 # Log tag for the observation-only no-false-✅ guard in task_runner.

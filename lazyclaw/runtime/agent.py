@@ -599,6 +599,59 @@ _F1_QUOTE_LINE_RE: re.Pattern[str] = re.compile(r"^>\s+\S", re.MULTILINE)
 _F1_DRAFT_QUOTE_THRESHOLD_CHARS: int = 280
 
 
+# Channel-read ERROR envelopes. When a channel-read tool FAILS (auth
+# error, not-logged-in, empty inbox, traceback) it returns an error string,
+# NOT messages — so there is nothing to quote and F1 must NOT demand a
+# `> sender (ts):` block (else it loops unsatisfiably). 2026-06-24 11:15
+# incident: email_read -> "[AUTHENTICATIONFAILED] Invalid credentials" ->
+# F1 forced 2 retries -> shipped [F1-accepted-degraded] after a 7-iteration
+# loop. Patterns are SPECIFIC (anchored "Error in <tool>:" + explicit
+# channel error markers) so a successful read that merely mentions one of
+# these words in message text is not mis-classified.
+# Anchored at the START — an error ENVELOPE (the whole result IS the error),
+# never an error WORD mid-message. "Vato: my login failed but it works now"
+# is quotable; "Login expired — re-authenticate" as the whole result is not.
+_TOOL_ERROR_ENVELOPE_RE = re.compile(
+    r"^\s*(?:"
+    r"Error in \w+:|Error:|\[ERROR\]|"
+    r"Traceback \(most recent call last\)|"
+    r"No conversations? found|"
+    r"No (?:new )?messages? (?:found|available)|"
+    r"Not logged in|"
+    r"Login (?:failed|required|expired)|"
+    r"Could not connect|"
+    r"Session (?:expired|invalid)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Structured error tokens that NEVER appear in human message text — safe to
+# match anywhere in the result (the email auth error wraps one of these).
+_TOOL_ERROR_TOKEN_RE = re.compile(
+    r"\[AUTHENTICATION\s*FAILED\]|\binvalid x-api-key\b|authentication_error",
+    re.IGNORECASE,
+)
+
+
+def _tool_result_has_quotable_content(tr: str | None) -> bool:
+    """True iff ``tr`` carries quotable message content (not an error/empty
+    envelope).
+
+    F1 only demands a verbatim quote block when at least one channel read
+    actually returned content. A read that errored out (auth failure,
+    empty inbox, traceback) has nothing to quote, so requiring quotes would
+    loop forever. Conservative: error-WORD matches are anchored to the start
+    of the result (:data:`_TOOL_ERROR_ENVELOPE_RE`) so an error word inside a
+    real message doesn't mis-classify it; only unambiguous structured tokens
+    (:data:`_TOOL_ERROR_TOKEN_RE`) match anywhere.
+    """
+    if not tr or not tr.strip():
+        return False
+    if _TOOL_ERROR_ENVELOPE_RE.search(tr) is not None:
+        return False
+    return _TOOL_ERROR_TOKEN_RE.search(tr) is None
+
+
 def _check_f1_violation(
     draft: str, tool_results: list[str],
 ) -> str | None:
@@ -613,9 +666,11 @@ def _check_f1_violation(
     1. Banned 'from memory' phrases — instant fail (catches "Already
        pulled the thread above").
     2. If the draft is substantive (≥ ``_F1_DRAFT_QUOTE_THRESHOLD_CHARS``)
-       AND the tool returned non-empty content, the draft must contain
-       at least one ``> sender (ts): …`` quote line. Short
-       acknowledgments are exempt because they make no claims.
+       AND at least one tool result has QUOTABLE content (not an error
+       envelope), the draft must contain at least one ``> sender (ts): …``
+       quote line. Short acknowledgments are exempt because they make no
+       claims; turns where every channel read ERRORED are exempt because
+       there is nothing to quote (2026-06-24 11:15 failed-read loop).
     """
     if not draft:
         return None
@@ -625,7 +680,7 @@ def _check_f1_violation(
     if (
         len(draft) >= _F1_DRAFT_QUOTE_THRESHOLD_CHARS
         and not _F1_QUOTE_LINE_RE.search(draft)
-        and any((tr or "").strip() for tr in tool_results)
+        and any(_tool_result_has_quotable_content(tr) for tr in tool_results)
     ):
         return "substantive reply without a `> sender (ts): …` quote block"
     return None

@@ -24,8 +24,6 @@ class LocalLlmMessage {
       LocalLlmMessage(role: 'user', content: content);
   factory LocalLlmMessage.assistant(String content) =>
       LocalLlmMessage(role: 'assistant', content: content);
-  factory LocalLlmMessage.system(String content) =>
-      LocalLlmMessage(role: 'system', content: content);
 }
 
 /// Raised for load/generation failures so callers can surface a friendly error

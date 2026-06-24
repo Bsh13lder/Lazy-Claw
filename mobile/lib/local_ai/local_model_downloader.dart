@@ -28,8 +28,6 @@ class LocalModelDownloader {
   }) async {
     final file = await _store.fileFor(model);
     final tmp = '${file.path}.part';
-    // ignore: avoid_print
-    print('LOCAL_DL: writing to $tmp');
     _cancel = CancelToken();
     try {
       await _dio.download(

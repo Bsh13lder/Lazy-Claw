@@ -175,8 +175,6 @@ class LocalDownloadController extends StateNotifier<LocalDownloadState> {
 
   Future<void> start(LocalModel model) async {
     if (state.phase == DownloadPhase.downloading) return;
-    // ignore: avoid_print
-    print('LOCAL_DL: start ${model.id} url=${model.url}');
     state = LocalDownloadState(
         modelId: model.id, phase: DownloadPhase.downloading);
     try {
@@ -195,11 +193,7 @@ class LocalDownloadController extends StateNotifier<LocalDownloadState> {
       state = LocalDownloadState(
           modelId: model.id, phase: DownloadPhase.done, fraction: 1);
       _ref.invalidate(localModelStatusesProvider);
-      // ignore: avoid_print
-      print('LOCAL_DL: done ${model.id}');
-    } catch (e, st) {
-      // ignore: avoid_print
-      print('LOCAL_DL_ERROR ${model.id}: $e\n$st');
+    } catch (e) {
       state = LocalDownloadState(
           modelId: model.id, phase: DownloadPhase.error, error: '$e');
     }

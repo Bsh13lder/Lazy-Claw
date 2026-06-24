@@ -9,10 +9,8 @@
 /// (e) name is null in the autosave PUT body (stale-rename clobber prevention).
 library;
 
-import 'dart:async';
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -98,57 +96,6 @@ class _RecordingTransport implements DocumentsTransport {
       throw DocConflictException(conflictPayload);
     }
     return putResponse;
-  }
-
-  @override
-  Future<Map<String, dynamic>> postJson(
-      String path, Map<String, dynamic> body) async =>
-      {};
-  @override
-  Future<Map<String, dynamic>> patchJson(
-      String path, Map<String, dynamic> body) async =>
-      {};
-  @override
-  Future<Map<String, dynamic>> deleteJson(String path) async => {};
-  @override
-  Future<Map<String, dynamic>> uploadFile(String p, File f) async => {};
-  @override
-  Future<List<int>> getBytes(String path) async => const [];
-  @override
-  Future<List<int>> postBytes(String p, Map<String, dynamic> b) async =>
-      const [];
-}
-
-// ── Helper: build a DioException with 409 and no current body ─────────────────
-
-DioException _dio409NoBody() {
-  final opts = RequestOptions(path: '/api/sheets/wb-test');
-  return DioException(
-    requestOptions: opts,
-    response: Response(
-      requestOptions: opts,
-      statusCode: 409,
-      data: <String, dynamic>{},
-    ),
-    type: DioExceptionType.badResponse,
-  );
-}
-
-// ── Transport that throws raw DioException (no current body) ─────────────────
-
-class _RawConflictTransport implements DocumentsTransport {
-  @override
-  Future<Map<String, dynamic>> getJson(String path) async => {
-        'id': 'wb-test',
-        'name': 'Test',
-        'updated_at': 'ts-0',
-        'payload': _serverWorkbook,
-      };
-
-  @override
-  Future<Map<String, dynamic>> putJson(
-      String path, Map<String, dynamic> body) async {
-    throw _dio409NoBody();
   }
 
   @override

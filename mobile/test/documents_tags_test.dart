@@ -34,14 +34,11 @@ DocMeta _meta(
 /// writes are no-ops.
 class _FakeTransport implements DocumentsTransport {
   final List<Map<String, dynamic>> sheets;
-  final List<Map<String, dynamic>> docs;
-  final List<Map<String, dynamic>> files;
+  // Docs/PDF lists are always empty in these tag tests; no caller overrides them.
+  static const List<Map<String, dynamic>> docs = [];
+  static const List<Map<String, dynamic>> files = [];
 
-  _FakeTransport({
-    this.sheets = const [],
-    this.docs = const [],
-    this.files = const [],
-  });
+  _FakeTransport({this.sheets = const []});
 
   @override
   Future<Map<String, dynamic>> getJson(String path) async {

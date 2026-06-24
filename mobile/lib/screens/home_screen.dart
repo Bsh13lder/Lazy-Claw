@@ -130,6 +130,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         gradientTitle: true,
         large: false,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.auto_awesome, color: AppColors.accent),
+            tooltip: 'Hey Lazy',
+            onPressed: () => context.push('/assistant'),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: AppSpacing.lg),
             child: LzSyncBadge(state: syncState),

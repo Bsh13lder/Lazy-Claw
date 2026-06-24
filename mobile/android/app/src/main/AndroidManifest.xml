@@ -3,6 +3,16 @@
          debug/profile manifests). Self-hosted LazyClaw is reached over plain
          http on the LAN, so allow cleartext too (release blocks it by default). -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Hey Lazy voice assistant: on-device speech-to-text (SpeechRecognizer). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
     <!-- Required for local notifications on Android 13+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Scheduled task reminders (flutter_local_notifications zonedSchedule with
@@ -136,6 +146,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Lets LazyClaw be set as the device assist app so the assist gesture
+                 ("Hey Lazy" instead of Hey Google) launches the app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST"/>
+                <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

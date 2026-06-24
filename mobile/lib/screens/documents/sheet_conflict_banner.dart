@@ -237,6 +237,8 @@ class SheetEditorBody extends StatelessWidget {
     required this.onExtendSelection,
     required this.onStartSelection,
     required this.onHeaderAction,
+    this.onResizeCol,
+    this.onResizeRow,
   });
 
   final bool loading;
@@ -270,6 +272,8 @@ class SheetEditorBody extends StatelessWidget {
   final void Function(int row, int col) onExtendSelection;
   final void Function(int row, int col) onStartSelection;
   final void Function(SheetHeaderAction action, int index) onHeaderAction;
+  final void Function(int col, double width)? onResizeCol;
+  final void Function(int row, double height)? onResizeRow;
 
   @override
   Widget build(BuildContext context) {
@@ -338,6 +342,8 @@ class SheetEditorBody extends StatelessWidget {
               onExtendSelection: onExtendSelection,
               onStartSelection: onStartSelection,
               onHeaderAction: onHeaderAction,
+              onResizeCol: onResizeCol,
+              onResizeRow: onResizeRow,
             ),
           ),
         ),

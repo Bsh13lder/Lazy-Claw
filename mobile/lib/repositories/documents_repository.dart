@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -119,6 +120,44 @@ class DocMeta {
         if (pages != null) 'pages': pages,
         if (tags.isNotEmpty) 'tags': tags,
       };
+}
+
+/// A server document row from `GET /api/<kind>/changes`, paired with its
+/// authoritative `updated_at` — the timestamp last-write-wins compares against.
+/// For sheets/docs the snapshot ([payload]) may be present; for PDFs (and any
+/// metadata-only changes feed) it is null and the blob is fetched lazily by id.
+class ServerDoc {
+  const ServerDoc({
+    required this.id,
+    required this.name,
+    this.payloadJson,
+    this.updatedAt,
+  });
+
+  final String id;
+  final String name;
+
+  /// The raw Univer snapshot JSON string (sheets/docs), or null (PDF/metadata).
+  final String? payloadJson;
+  final String? updatedAt;
+}
+
+/// One server-side delta page from `GET /api/<kind>/changes`.
+class DocChanges {
+  /// Docs created/updated server-side since the cursor (with server updated_at).
+  final List<ServerDoc> docs;
+
+  /// Ids the server soft-deleted since the cursor.
+  final List<String> deleted;
+
+  /// Server "now" timestamp — becomes the next cursor (avoids clock skew).
+  final String now;
+
+  const DocChanges({
+    required this.docs,
+    required this.deleted,
+    required this.now,
+  });
 }
 
 /// A sheet/doc opened for viewing: metadata + its decrypted Univer snapshot.
@@ -302,11 +341,61 @@ class DocumentsRepository {
         .toList();
   }
 
+  /// Pull the delta since [since] (ISO timestamp; null = full snapshot) for
+  /// [kind]. Maps `GET /api/<kind>/changes?since=<iso>` →
+  /// `{ items: [...rows], server_time: <iso> }`. Items carry `updated_at`,
+  /// `deleted_at`, `name`, `tags` and (for sheets/docs) `payload`. PDF items are
+  /// metadata only. Defensive about the response shape — it also accepts a
+  /// legacy `{notes|sheets|docs|files, deleted, now}` envelope if the server
+  /// were to diverge from the pinned `{items, server_time}` contract.
+  Future<DocChanges> fetchChanges(DocKind kind, {String? since}) async {
+    final qp = since == null ? '' : '?since=${Uri.encodeQueryComponent(since)}';
+    final json = await _t.getJson('/api/${kind.api}/changes$qp');
+
+    // Pinned contract: { items: [...], server_time: "<iso>" }.
+    final rawItems = json['items'] as List? ?? json[kind.listKey] as List? ?? const [];
+    final now = (json['server_time'] ?? json['now'] ?? '').toString();
+    // Some servers split deleted ids into their own array; others mark each row
+    // with `deleted_at`. Handle both.
+    final explicitDeleted = (json['deleted'] as List? ?? const [])
+        .map((e) => e.toString())
+        .toList();
+
+    final docs = <ServerDoc>[];
+    final deleted = <String>[...explicitDeleted];
+    for (final raw in rawItems) {
+      if (raw is! Map) continue;
+      final m = Map<String, dynamic>.from(raw);
+      final id = m['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      final deletedAt = m['deleted_at']?.toString();
+      if (deletedAt != null && deletedAt.isNotEmpty) {
+        deleted.add(id);
+        continue;
+      }
+      final payload = m['payload'];
+      docs.add(ServerDoc(
+        id: id,
+        name: (m['name']?.toString().trim().isNotEmpty ?? false)
+            ? m['name'].toString()
+            : 'Untitled',
+        payloadJson: payload is Map
+            ? jsonEncode(Map<String, dynamic>.from(payload))
+            : (payload is String ? payload : null),
+        updatedAt: m['updated_at']?.toString(),
+      ));
+    }
+    return DocChanges(docs: docs, deleted: deleted, now: now);
+  }
+
   /// Create a blank sheet/doc named [name]. Maps `POST /api/<kind>` with
-  /// `{name}` → `{ <itemKey>: row }`.
-  Future<DocMeta> create(DocKind kind, String name) async {
+  /// `{name}` (+ optional client-supplied `id`) → `{ <itemKey>: row }`. Passing
+  /// [id] makes the create idempotent on outbox replay.
+  Future<DocMeta> create(DocKind kind, String name, {String? id}) async {
     assert(kind != DocKind.pdf, 'PDFs are imported, not created blank');
-    final json = await _t.postJson('/api/${kind.api}', {'name': name});
+    final body = <String, dynamic>{'name': name};
+    if (id != null) body['id'] = id;
+    final json = await _t.postJson('/api/${kind.api}', body);
     final row = json[kind.itemKey];
     return DocMeta.fromJson(
       row is Map ? Map<String, dynamic>.from(row) : json,

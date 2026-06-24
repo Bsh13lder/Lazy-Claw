@@ -175,6 +175,25 @@ extension UniverOps on UniverSheet {
     return UniverSheet.fromWorkbook(wb, active: activeIndex);
   }
 
+  Map<String, dynamic> _ensureRowData(Map<String, dynamic> sheet) {
+    if (sheet['rowData'] == null || sheet['rowData'] is! Map) {
+      sheet['rowData'] = <String, dynamic>{};
+    }
+    return _sm(sheet['rowData']);
+  }
+
+  /// Set the height of row [row] in the `rowData` map (Univer `h` key).
+  UniverSheet setRowHeight(int row, double h) {
+    final wb = _mutableWb();
+    final sheet = _activeSheet(wb);
+    final rowData = _ensureRowData(sheet);
+    final key = row.toString();
+    final existing = Map<String, dynamic>.from(_sm(rowData[key]));
+    existing['h'] = h;
+    rowData[key] = existing;
+    return UniverSheet.fromWorkbook(wb, active: activeIndex);
+  }
+
   /// Clear all cells (and their links) in [r].
   UniverSheet clearRange(SelRange r) {
     final wb = _mutableWb();

@@ -131,7 +131,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(d.payload, d.name);
+      await _cacheWorkbook(d.payload, d.name, updatedAt: d.updatedAt);
     } catch (_) {
       // Revalidation is best-effort; keep showing the current state.
     }
@@ -170,7 +170,16 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     final cache = ref.read(documentCacheDaoProvider);
     CachedDoc? cached;
     if (cache != null) {
-      cached = await cache.getDoc(DocKind.sheets.api, widget.id);
+      // A cache read can THROW on a transient SQLite lock (the foreground app
+      // and the background sync isolate share one DB). If that exception
+      // escaped, `_load` would abort with `_loading` still true → the editor
+      // sits on the infinite shimmer skeleton forever (a black, stuck screen).
+      // Treat a cache miss/failure the same: fall through to the network path.
+      try {
+        cached = await cache.getDoc(DocKind.sheets.api, widget.id);
+      } catch (_) {
+        cached = null;
+      }
       if (cached != null && mounted) {
         // Show cached copy immediately; _baseUpdatedAt stays null until the
         // network path below delivers the authoritative server value.
@@ -181,7 +190,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         });
       }
     }
-    if (cached == null) setState(() { _loading = true; _error = null; });
+    if (cached == null && mounted) setState(() { _loading = true; _error = null; });
     try {
       final d = await ref.read(documentsRepositoryProvider)
           .getPayload(DocKind.sheets, widget.id);
@@ -192,10 +201,18 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         _loading = false;
         _error = null;
       });
-      await _cacheWorkbook(d.payload, d.name);
+      await _cacheWorkbook(d.payload, d.name, updatedAt: d.updatedAt);
     } catch (_) {
       if (!mounted) return;
-      if (cached == null) setState(() { _error = 'Could not open this sheet. Pull to retry.'; _loading = false; });
+      // The network read failed AND we have no cached copy to fall back on.
+      // ALWAYS clear `_loading` so the editor leaves the infinite skeleton and
+      // shows a retryable error instead of hanging on a black/stuck screen.
+      if (cached == null && _sheet == null) {
+        setState(() {
+          _error = 'Could not open this sheet. Pull to retry.';
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -211,12 +228,45 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     }
   }
 
-  /// Best-effort write of the current workbook into the on-device cache.
-  Future<void> _cacheWorkbook(Map<String, dynamic> workbook, String name) async {
+  /// Best-effort write of a SERVER-AUTHORITATIVE workbook into the on-device
+  /// cache (clean — not pending push). Used after a successful network read/edit
+  /// where the server already holds this exact content.
+  Future<void> _cacheWorkbook(Map<String, dynamic> workbook, String name,
+      {String? updatedAt}) async {
     try {
-      await ref.read(documentCacheDaoProvider)?.putDoc(
+      await ref.read(documentCacheDaoProvider)?.putServerDoc(
           kind: DocKind.sheets.api, id: widget.id,
-          name: name, payloadJson: jsonEncode(workbook));
+          name: name, payloadJson: jsonEncode(workbook),
+          updatedAt: updatedAt);
+    } catch (_) {}
+  }
+
+  /// Persist a LOCAL edit into the on-device cache as a DIRTY row + enqueue an
+  /// `update` op on the shared outbox. This is what makes an offline edit
+  /// durable: even if the subsequent network PUT throws, the edit is already in
+  /// the cache and queued for the next sync. Best-effort — a cache failure must
+  /// not crash the editor (the network save still runs).
+  Future<void> _cacheLocalEdit(Map<String, dynamic> workbook) async {
+    try {
+      await ref.read(documentCacheDaoProvider)?.applyLocalEdit(
+            kind: DocKind.sheets.api,
+            id: widget.id,
+            name: widget.name,
+            payloadJson: jsonEncode(workbook),
+            baseUpdatedAt: _baseUpdatedAt,
+          );
+    } catch (_) {}
+  }
+
+  /// Mark the cache row clean after a successful network save (so the outbox
+  /// won't re-push it). [updatedAt] re-bases the cache row's sync clock.
+  Future<void> _markSynced(String? updatedAt) async {
+    try {
+      await ref.read(documentCacheDaoProvider)?.markPushed(
+            kind: DocKind.sheets.api,
+            id: widget.id,
+            updatedAt: updatedAt,
+          );
     } catch (_) {}
   }
 
@@ -417,6 +467,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
         await _sortByCol(sheet, index, asc: false); return;
       case SheetHeaderAction.colWidth:
         await _showColWidthDialog(sheet, index); return;
+      case SheetHeaderAction.autoFitCol:
+        _autoFitColumn(sheet, index); return;
       case SheetHeaderAction.insertAbove:
         next = sheet.insertRow(index); clearSel = true;
       case SheetHeaderAction.insertBelow:
@@ -452,6 +504,37 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     if (chosen == null || !mounted) return;
     _pushUndo();
     final next = _sheet!.setColWidth(col, chosen);
+    setState(() => _sheet = next);
+    _scheduleSave();
+  }
+
+  /// Auto-fit: size [col] to the width of its widest cell content (clamped),
+  /// persisting via setColWidth so it survives sync.
+  void _autoFitColumn(UniverSheet sheet, int col) {
+    final (rows, _) = _gridDims();
+    final w = autoFitColWidth(sheet, col, rows: rows);
+    _pushUndo();
+    final next = _sheet!.setColWidth(col, w);
+    setState(() => _sheet = next);
+    _scheduleSave();
+  }
+
+  /// Drag-to-resize a column border → persist the new width + schedule save.
+  void _resizeCol(int col, double width) {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    _pushUndo();
+    final next = sheet.setColWidth(col, width);
+    setState(() => _sheet = next);
+    _scheduleSave();
+  }
+
+  /// Drag-to-resize a row border → persist the new height + schedule save.
+  void _resizeRow(int row, double height) {
+    final sheet = _sheet;
+    if (sheet == null) return;
+    _pushUndo();
+    final next = sheet.setRowHeight(row, height);
     setState(() => _sheet = next);
     _scheduleSave();
   }
@@ -515,7 +598,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
           _sheet = UniverSheet.fromWorkbook(result.snapshot, active: sheet.activeIndex);
           if (result.updatedAt != null) _baseUpdatedAt = result.updatedAt;
         });
-        await _cacheWorkbook(result.snapshot, widget.name);
+        await _cacheWorkbook(result.snapshot, widget.name,
+            updatedAt: result.updatedAt);
         if (!mounted) return;
         _snack('Converted ${result.converted} link${result.converted == 1 ? '' : 's'}.');
       }
@@ -569,13 +653,19 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     final sheet = _sheet;
     if (sheet == null) return;
     setState(() => _saving = true);
+    final workbook = sheet.toWorkbook();
+    // Persist the edit to the on-device cache (dirty + outbox) FIRST, BEFORE the
+    // network call — so an offline edit is never lost from the on-screen cache
+    // even if the PUT below throws. The cache row is what the outbox/sync engine
+    // later pushes to the server.
+    await _cacheLocalEdit(workbook);
     try {
-      final workbook = sheet.toWorkbook();
       // name: null — server keeps its stored name; avoids stale-rename clobber.
       final newAt = await ref.read(documentsRepositoryProvider)
           .save(DocKind.sheets, widget.id, workbook, baseUpdatedAt: _baseUpdatedAt);
       _baseUpdatedAt = newAt ?? _baseUpdatedAt; // re-base on server's returned value
-      await _cacheWorkbook(workbook, widget.name);
+      // The PUT succeeded — clear the dirty flag so the outbox doesn't re-push.
+      await _markSynced(newAt);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } on DocConflictException catch (e) {
       if (!mounted) return;
@@ -614,7 +704,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       _conflict = null;
       _redo.clear();
     });
-    await _cacheWorkbook(conflict.payload, widget.name);
+    await _cacheWorkbook(conflict.payload, widget.name,
+        updatedAt: conflict.updatedAt);
   }
 
   /// User chose "Keep mine": force-save by sending baseUpdatedAt=null (LWW).
@@ -622,14 +713,16 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     final sheet = _sheet;
     if (sheet == null) return;
     setState(() { _conflict = null; _saving = true; });
+    final workbook = sheet.toWorkbook();
+    // Persist locally FIRST so the forced edit isn't lost if the network throws.
+    await _cacheLocalEdit(workbook);
     try {
-      final workbook = sheet.toWorkbook();
       // LWW: omit base_updated_at so the server always accepts this write.
       final newUpdatedAt = await ref
           .read(documentsRepositoryProvider)
           .save(DocKind.sheets, widget.id, workbook);
       _baseUpdatedAt = newUpdatedAt ?? _baseUpdatedAt;
-      await _cacheWorkbook(workbook, widget.name);
+      await _markSynced(newUpdatedAt);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } catch (e) {
       if (mounted) _snack('Save failed: $e', error: true);
@@ -678,12 +771,14 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
           _sheet = UniverSheet.fromWorkbook(result.snapshot!);
           _sel = null;
         });
-        await _cacheWorkbook(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
         _snack(result.summary ?? 'Sheet updated.');
         // The AI edit saved server-side (bumping updated_at). Refetch to re-base
-        // so the next autosave doesn't 409 against the AI-bumped version.
+        // so the next autosave doesn't 409 against the AI-bumped version, THEN
+        // cache the snapshot clean with the rebased server clock.
         await _rebaseFromServer();
+        await _cacheWorkbook(result.snapshot!, widget.name,
+            updatedAt: _baseUpdatedAt);
       } else {
         setState(() => _applying = false);
         _snack(result.error ?? 'AI could not apply that change.', error: true);
@@ -769,6 +864,8 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
             onExtendSelection: _extendSelectionTo,
             onStartSelection: _startSelectionFrom,
             onHeaderAction: _onHeaderAction,
+            onResizeCol: _resizeCol,
+            onResizeRow: _resizeRow,
           ),
           if (_applying) const AiApplyingOverlay(),
         ],

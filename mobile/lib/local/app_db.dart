@@ -23,9 +23,15 @@ import 'uuid.dart';
 /// v6: adds `document_cache` + `document_list_cache` — a read-through cache for
 ///     the office suite (Sheets/Docs/PDF) so a document opens INSTANTLY from
 ///     disk while it revalidates over the network (stale-while-revalidate).
-///     This is a CACHE, not a sync source: no outbox, no dirty/tombstone — the
-///     files stay server-owned and edits still go straight to the server.
-const int kAppDbVersion = 6;
+/// v7: promotes `document_cache` from a read-through cache to a SYNC SOURCE by
+///     adding the same offline-first columns the task/note caches carry —
+///     `dirty`, `deleted`, `last_synced_at`, `base_updated_at`. Sheets/Docs now
+///     create/edit/delete locally-first (dirty row + outbox op) and reconcile
+///     with the server via `document_sync.dart` (PUSH outbox → PULL /changes,
+///     LWW). PDFs sync METADATA + tombstones only (content stays import-only,
+///     immutable server-side) so a delete on web/agent propagates to mobile.
+///     The LRU `byte_size`/`cached_at` columns are retained unchanged.
+const int kAppDbVersion = 7;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -161,10 +167,18 @@ const List<String> kAppDbSchema = [
     last_synced_at TEXT
   )
   ''',
-  // Read-through cache for the office suite. `payload` holds the Univer JSON
-  // for sheets/docs; `bytes` holds raw PDF bytes. `byte_size` drives LRU
-  // eviction; `cached_at` is the recency key. PK is (kind, id) because ids are
-  // only unique within a kind.
+  // Offline-first cache + sync source for the office suite. `payload` holds the
+  // Univer JSON for sheets/docs; `bytes` holds raw PDF bytes. `byte_size` drives
+  // LRU eviction; `cached_at` is the recency key. PK is (kind, id) because ids
+  // are only unique within a kind.
+  //
+  // Sync columns mirror `task_cache`/`note_cache`:
+  //   * dirty            — 1 when there's a local edit not yet pushed.
+  //   * deleted          — 1 when locally tombstoned (kept until the delete
+  //                        pushes; then hard-removed).
+  //   * last_synced_at   — when this row last reconciled with the server.
+  //   * base_updated_at  — the server `updated_at` this edit was based on, sent
+  //                        as `base_updated_at` for optimistic-concurrency CAS.
   '''
   CREATE TABLE IF NOT EXISTS document_cache (
     kind TEXT NOT NULL,
@@ -175,6 +189,10 @@ const List<String> kAppDbSchema = [
     updated_at TEXT,
     byte_size INTEGER NOT NULL DEFAULT 0,
     cached_at TEXT NOT NULL,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT,
+    base_updated_at TEXT,
     PRIMARY KEY (kind, id)
   )
   ''',
@@ -241,6 +259,25 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
   // new tables and leaves existing data untouched.
   if (oldVersion < 6) {
     await createAppDbSchema(db);
+  }
+  // v6 → v7: promote `document_cache` to a sync source by adding the same
+  // offline-first columns the task/note caches have. Idempotent — each column
+  // is added only when genuinely absent, so a re-run can't throw. `createAppDbSchema`
+  // is a no-op on the existing table (CREATE TABLE IF NOT EXISTS) but ensures a
+  // DB that somehow skipped v6 still has both document tables before we ALTER.
+  if (oldVersion < 7) {
+    await createAppDbSchema(db);
+    final cols = await db.rawQuery("PRAGMA table_info('document_cache')");
+    final present = cols.map((c) => c['name']).toSet();
+    Future<void> addCol(String name, String ddl) async {
+      if (!present.contains(name)) {
+        await db.execute('ALTER TABLE document_cache ADD COLUMN $ddl');
+      }
+    }
+    await addCol('dirty', 'dirty INTEGER NOT NULL DEFAULT 0');
+    await addCol('deleted', 'deleted INTEGER NOT NULL DEFAULT 0');
+    await addCol('last_synced_at', 'last_synced_at TEXT');
+    await addCol('base_updated_at', 'base_updated_at TEXT');
   }
 }
 

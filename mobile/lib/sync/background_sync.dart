@@ -6,14 +6,17 @@ import '../core/config/server_config.dart';
 import '../core/home_widget_tasks.dart';
 import '../local/app_db.dart';
 import '../local/budgets_dao.dart';
+import '../local/document_cache_dao.dart';
 import '../local/note_dao.dart';
 import '../local/task_dao.dart';
 import '../notifications/local_notifications.dart';
 import '../notifications/notifications_service.dart';
 import '../repositories/budgets_repository.dart';
+import '../repositories/documents_repository.dart';
 import '../repositories/notes_repository.dart';
 import '../repositories/tasks_repository.dart';
 import 'budgets_sync.dart';
+import 'document_sync.dart';
 import 'note_sync.dart';
 import 'task_sync.dart';
 
@@ -98,6 +101,23 @@ Future<void> runHeadlessSync() async {
       ).sync();
     } catch (_) {
       // Budgets sync failure is non-fatal.
+    }
+
+    // Documents (Sheets/Docs/PDF): drain outbox + pull /changes for each kind so
+    // a delete/edit made on web or by the agent propagates to mobile, and any
+    // local-first edit made offline pushes. One DAO + repo shared across kinds.
+    try {
+      final docDao = DocumentCacheDao(db);
+      final docRepo = DocumentsRepository(DioDocumentsTransport(client));
+      for (final kind in DocKind.values) {
+        try {
+          await DocumentSync(docDao, docRepo, kind).sync();
+        } catch (_) {
+          // One kind failing must not abort the others.
+        }
+      }
+    } catch (_) {
+      // Document sync failure is non-fatal.
     }
 
     // Server-notification feed: surface watcher/background-job/escalation

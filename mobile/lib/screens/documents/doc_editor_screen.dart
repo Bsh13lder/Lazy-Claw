@@ -100,7 +100,15 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     // 1. Paint the cached copy instantly (no spinner) if we have one.
     CachedDoc? cached;
     if (cache != null) {
-      cached = await cache.getDoc(DocKind.docs.api, widget.id);
+      // A cache read can THROW on a transient SQLite lock (foreground app +
+      // background sync share one DB). An escaped exception would abort `_load`
+      // with `_loading` still true → the editor sits on the infinite shimmer
+      // skeleton forever (a black, stuck screen). Degrade to the network path.
+      try {
+        cached = await cache.getDoc(DocKind.docs.api, widget.id);
+      } catch (_) {
+        cached = null;
+      }
       if (cached != null && mounted) {
         _basePayload = cached.payload;
         _installController(deltaFromUniver(cached.payload));
@@ -110,7 +118,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
         });
       }
     }
-    if (cached == null) {
+    if (cached == null && mounted) {
       setState(() {
         _loading = true;
         _error = null;
@@ -132,7 +140,10 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     } catch (_) {
       if (!mounted) return;
       // Keep showing the cached copy when offline; only error on a cold miss.
-      if (cached == null) {
+      // ALWAYS clear `_loading` here so a network failure can never strand the
+      // editor on the infinite skeleton. `_basePayload` stays empty until a
+      // cache hit or the network read installs content.
+      if (cached == null && _basePayload.isEmpty) {
         setState(() {
           _error = 'Could not open this document. Pull to retry.';
           _loading = false;

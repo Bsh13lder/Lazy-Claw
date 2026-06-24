@@ -16,24 +16,84 @@ import '../../ui/ui.dart';
 
 // ── Column width helpers ──────────────────────────────────────────────────────
 
+/// Default Univer column width (px) used when no explicit `w` is stored.
+const double kDefaultColW = 88.0;
+
+/// Default Univer row height (px) used when no explicit `h` is stored.
+const double kDefaultRowH = 36.0;
+
+/// Resolve the active sheet's data map for a sheet, or null when unavailable.
+/// Shared by the width/height resolvers below.
+Map<String, dynamic>? _activeSheetData(UniverSheet sheet) {
+  final wb = sheet.rawWorkbook;
+  final sheetsMap = wb['sheets'];
+  if (sheetsMap is! Map) return null;
+  final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList() ??
+      sheetsMap.keys.map((e) => e.toString()).toList();
+  final idx = sheet.activeIndex.clamp(0, order.isEmpty ? 0 : order.length - 1);
+  final sheetId = order.isEmpty ? '' : order[idx];
+  final sheetData = sheetsMap[sheetId];
+  if (sheetData is! Map) return null;
+  return Map<String, dynamic>.from(sheetData);
+}
+
 /// Returns the current pixel width of [col] from [sheet]'s raw workbook data,
 /// falling back to the Univer default of 88 px when the column has no explicit
 /// width entry.
 double resolveCurrentColWidth(UniverSheet sheet, int col) {
-  final wb = sheet.rawWorkbook;
-  final sheetsMap = wb['sheets'];
-  if (sheetsMap is! Map) return 88.0;
-  final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList()
-      ?? sheetsMap.keys.cast<String>().toList();
-  final idx = sheet.activeIndex.clamp(0, order.isEmpty ? 0 : order.length - 1);
-  final sheetId = order.isEmpty ? '' : order[idx];
-  final sheetData = sheetsMap[sheetId];
-  if (sheetData is! Map) return 88.0;
+  final sheetData = _activeSheetData(sheet);
+  if (sheetData == null) return kDefaultColW;
   final colData = sheetData['columnData'];
-  if (colData is! Map) return 88.0;
+  if (colData is! Map) return kDefaultColW;
   final entry = colData[col.toString()];
   if (entry is Map && entry['w'] is num) return (entry['w'] as num).toDouble();
-  return 88.0;
+  return kDefaultColW;
+}
+
+/// Returns the current pixel height of [row] from [sheet]'s raw workbook data,
+/// falling back to the default row height when the row has no explicit `h`.
+double resolveCurrentRowHeight(UniverSheet sheet, int row) {
+  final sheetData = _activeSheetData(sheet);
+  if (sheetData == null) return kDefaultRowH;
+  final rowData = sheetData['rowData'];
+  if (rowData is! Map) return kDefaultRowH;
+  final entry = rowData[row.toString()];
+  if (entry is Map && entry['h'] is num) return (entry['h'] as num).toDouble();
+  return kDefaultRowH;
+}
+
+/// Compute an auto-fit width (px) for [col]: the width of its widest cell's
+/// display text at the grid font, clamped to a sane range so one long cell can't
+/// blow the column off-screen and an empty column doesn't collapse. Uses a
+/// real [TextPainter] so it matches what the grid renders, character-for-glyph.
+///
+/// [rows] caps how many rows are scanned (the visible/used window) so a 1000-row
+/// sheet doesn't measure every cell. [padding] mirrors the cell's horizontal
+/// inset (left + right). [minW]/[maxW] clamp the result.
+double autoFitColWidth(
+  UniverSheet sheet,
+  int col, {
+  required int rows,
+  TextStyle? style,
+  double padding = 16.0,
+  double minW = 56.0,
+  double maxW = 320.0,
+}) {
+  final ts = style ?? const TextStyle(fontSize: 13);
+  var widest = 0.0;
+  final scanRows = rows.clamp(0, 2000);
+  for (var r = 0; r < scanRows; r++) {
+    final text = sheet.cellAt(r, col).display;
+    if (text.isEmpty) continue;
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: ts),
+      maxLines: 1,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    if (tp.width > widest) widest = tp.width;
+  }
+  if (widest == 0.0) return kDefaultColW; // empty column → keep the default
+  return (widest + padding).clamp(minW, maxW);
 }
 
 /// Show a dialog with a slider (60–320 px) to set column width.

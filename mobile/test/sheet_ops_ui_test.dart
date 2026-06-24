@@ -203,7 +203,8 @@ void main() {
     });
 
     test('SheetHeaderAction enum covers all required actions', () {
-      // Verify all 11 expected enum values exist.
+      // Verify all 12 expected enum values exist (added autoFitCol for the grid
+      // auto-fit pass).
       const allActions = SheetHeaderAction.values;
       expect(allActions, contains(SheetHeaderAction.insertLeft));
       expect(allActions, contains(SheetHeaderAction.insertRight));
@@ -212,11 +213,12 @@ void main() {
       expect(allActions, contains(SheetHeaderAction.sortAsc));
       expect(allActions, contains(SheetHeaderAction.sortDesc));
       expect(allActions, contains(SheetHeaderAction.colWidth));
+      expect(allActions, contains(SheetHeaderAction.autoFitCol));
       expect(allActions, contains(SheetHeaderAction.insertAbove));
       expect(allActions, contains(SheetHeaderAction.insertBelow));
       expect(allActions, contains(SheetHeaderAction.deleteRow));
       expect(allActions, contains(SheetHeaderAction.clearRow));
-      expect(allActions.length, 11);
+      expect(allActions.length, 12);
     });
 
     testWidgets('SheetEditorGrid renders col headers and row gutters',

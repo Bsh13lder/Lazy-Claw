@@ -111,6 +111,15 @@ class SkillRegistry:
         self.register(MemoryRecallSkill(config=config))
         self.register(SendEmailSkill(config=config, registry=self))
 
+        # MiniMax generative media (image / speech) — utility category (ALLOW).
+        # Raw HTTP to MiniMax's native generative endpoints; uses the same
+        # MINIMAX_API_KEY as the LLM router. No-op until that key is set.
+        from lazyclaw.skills.builtin.generate_image import GenerateImageSkill
+        from lazyclaw.skills.builtin.text_to_speech import TextToSpeechSkill
+
+        self.register(GenerateImageSkill(config=config))
+        self.register(TextToSpeechSkill(config=config))
+
         from lazyclaw.skills.builtin.vault import (
             VaultSetSkill, VaultGetSkill, VaultListSkill, VaultDeleteSkill,
             SaveSiteLoginSkill,

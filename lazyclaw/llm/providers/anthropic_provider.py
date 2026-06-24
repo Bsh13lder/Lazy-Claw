@@ -371,20 +371,31 @@ class AnthropicProvider(BaseLLMProvider):
             parsed_tool_calls.extend(recovered_calls)
             joined_text = cleaned_text
 
-        # Diagnostic: if MiniMax returned text-only with no tool calls (native
-        # OR recovered), log the first 400 chars so we can see what the model
-        # actually said. Lets us distinguish "M2 thought-only" from "adapter
-        # leaked markup we didn't recognize" without bumping log level globally.
-        # Also bump the per-instance counter so /status can show drift over
-        # the lifetime of the provider.
+        # Diagnostic: text-only is a DEFECT only when tools were ATTACHED but
+        # no tool_use came back — that's the "M3 narrated instead of calling"
+        # signal. A tools=None request (the plan-gate round-0 plan DRAFT, or a
+        # pure-chat turn) returning text is CORRECT and must NOT warn or inflate
+        # the drift counter — that false positive sent the 2026-06-23 MiniMax
+        # investigation down a wrong path ("M3 won't dispatch" on calls that
+        # were never meant to). `tools_payload` is truthy iff tools were
+        # actually sent this request. The total-turn counter still tracks every
+        # MiniMax call so /status keeps a true denominator.
         if response.model and "MiniMax" in response.model:
             self._minimax_total_turns += 1
             if not parsed_tool_calls and joined_text:
-                self._minimax_text_only_turns += 1
-                _log.warning(
-                    "MiniMax %s returned text-only (no tool calls): %r",
-                    response.model, joined_text[:400],
-                )
+                if tools_payload:
+                    self._minimax_text_only_turns += 1
+                    _log.warning(
+                        "MiniMax %s returned text-only despite %d tool(s) "
+                        "attached (no tool_use): %r",
+                        response.model, len(tools_payload), joined_text[:400],
+                    )
+                else:
+                    _log.debug(
+                        "MiniMax %s returned text-only (no tools attached — "
+                        "expected for chat/plan-draft): %r",
+                        response.model, joined_text[:200],
+                    )
 
         usage = None
         if response.usage:
@@ -530,7 +541,14 @@ class AnthropicProvider(BaseLLMProvider):
                     # chat(), so default to checking the requested model.
                     if model and "minimax" in model.lower():
                         self._minimax_total_turns += 1
-                        if not collected_tool_calls and collected_text:
+                        # Only a text-only stream WITH tools attached is the
+                        # narration defect; a tools=None chat stream returning
+                        # text is expected (see chat() above).
+                        if (
+                            not collected_tool_calls
+                            and collected_text
+                            and tools_payload
+                        ):
                             self._minimax_text_only_turns += 1
                     yield StreamChunk(
                         delta="",

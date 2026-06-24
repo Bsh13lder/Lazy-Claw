@@ -101,6 +101,36 @@ async def _resolve_ref(config: Any, user_id: str, ref: str, rows: list[dict]) ->
     return None
 
 
+def is_empty_plan(plan: dict[str, Any]) -> bool:
+    """True if the plan's op payload is empty/missing for the chosen op.
+
+    PDF ops are op-dependent — ``add_text`` needs ``items``, ``fill_form``
+    needs ``values``, etc. ``rotate`` and ``split`` are inherently non-empty
+    (they default sensibly), so they are never treated as no-ops. Mirrors the
+    per-op payload guards in :func:`apply` so a no-op plan triggers a
+    corrective retry instead of dying there.
+    """
+    if not isinstance(plan, dict):
+        return True
+    op = plan.get("op")
+    if op == "add_text":
+        items = plan.get("items")
+        return not (isinstance(items, list) and items)
+    if op == "fill_form":
+        values = plan.get("values")
+        return not (isinstance(values, dict) and values)
+    if op == "generate":
+        text = plan.get("text")
+        return not (isinstance(text, str) and text.strip())
+    if op == "merge":
+        refs = plan.get("pdf_ids")
+        return not (isinstance(refs, list) and refs)
+    if op in ("rotate", "split"):
+        return False  # both default to a sensible whole-document op
+    # Unknown / missing op → no usable plan.
+    return True
+
+
 async def apply(
     config: Any, user_id: str, doc_id: str, ctx: dict[str, Any], plan: dict[str, Any]
 ) -> dict[str, Any]:

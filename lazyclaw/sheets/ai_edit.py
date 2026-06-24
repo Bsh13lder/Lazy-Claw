@@ -103,6 +103,18 @@ def _normalize_edits(raw: Any) -> list[dict[str, Any]]:
     return edits
 
 
+def is_empty_plan(plan: dict[str, Any]) -> bool:
+    """True if the plan normalises to zero cell edits (a no-op).
+
+    Catches ``{"edits": []}`` and plans whose edits all fail validation, so
+    the specialist retries with a corrective hint rather than letting
+    :func:`apply` raise.
+    """
+    if not isinstance(plan, dict):
+        return True
+    return not _normalize_edits(plan.get("edits"))
+
+
 async def apply(
     config: Any, user_id: str, doc_id: str, ctx: dict[str, Any], plan: dict[str, Any]
 ) -> dict[str, Any]:

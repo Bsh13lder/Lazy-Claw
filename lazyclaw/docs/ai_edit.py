@@ -128,14 +128,32 @@ def _normalize_blocks(items: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _plan_blocks(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve a plan to its normalised block list (blocks → legacy paragraphs)."""
+    items = plan.get("blocks")
+    if items is None:
+        items = plan.get("paragraphs")  # legacy plan shape
+    return _normalize_blocks(items)
+
+
+def is_empty_plan(plan: dict[str, Any]) -> bool:
+    """True if the plan is structurally present but carries no usable content.
+
+    A docs plan is a no-op when it normalises to zero blocks — e.g.
+    ``{"blocks": []}``, ``{"paragraphs": []}``, or a plan whose only blocks
+    are unrecognised. Treated like a parse miss so the specialist retries
+    with a corrective hint instead of dying in :func:`apply`.
+    """
+    if not isinstance(plan, dict):
+        return True
+    return not _plan_blocks(plan)
+
+
 async def apply(
     config: Any, user_id: str, doc_id: str, ctx: dict[str, Any], plan: dict[str, Any]
 ) -> dict[str, Any]:
     """Apply a docs edit plan, persist, and return the fresh snapshot."""
-    items = plan.get("blocks")
-    if items is None:
-        items = plan.get("paragraphs")  # legacy plan shape
-    blocks = _normalize_blocks(items)
+    blocks = _plan_blocks(plan)
     if not blocks:
         raise ValueError("plan needs a non-empty 'blocks' (or 'paragraphs') list")
     mode = "replace" if plan.get("mode") == "replace" else "append"

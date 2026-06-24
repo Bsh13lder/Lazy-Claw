@@ -9,8 +9,22 @@ returns the fresh document so the editor can reload in place.
 Flow: validate → load the doc → ask the LLM for a strict-JSON *edit plan*
 (text only, no tool protocol, so it works across every ECO mode) → parse → apply
 deterministically via the per-kind strategy (:mod:`lazyclaw.{docs,sheets,pdf}.ai_edit`).
-If the worker model returns unparseable JSON we retry once on the stronger brain
-model before giving up with a friendly error.
+
+Model: always the user's configured **worker** (ECO ``ROLE_WORKER``, resolved
+dynamically from settings — MiniMax, Claude, OpenAI, local, whatever the user
+set). Nothing is hardcoded and there is no "stronger model" escalation: the
+document AI is exactly the worker the user picked.
+
+Robustness (provider-independent):
+  * A reply that won't parse OR a structurally-present-but-EMPTY plan
+    (``{"op":"fill_form","values":{}}``, ``{"edits":[]}``, …) is treated the
+    same — a non-plan.
+  * If ``strategy.apply`` rejects a plan with ``ValueError`` (empty/invalid),
+    the specialist asks the SAME worker AGAIN with a corrective follow-up that
+    quotes the rejection reason — up to a small cap of apply attempts.
+
+Every rejection/retry is logged (model, attempt, reason) so a future
+"AI edit did nothing" report is debuggable straight from data/lazyclaw.log.
 """
 
 from __future__ import annotations
@@ -22,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lazyclaw.docs import ai_edit as docs_ai
-from lazyclaw.llm.eco_router import ROLE_BRAIN, ROLE_WORKER
+from lazyclaw.llm.eco_router import ROLE_WORKER
 from lazyclaw.pdf import ai_edit as pdf_ai
 from lazyclaw.sheets import ai_edit as sheets_ai
 
@@ -36,6 +50,11 @@ _STRATEGIES: dict[str, Any] = {
 }
 
 _MAX_INSTRUCTION_CHARS = 2000
+
+# Total times we ask the worker + try to apply before giving up. The first
+# attempt is a plain ask; later attempts add a corrective hint quoting why the
+# previous plan was rejected. Always the same configured worker model.
+_MAX_APPLY_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -72,22 +91,77 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-async def _ask_for_plan(eco_router, messages, user_id: str) -> dict[str, Any] | None:
-    """Ask the worker for a JSON plan; retry once on the brain if it won't parse."""
-    for role in (ROLE_WORKER, ROLE_BRAIN):
+def _is_usable_plan(strategy: Any, plan: dict[str, Any] | None) -> bool:
+    """True if `plan` parsed AND is not a per-kind no-op.
+
+    A structurally-valid-but-empty plan (``{"edits": []}``,
+    ``{"op":"fill_form","values":{}}``) is treated like a parse miss so the
+    caller keeps looking instead of letting it die in ``strategy.apply``.
+    """
+    if plan is None:
+        return False
+    is_empty = getattr(strategy, "is_empty_plan", None)
+    if callable(is_empty):
         try:
-            resp = await eco_router.chat(messages, user_id, role=role)
-        except Exception as exc:  # noqa: BLE001 — surface as a friendly error
-            logger.warning("doc_specialist LLM call failed (%s): %s", role, exc)
-            continue
-        if getattr(resp, "model", "") == "error":
-            logger.warning("doc_specialist LLM returned error sentinel: %s", resp.content)
-            continue
-        plan = _extract_json(getattr(resp, "content", "") or "")
-        if plan is not None:
-            return plan
-        logger.info("doc_specialist: %s reply was not valid JSON — retrying higher", role)
-    return None
+            return not is_empty(plan)
+        except Exception:  # noqa: BLE001 — defensive; treat odd plans as usable
+            logger.warning("doc_specialist is_empty_plan check raised", exc_info=True)
+            return True
+    return True
+
+
+async def _ask_for_plan(
+    eco_router: Any,
+    strategy: Any,
+    messages: list[Any],
+    user_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Ask the user's configured worker for a usable JSON plan.
+
+    The model is whatever ``ROLE_WORKER`` resolves to in the user's ECO
+    settings (any provider) — nothing is hardcoded. Returns
+    ``(plan, model_used)``; ``plan`` is None when nothing usable came back
+    (won't parse OR an empty/no-op plan).
+    """
+    model_used: str | None = ROLE_WORKER
+    try:
+        resp = await eco_router.chat(messages, user_id, role=ROLE_WORKER)
+    except Exception as exc:  # noqa: BLE001 — surface as a friendly error
+        logger.warning("doc_specialist worker call failed: %s", exc)
+        return None, model_used
+    model_used = getattr(resp, "model", None) or model_used
+    if getattr(resp, "model", "") == "error":
+        logger.warning("doc_specialist worker returned error sentinel: %s", resp.content)
+        return None, model_used
+    plan = _extract_json(getattr(resp, "content", "") or "")
+    if plan is None:
+        logger.info("doc_specialist: worker reply was not valid JSON")
+        return None, model_used
+    if not _is_usable_plan(strategy, plan):
+        logger.info(
+            "doc_specialist: worker returned an empty/no-op plan (op=%r)",
+            plan.get("op"),
+        )
+        return None, model_used
+    return plan, model_used
+
+
+def _corrective_message(strategy: Any, reason: str) -> Any:
+    """A follow-up user message telling the model exactly why it was rejected."""
+    from lazyclaw.llm.providers.base import LLMMessage
+
+    shape = getattr(strategy, "PLAN_SHAPE", "") or ""
+    text = (
+        "Your previous plan was REJECTED: "
+        f"{reason}\n"
+        "The edits/values/blocks were empty or invalid. You MUST reply with a "
+        "JSON plan that POPULATES them with concrete content that actually "
+        "performs the requested edit — no empty objects or lists, no prose, no "
+        "code fence."
+    )
+    if shape:
+        text += f"\nRequired shape:\n{shape}"
+    return LLMMessage(role="user", content=text)
 
 
 async def run_doc_specialist(
@@ -115,27 +189,66 @@ async def run_doc_specialist(
     if ctx is None:
         return SpecialistResult(ok=False, error="Document not found.")
 
-    messages = strategy.build_messages(ctx, instruction)
-    plan = await _ask_for_plan(eco_router, messages, user_id)
-    if plan is None:
+    base_messages = strategy.build_messages(ctx, instruction)
+    last_reason: str | None = None
+
+    for attempt in range(1, _MAX_APPLY_ATTEMPTS + 1):
+        # Always the configured worker. The first attempt is a plain ask; later
+        # attempts append a corrective hint quoting why the last plan failed.
+        if attempt == 1:
+            messages = base_messages
+        else:
+            messages = list(base_messages) + [
+                _corrective_message(strategy, last_reason or "the plan was empty")
+            ]
+            logger.info(
+                "doc_specialist[%s] corrective retry %d/%d (reason=%s)",
+                kind, attempt, _MAX_APPLY_ATTEMPTS, last_reason,
+            )
+
+        plan, model_used = await _ask_for_plan(
+            eco_router, strategy, messages, user_id
+        )
+        if plan is None:
+            last_reason = "the AI did not return a usable, non-empty plan"
+            logger.info("doc_specialist[%s] attempt %d: no usable plan", kind, attempt)
+            continue
+
+        try:
+            result = await strategy.apply(config, user_id, doc_id, ctx, plan)
+        except ValueError as exc:
+            last_reason = str(exc)
+            logger.warning(
+                "doc_specialist[%s] attempt %d rejected by apply (model=%s): %s",
+                kind, attempt, model_used, exc,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — fail loudly + diagnosably
+            logger.exception("doc_specialist[%s] apply failed (model=%s)", kind, model_used)
+            return SpecialistResult(ok=False, error=f"Edit failed: {exc}")
+
+        logger.info(
+            "doc_specialist[%s] applied on attempt %d (model=%s): %s",
+            kind, attempt, model_used, result.get("summary", "done"),
+        )
         return SpecialistResult(
-            ok=False,
-            error="The AI couldn't turn that into an edit. Try rephrasing it more concretely.",
+            ok=True,
+            summary=result.get("summary", "Done."),
+            snapshot=result.get("snapshot"),
+            new_id=result.get("new_id"),
         )
 
-    try:
-        result = await strategy.apply(config, user_id, doc_id, ctx, plan)
-    except ValueError as exc:
-        return SpecialistResult(ok=False, error=f"Couldn't apply that: {exc}")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("doc_specialist apply failed")
-        return SpecialistResult(ok=False, error=f"Edit failed: {exc}")
-
+    detail = f" ({last_reason})" if last_reason else ""
+    logger.warning(
+        "doc_specialist[%s] gave up after %d attempts%s",
+        kind, _MAX_APPLY_ATTEMPTS, detail,
+    )
     return SpecialistResult(
-        ok=True,
-        summary=result.get("summary", "Done."),
-        snapshot=result.get("snapshot"),
-        new_id=result.get("new_id"),
+        ok=False,
+        error=(
+            "The AI couldn't turn that into a concrete edit. Try rephrasing it "
+            f"more specifically.{detail}"
+        ),
     )
 
 

@@ -63,14 +63,70 @@ def is_pdf(data: bytes) -> bool:
 # pypdf helpers
 # ---------------------------------------------------------------------------
 
-def _reader(data: bytes):
-    """Build a pypdf reader, surfacing parse errors as :class:`PdfError`."""
+def _tolerant_reader_cls():
+    """A ``PdfReader`` subclass that survives indirect-to-indirect object bodies.
+
+    pypdf 6.x made :pyattr:`IndirectObject.indirect_reference` a *read-only*
+    property. Some real-world PDFs (certain scanners / form generators) emit an
+    object whose body is a *bare* indirect reference, e.g.::
+
+        4 0 obj
+        5 0 R
+        endobj
+
+    When pypdf resolves such an object it parses it as an ``IndirectObject`` and
+    then, in ``cache_indirect_object``, attempts ``obj.indirect_reference = ...``
+    on it — which now raises ``AttributeError: property 'indirect_reference' of
+    'IndirectObject' object has no setter`` and aborts every read/clone/stamp.
+
+    The fix collapses the chain at cache time: when the object being cached *is*
+    an ``IndirectObject``, resolve it to its concrete target (one hop, with
+    self-reference and unresolvable targets degrading to ``NullObject``) before
+    delegating to the parent — so a real ``PdfObject`` is cached and the
+    read-only property is never written. Built lazily so the import cost (and
+    pypdf's exact class layout) is paid only when a PDF op actually runs.
+    """
     from pypdf import PdfReader
+    from pypdf.generic import IndirectObject, NullObject
+
+    class _TolerantPdfReader(PdfReader):
+        def cache_indirect_object(self, generation, idnum, obj):  # type: ignore[override]
+            if isinstance(obj, IndirectObject):
+                if obj.idnum == idnum and obj.generation == generation:
+                    # Self-reference (e.g. "4 0 obj  4 0 R"): cannot resolve —
+                    # substitute a null rather than recurse forever.
+                    obj = NullObject()
+                else:
+                    try:
+                        resolved = obj.get_object()
+                    except Exception:  # noqa: BLE001 — missing / circular target
+                        resolved = None
+                    # A concrete object collapses the chain; anything else
+                    # (missing target, deeper indirection) becomes null so the
+                    # read-only ``indirect_reference`` property is never set.
+                    obj = (
+                        resolved
+                        if resolved is not None and not isinstance(resolved, IndirectObject)
+                        else NullObject()
+                    )
+            return super().cache_indirect_object(generation, idnum, obj)
+
+    return _TolerantPdfReader
+
+
+def _reader(data: bytes):
+    """Build a pypdf reader, surfacing parse errors as :class:`PdfError`.
+
+    Uses a tolerant reader (see :func:`_tolerant_reader_cls`) so PDFs carrying
+    bare indirect-to-indirect object bodies load instead of crashing on pypdf
+    6.x's read-only ``indirect_reference`` property.
+    """
     from pypdf.errors import PdfReadError
 
     _validate_pdf_bytes(data)
+    reader_cls = _tolerant_reader_cls()
     try:
-        return PdfReader(io.BytesIO(bytes(data)))
+        return reader_cls(io.BytesIO(bytes(data)))
     except PdfReadError as exc:
         raise PdfError(f"Could not read PDF: {exc}") from exc
     except Exception as exc:  # malformed xref, encryption, etc.
@@ -366,13 +422,20 @@ def _merge_overlay(base: bytes, overlay: bytes, touched: set[int]) -> bytes:
     Pages are cloned into the writer *first* (``clone_from``) so ``merge_page``
     operates on writer-attached pages — pypdf 6.x deprecates merging detached
     reader pages as unreliable.
+
+    The base is loaded through :func:`_reader` (tolerant) and the *reader* is
+    handed to ``clone_from`` — NOT the raw bytes. ``PdfWriter(clone_from=<bytes>)``
+    would build its own stock ``PdfReader`` internally and re-trigger the pypdf
+    6.x ``indirect_reference`` setter crash on PDFs with bare indirect-to-indirect
+    object bodies.
     """
-    from pypdf import PdfReader, PdfWriter
+    from pypdf import PdfWriter
 
     _validate_pdf_bytes(base)
-    overlay_reader = PdfReader(io.BytesIO(overlay))
+    overlay_reader = _reader(overlay)
+    base_reader = _reader(base)
     try:
-        writer = PdfWriter(clone_from=io.BytesIO(bytes(base)))
+        writer = PdfWriter(clone_from=base_reader)
     except Exception as exc:
         raise PdfError(f"Could not load PDF for stamping: {exc}") from exc
     for idx, page in enumerate(writer.pages):

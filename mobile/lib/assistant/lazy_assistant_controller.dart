@@ -59,9 +59,24 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   bool _sttReady = false;
 
   static const String _system =
-      'You are Lazy, a friendly on-device voice assistant. Answer briefly and '
-      'conversationally — your reply is spoken aloud, so keep it short, natural and '
-      'to the point. No markdown, no bullet lists unless asked. Same language as the user.';
+      'You are Lazy, a helpful voice assistant. Give a direct, useful, concise answer '
+      'that sounds natural read aloud. Do NOT use emojis, asterisks, stage directions '
+      '(like *smiles*), markdown, headings or bullet lists — just say the answer plainly. '
+      'Reply in the same language as the user.';
+
+  /// Strips roleplay actions (*smiles*), emojis and markdown so the spoken (and
+  /// shown) reply is clean text — not "asterisk smiles asterisk".
+  static String _clean(String text) {
+    var t = text;
+    t = t.replaceAll(RegExp(r'\*[^*\n]*\*'), ' '); // *smiles*, **bold**
+    t = t.replaceAll(
+        RegExp(
+            r'[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}]',
+            unicode: true),
+        '');
+    t = t.replaceAll(RegExp(r'[#`_>]'), '');
+    return t.replaceAll(RegExp(r'[ \t]+'), ' ').replaceAll(RegExp(r' *\n *'), '\n').trim();
+  }
 
   /// Tap the mic: start listening, or stop (finish talking) if already listening.
   Future<void> toggleListen() async {
@@ -149,7 +164,7 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
       );
       return;
     }
-    final reply = buf.toString().trim();
+    final reply = _clean(buf.toString());
     if (reply.isEmpty) {
       state = AssistantState(phase: AssistantPhase.idle, transcript: prompt);
       return;

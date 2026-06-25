@@ -1,9 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:quick_actions/quick_actions.dart';
 
 import 'app_actions.dart';
+
+/// MethodChannel the native side ([MainActivity]) posts the system ASSIST
+/// gesture over. The Dart side listens and resolves it to [AppAction.assistant].
+const MethodChannel kAssistChannel = MethodChannel('lazy/assist');
 
 /// Bridges the two native entry points — launcher long-press shortcuts
 /// (`quick_actions`) and the home-screen Quick-Capture widget (`home_widget`)
@@ -21,6 +26,7 @@ class DeepLinkService {
 
   final QuickActions _quickActions = const QuickActions();
   StreamSubscription<Uri?>? _widgetClickedSub;
+  final MethodChannel _assistChannel = kAssistChannel;
 
   /// Wire up both native sources. Safe to call once after the first frame.
   ///
@@ -37,6 +43,22 @@ class DeepLinkService {
   Future<void> init() async {
     await _initQuickActions();
     await _initHomeWidget();
+    _initAssistGesture();
+  }
+
+  /// Listen for the native system ASSIST gesture (`MainActivity` forwards
+  /// `Intent.ACTION_ASSIST` over [kAssistChannel] as `assist`). On every assist
+  /// hop, resolve it to [AppAction.assistant] and hand it to [_onAction]. Guarded
+  /// so a platform without the channel never breaks boot.
+  void _initAssistGesture() {
+    try {
+      _assistChannel.setMethodCallHandler((call) async {
+        if (call.method == 'assist') _onAction(AppAction.assistant);
+        return null;
+      });
+    } catch (_) {
+      // Channel unavailable on this platform — non-fatal.
+    }
   }
 
   Future<void> _initQuickActions() async {
@@ -83,5 +105,6 @@ class DeepLinkService {
   void dispose() {
     _widgetClickedSub?.cancel();
     _widgetClickedSub = null;
+    _assistChannel.setMethodCallHandler(null);
   }
 }

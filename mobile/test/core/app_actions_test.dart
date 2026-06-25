@@ -70,10 +70,13 @@ void main() {
     test('declares the four LAUNCHER shortcut actions, each round-trippable',
         () {
       // The launcher long-press menu carries the four capture/chat shortcuts —
-      // NOT openTasks (that action only exists for the Today-tasks widget body
-      // tap), so the spec list is exactly AppAction.values minus openTasks.
-      final shortcutActions =
-          AppAction.values.where((a) => a != AppAction.openTasks).toSet();
+      // NOT openTasks (Today-tasks widget body tap) and NOT assistant (the
+      // system ASSIST gesture / `lazyclaw://assistant` deep link), so the spec
+      // list is exactly AppAction.values minus those widget/gesture-only actions.
+      final shortcutActions = AppAction.values
+          .where((a) =>
+              a != AppAction.openTasks && a != AppAction.assistant)
+          .toSet();
       expect(kShortcutSpecs.length, shortcutActions.length);
       final resolved =
           kShortcutSpecs.map((s) => appActionForShortcut(s.type)).toSet();

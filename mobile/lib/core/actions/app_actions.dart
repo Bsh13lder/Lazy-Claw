@@ -11,7 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// mapping helpers below are intentionally PURE (no Flutter bindings, no
 /// provider access) so the shortcut/URI → action → route resolution can be
 /// unit-tested in isolation.
-enum AppAction { addTask, addExpense, chat, newNote, openTasks }
+enum AppAction { addTask, addExpense, chat, newNote, openTasks, assistant }
 
 /// Stable string identifiers for each action.
 ///
@@ -29,6 +29,17 @@ const Map<AppAction, String> kActionIds = {
   // The "Today tasks" widget body/header opens the Tasks page (no sheet). Its
   // launch URI host is `tasks` (`lazyclaw://tasks`) → canon `tasks`.
   AppAction.openTasks: 'tasks',
+  // "Hey Lazy" — opened by the system ASSIST gesture / a `lazyclaw://assistant`
+  // deep link. Canonical id is `assistant` so the URI host matches; the bare
+  // launcher/native `assist` token is accepted as an alias (see [_matchCanon]).
+  AppAction.assistant: 'assistant',
+};
+
+/// Aliases accepted IN ADDITION to the canonical [kActionIds] value. The native
+/// ASSIST gesture surfaces as `assist`, which canonicalizes differently from
+/// the `assistant` URI host — so we map it explicitly to [AppAction.assistant].
+const Map<String, AppAction> _kActionAliases = {
+  'assist': AppAction.assistant,
 };
 
 /// The deep-link URI scheme the home-screen widget launches the app with
@@ -44,6 +55,9 @@ AppAction? _matchCanon(String? raw) {
   final target = _canon(raw);
   for (final action in AppAction.values) {
     if (_canon(kActionIds[action]!) == target) return action;
+  }
+  for (final entry in _kActionAliases.entries) {
+    if (_canon(entry.key) == target) return entry.value;
   }
   return null;
 }
@@ -76,6 +90,8 @@ String routeForAction(AppAction action) {
       return '/expenses';
     case AppAction.chat:
       return '/chat';
+    case AppAction.assistant:
+      return '/assistant';
   }
 }
 

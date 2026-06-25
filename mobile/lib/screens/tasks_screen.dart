@@ -185,7 +185,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       case AppAction.addExpense:
       case AppAction.chat:
       case AppAction.openTasks:
-        break; // not owned by this screen (openTasks self-clears in main.dart)
+      case AppAction.assistant:
+        break; // not owned by this screen (openTasks/assistant self-clear in main.dart)
     }
   }
 

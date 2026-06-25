@@ -60,13 +60,41 @@ const String kDefaultAgentMode = 'ask';
 class GeneralSettings {
   final String agentMode;
 
-  const GeneralSettings({required this.agentMode});
+  /// "Hey Lazy" privacy flags. Default OFF / on-device-first (CLAUDE.md):
+  /// process-on-device default false, confirm-cloud default true.
+  final bool assistantProcessDataOnDevice;
+  final bool assistantConfirmCloudRequests;
+  final bool assistantAlwaysListening;
 
-  factory GeneralSettings.fromJson(Map<String, dynamic> json) =>
-      GeneralSettings(agentMode: coerceAgentMode(json['agent_mode']));
+  const GeneralSettings({
+    required this.agentMode,
+    this.assistantProcessDataOnDevice = false,
+    this.assistantConfirmCloudRequests = true,
+    this.assistantAlwaysListening = false,
+  });
 
-  GeneralSettings copyWith({String? agentMode}) =>
-      GeneralSettings(agentMode: agentMode ?? this.agentMode);
+  factory GeneralSettings.fromJson(Map<String, dynamic> json) => GeneralSettings(
+        agentMode: coerceAgentMode(json['agent_mode']),
+        assistantProcessDataOnDevice: json['process_data_on_device'] == true,
+        assistantConfirmCloudRequests: json['confirm_cloud_requests'] != false,
+        assistantAlwaysListening: json['assistant_always_listening'] == true,
+      );
+
+  GeneralSettings copyWith({
+    String? agentMode,
+    bool? assistantProcessDataOnDevice,
+    bool? assistantConfirmCloudRequests,
+    bool? assistantAlwaysListening,
+  }) =>
+      GeneralSettings(
+        agentMode: agentMode ?? this.agentMode,
+        assistantProcessDataOnDevice:
+            assistantProcessDataOnDevice ?? this.assistantProcessDataOnDevice,
+        assistantConfirmCloudRequests:
+            assistantConfirmCloudRequests ?? this.assistantConfirmCloudRequests,
+        assistantAlwaysListening:
+            assistantAlwaysListening ?? this.assistantAlwaysListening,
+      );
 
   /// Normalizes any input to a known mode value, falling back to the default.
   static String coerceAgentMode(dynamic v) {
@@ -221,6 +249,30 @@ class SettingsRepository {
     final data = Map<String, dynamic>.from(json['data'] as Map);
     data.putIfAbsent('agent_mode', () => mode);
     return GeneralSettings.fromJson(data);
+  }
+
+  /// PATCHes only the provided "Hey Lazy" privacy flags onto
+  /// `/api/settings/general` and returns the updated settings. Omitted
+  /// arguments are not sent (the server merges into its general dict).
+  Future<GeneralSettings> setAssistantFlags({
+    bool? processDataOnDevice,
+    bool? confirmCloudRequests,
+    bool? alwaysListening,
+  }) async {
+    final body = <String, dynamic>{};
+    if (processDataOnDevice != null) {
+      body['process_data_on_device'] = processDataOnDevice;
+    }
+    if (confirmCloudRequests != null) {
+      body['confirm_cloud_requests'] = confirmCloudRequests;
+    }
+    if (alwaysListening != null) {
+      body['assistant_always_listening'] = alwaysListening;
+    }
+    final json = await _t.patchJson('/api/settings/general', body);
+    _assertSuccess(json);
+    return GeneralSettings.fromJson(
+        Map<String, dynamic>.from(json['data'] as Map));
   }
 
   // ── Permissions ───────────────────────────────────────────────────────────

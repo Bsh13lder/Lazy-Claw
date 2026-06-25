@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 import '../../assistant/lazy_assistant_controller.dart';
+import '../../assistant/widgets/mic_state_indicator.dart';
+import '../../assistant/widgets/provenance_badge.dart';
 import '../../local_ai/local_ai_providers.dart';
 import '../../ui/ui.dart';
 
@@ -21,6 +23,16 @@ class LazyAssistantScreen extends ConsumerWidget {
     final state = ref.watch(lazyAssistantProvider);
     final ctrl = ref.read(lazyAssistantProvider.notifier);
     final localAi = ref.watch(localAiControllerProvider);
+
+    // First-cloud-hop consent: when a turn pauses for approval, present a
+    // one-time sheet. Approve runs the held cloud turn; deny keeps it local.
+    ref.listen<AssistantState>(lazyAssistantProvider, (prev, next) {
+      final entered = prev?.phase != AssistantPhase.awaitingCloudConsent &&
+          next.phase == AssistantPhase.awaitingCloudConsent;
+      if (entered) {
+        _showCloudConsentSheet(context, ctrl);
+      }
+    });
 
     return Scaffold(
       backgroundColor: AppColors.bgBase,
@@ -50,6 +62,43 @@ class LazyAssistantScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _showCloudConsentSheet(
+      BuildContext context, LazyAssistantController ctrl) async {
+    final approved = await LzBottomSheet.show<bool>(
+      context,
+      title: 'Ask LazyClaw in the cloud?',
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'This needs the internet, your tools or fresh info, so I\'d send '
+            'just this request to your LazyClaw server. Plain chat stays on '
+            'your phone. You can change this anytime in Settings.',
+            style: AppText.body.copyWith(color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: AppSpacing.xl),
+          LzButton.primary(
+            label: 'Continue in the cloud',
+            icon: LucideIcons.cloud,
+            onPressed: () => Navigator.of(ctx).pop(true),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          LzButton.secondary(
+            label: 'Keep it on my phone',
+            icon: LucideIcons.smartphone,
+            onPressed: () => Navigator.of(ctx).pop(false),
+          ),
+        ],
+      ),
+    );
+    if (approved == true) {
+      await ctrl.approveCloudOnce();
+    } else {
+      await ctrl.denyCloud();
+    }
   }
 }
 
@@ -129,6 +178,14 @@ class _Conversation extends StatelessWidget {
             ),
           if (state.response.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.md),
+            if (state.source != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                  child: ProvenanceBadge(source: state.source!),
+                ),
+              ),
             _Bubble(
               text: state.response,
               align: CrossAxisAlignment.start,
@@ -194,6 +251,7 @@ class _MicArea extends StatelessWidget {
       AssistantPhase.listening => ('Listening…', 'Tap Done when you finish'),
       AssistantPhase.thinking => ('Thinking…', 'Lazy is writing a reply'),
       AssistantPhase.speaking => ('Speaking…', 'Tap Stop to interrupt'),
+      AssistantPhase.awaitingCloudConsent => ('One moment…', 'Confirm to continue'),
       AssistantPhase.error => ('Tap to try again', state.error ?? ''),
       AssistantPhase.idle => ('Tap to talk', 'Fully on-device'),
     };
@@ -211,33 +269,43 @@ class _MicArea extends StatelessWidget {
         const SizedBox(height: AppSpacing.lg),
         GestureDetector(
           onTap: thinking ? null : () => ctrl.toggleListen(),
-          child: Container(
-            width: 92,
-            height: 92,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const LinearGradient(
-                colors: [AppColors.accentGradientStart, AppColors.accentGradientEnd],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.accent.withValues(alpha: listening ? 0.6 : 0.3),
-                  blurRadius: listening ? 28 : 14,
-                  spreadRadius: listening ? 4 : 0,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 92,
+                height: 92,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                    colors: [AppColors.accentGradientStart, AppColors.accentGradientEnd],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.accent.withValues(alpha: listening ? 0.6 : 0.3),
+                      blurRadius: listening ? 28 : 14,
+                      spreadRadius: listening ? 4 : 0,
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: Icon(
-              thinking
-                  ? LucideIcons.loader
-                  : listening
-                      ? LucideIcons.square
-                      : LucideIcons.mic,
-              color: AppColors.onAccent,
-              size: 34,
-            ),
+                child: Icon(
+                  thinking
+                      ? LucideIcons.loader
+                      : listening
+                          ? LucideIcons.square
+                          : LucideIcons.mic,
+                  color: AppColors.onAccent,
+                  size: 34,
+                ),
+              ),
+              Positioned(
+                top: 2,
+                right: 2,
+                child: MicStateIndicator(live: listening),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: AppSpacing.lg),

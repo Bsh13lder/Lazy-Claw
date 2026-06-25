@@ -182,11 +182,19 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
 
   /// Navigate to the branch a pending [action] belongs to. The destination
   /// screen (Tasks / Expenses) then DRAINS the action to open its sheet.
-  /// `chat` and `openTasks` have NO sheet (they just land on a tab), so they're
-  /// consumed here right after navigating — no screen drains them.
+  /// `chat`, `openTasks` and `assistant` have NO sheet (they just land on a
+  /// destination), so they're consumed here right after navigating — no screen
+  /// drains them. `/assistant` is a full-screen route OUTSIDE the shell, so we
+  /// `push` it (preserving the underlying tab) rather than `go`.
   void _navigateForAction(GoRouter router, AppAction action) {
-    router.go(routeForAction(action));
-    if (action == AppAction.chat || action == AppAction.openTasks) {
+    if (action == AppAction.assistant) {
+      router.push(routeForAction(action));
+    } else {
+      router.go(routeForAction(action));
+    }
+    if (action == AppAction.chat ||
+        action == AppAction.openTasks ||
+        action == AppAction.assistant) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) ref.read(pendingActionProvider.notifier).state = null;
       });

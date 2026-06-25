@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:workmanager/workmanager.dart';
 
+import '../assistant/assistant_backend_mode.dart';
+import '../assistant/assistant_settings_providers.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
 import '../core/due_date.dart';
@@ -133,6 +135,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // NOT show the dialog automatically — that would be intrusive on every open.
     // This complements the one-shot startup check in main.dart.
     Future.microtask(_silentUpdateCheck);
+    // Seed the "Hey Lazy" privacy mirrors from the server's general settings
+    // (mirrors how agent_mode is seeded). Fails soft — defaults are used.
+    Future.microtask(_seedAssistantFlags);
+  }
+
+  /// Reads the server general-settings snapshot once and seeds the local
+  /// assistant privacy mirrors (process-on-device + confirm-cloud). Never
+  /// throws — on any error the providers keep their on-device-first defaults.
+  Future<void> _seedAssistantFlags() async {
+    try {
+      final general = await ref.read(settingsRepositoryProvider).getGeneral();
+      if (!mounted) return;
+      ref.read(assistantOnDeviceOnlyProvider.notifier).state =
+          general.assistantProcessDataOnDevice;
+      ref.read(assistantConfirmCloudProvider.notifier).state =
+          general.assistantConfirmCloudRequests;
+    } catch (_) {
+      // Server unreachable / unknown keys — keep the secure defaults.
+    }
   }
 
   /// Background update probe. [SelfUpdateService.checkForUpdate] never throws and
@@ -446,6 +467,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             _buildLocalAiSection(),
             AppSpacing.vGap(AppSpacing.xl),
           ],
+
+          // 5b. Hey Lazy — tier picker + privacy toggles
+          _buildHeyLazySection(),
+          AppSpacing.vGap(AppSpacing.xl),
 
           // 6. Power tools link
           _buildPowerToolsSection(),
@@ -1189,6 +1214,133 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  // ── Hey Lazy (tiered voice assistant) ─────────────────────────────────────
+
+  /// One-line description for each backend tier (spec §3.2).
+  static const Map<AssistantBackendMode, ({String label, String desc})>
+      _kHeyLazyModes = {
+    AssistantBackendMode.onlyOnDevice: (
+      label: 'Local 🔒',
+      desc: 'Everything stays on your phone. No internet, tools, or actions.',
+    ),
+    AssistantBackendMode.preferOnDevice: (
+      label: 'Auto ⚡',
+      desc: 'On-device for plain chat; reaches the cloud when a turn needs '
+          'tools, actions, or fresh facts.',
+    ),
+    AssistantBackendMode.preferCloud: (
+      label: 'Max quality ☁️',
+      desc: 'Every turn runs on the LazyClaw server for the best answers.',
+    ),
+  };
+
+  Future<void> _setAssistantFlag({
+    bool? processDataOnDevice,
+    bool? confirmCloudRequests,
+  }) async {
+    try {
+      await ref.read(settingsRepositoryProvider).setAssistantFlags(
+            processDataOnDevice: processDataOnDevice,
+            confirmCloudRequests: confirmCloudRequests,
+          );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hey Lazy: $e')),
+      );
+    }
+  }
+
+  Widget _buildHeyLazySection() {
+    final mode = ref.watch(assistantBackendModeProvider);
+    final onDeviceOnly = ref.watch(assistantOnDeviceOnlyProvider);
+    final confirmCloud = ref.watch(assistantConfirmCloudProvider);
+    final current = _kHeyLazyModes[mode];
+
+    return LzSection(
+      title: 'Hey Lazy',
+      child: LzCard(
+        padding: EdgeInsets.zero,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 3-way tier picker (Local / Auto / Max quality).
+            Padding(
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Backend', style: AppText.body),
+                  const SizedBox(height: AppSpacing.sm),
+                  Wrap(
+                    spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.sm,
+                    children: _kHeyLazyModes.entries.map((entry) {
+                      final selected = entry.key == mode;
+                      return LzChip(
+                        label: entry.value.label,
+                        selected: selected,
+                        onTap: selected
+                            ? null
+                            : () => ref
+                                .read(assistantBackendModeProvider.notifier)
+                                .set(entry.key),
+                      );
+                    }).toList(),
+                  ),
+                  if (current != null) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      current.desc,
+                      style: AppText.caption
+                          .copyWith(color: AppColors.textSecondary),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+
+            // Process-on-device privacy lock — forces Local for the assistant.
+            _SwitchTile(
+              icon: Icons.shield_outlined,
+              title: 'Process data only on device',
+              subtitle: onDeviceOnly
+                  ? 'On — forces Local. Affects LazyClaw\'s assistant only.'
+                  : 'Affects LazyClaw\'s assistant only.',
+              value: onDeviceOnly,
+              onChanged: (v) {
+                ref.read(assistantOnDeviceOnlyProvider.notifier).state = v;
+                _setAssistantFlag(processDataOnDevice: v);
+              },
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+
+            // Confirm before the first cloud hop.
+            _SwitchTile(
+              icon: Icons.cloud_queue_outlined,
+              title: 'Confirm cloud requests',
+              subtitle: 'Ask before the first time a turn leaves your phone.',
+              value: confirmCloud,
+              onChanged: (v) {
+                ref.read(assistantConfirmCloudProvider.notifier).state = v;
+                _setAssistantFlag(confirmCloudRequests: v);
+              },
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+
+            // Always-listening — wired in a later phase (P3).
+            const _DisabledSwitchTile(
+              icon: Icons.mic_none_outlined,
+              title: 'Hey Lazy always listening',
+              subtitle: 'Hands-free wake word — coming soon.',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Power tools link ─────────────────────────────────────────────────────
 
   Widget _buildPowerToolsSection() {
@@ -1687,6 +1839,34 @@ class _SwitchTile extends StatelessWidget {
         activeThumbColor: AppColors.accent,
         inactiveThumbColor: AppColors.textMuted,
         inactiveTrackColor: AppColors.bgSurfaceHover,
+      ),
+    );
+  }
+}
+
+/// A greyed-out, non-interactive [_SwitchTile] used for "coming soon" features
+/// (the switch is fixed off and disabled). Dual-encoded with a muted "Soon"
+/// chip so the unavailability reads at a glance, not by colour alone.
+class _DisabledSwitchTile extends StatelessWidget {
+  const _DisabledSwitchTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: 0.5,
+      child: LzListTile(
+        leading: Icon(icon, size: 20, color: AppColors.textMuted),
+        title: title,
+        subtitle: subtitle,
+        trailing: const LzChip(label: 'Soon', dense: true),
       ),
     );
   }

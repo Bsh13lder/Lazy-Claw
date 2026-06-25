@@ -1,12 +1,12 @@
-/// "Hey Lazy" voice assistant — fully on-device.
+/// "Hey Lazy" tiered voice assistant.
 ///
-/// Pipeline: microphone → speech-to-text (platform `SpeechRecognizer`) → the
-/// on-device LLM ([LocalLlmEngine]) → text-to-speech (platform `TextToSpeech`).
-/// Nothing leaves the phone. The screen drives this controller; model loading is
-/// handled by the existing local-AI controller (the screen ensures a model is
-/// ready before letting the user talk).
+/// Pipeline: mic → speech-to-text → tier router → reply → text-to-speech. Plain
+/// chat stays on the on-device LLM ([LocalLlmEngine]); tool/action/internet
+/// turns escalate to the real server ([CloudTurns]), gated by a first-hop
+/// consent. The screen drives this controller and ensures a model is loaded.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
@@ -14,49 +14,57 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../local_ai/local_ai_providers.dart';
 import '../local_ai/local_llm_engine.dart';
+import 'assistant_backend_mode.dart';
+import 'assistant_router.dart';
+import 'assistant_settings_providers.dart';
+import 'assistant_state.dart';
+import 'cloud_turn_client.dart';
 
-enum AssistantPhase { idle, listening, thinking, speaking, error }
-
-class AssistantState {
-  const AssistantState({
-    this.phase = AssistantPhase.idle,
-    this.transcript = '',
-    this.response = '',
-    this.error,
-  });
-
-  final AssistantPhase phase;
-  final String transcript; // what the user said
-  final String response; // Lazy's reply (streams in while thinking)
-  final String? error;
-
-  bool get isBusy =>
-      phase == AssistantPhase.listening ||
-      phase == AssistantPhase.thinking ||
-      phase == AssistantPhase.speaking;
-
-  AssistantState copyWith({
-    AssistantPhase? phase,
-    String? transcript,
-    String? response,
-    String? error,
-    bool clearError = false,
-  }) =>
-      AssistantState(
-        phase: phase ?? this.phase,
-        transcript: transcript ?? this.transcript,
-        response: response ?? this.response,
-        error: clearError ? null : (error ?? this.error),
-      );
-}
+// Re-export the view-state types so existing call-sites that import the
+// controller keep resolving AssistantState/AssistantPhase/TurnSource.
+export 'assistant_state.dart';
 
 class LazyAssistantController extends StateNotifier<AssistantState> {
-  LazyAssistantController(this._engine) : super(const AssistantState());
+  LazyAssistantController(
+    this._engine,
+    this._cloud,
+    this._readMode,
+    this._readOnDeviceOnly, {
+    AssistantRouter router = const AssistantRouter(),
+    Future<bool> Function()? ensureCloud,
+    bool Function()? readConfirmCloud,
+    bool Function()? readConsentGiven,
+    void Function()? markConsentGiven,
+  })  : _router = router,
+        _ensureCloud = ensureCloud,
+        _readConfirmCloud = readConfirmCloud,
+        _readConsentGiven = readConsentGiven,
+        _markConsentGiven = markConsentGiven,
+        super(const AssistantState());
 
   final LocalLlmEngine _engine;
+  final CloudTurns _cloud;
+  final AssistantBackendMode Function() _readMode;
+  final bool Function() _readOnDeviceOnly;
+  final AssistantRouter _router;
+  final Future<bool> Function()? _ensureCloud;
+  // First-cloud-hop consent gate (Task 8). When confirm-cloud is on and the
+  // user hasn't yet consented, the first cloud turn pauses for an explicit OK.
+  final bool Function()? _readConfirmCloud;
+  final bool Function()? _readConsentGiven;
+  final void Function()? _markConsentGiven;
   final stt.SpeechToText _stt = stt.SpeechToText();
   final FlutterTts _tts = FlutterTts();
   bool _sttReady = false;
+
+  /// The utterance held while [AssistantPhase.awaitingCloudConsent] — the
+  /// prompt the cloud turn will run once the user approves. Null otherwise.
+  String? _pendingCloudPrompt;
+  String? get pendingCloudPrompt => _pendingCloudPrompt;
+
+  @visibleForTesting
+  Future<void> askForTest(String text) => _ask(text);
+  // Tests read the current state via the inherited StateNotifier.debugState.
 
   static const String _system =
       'You are Lazy, a helpful voice assistant. Give a direct, useful, concise answer '
@@ -142,44 +150,179 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
       state = const AssistantState(phase: AssistantPhase.idle);
       return;
     }
-    state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
-    final buf = StringBuffer();
-    try {
-      await for (final tok in _engine.generate(
-        [LocalLlmMessage.user(prompt)],
-        systemPrompt: _system,
-      )) {
-        buf.write(tok);
-        state = AssistantState(
-          phase: AssistantPhase.thinking,
-          transcript: prompt,
-          response: buf.toString(),
-        );
-      }
-    } catch (e) {
+    final route = _router.decide(
+      utterance: prompt,
+      mode: _readMode(),
+      processDataOnDevice: _readOnDeviceOnly(),
+    );
+
+    // First-cloud-hop consent: pause before the very first cloud turn so the
+    // user can OK leaving the phone once. We hold the prompt and surface the
+    // consent phase; the screen resumes via approveCloudOnce / denyCloud.
+    if (route == AssistantRoute.cloud && _needsCloudConsent()) {
+      _pendingCloudPrompt = prompt;
       state = AssistantState(
-        phase: AssistantPhase.error,
+        phase: AssistantPhase.awaitingCloudConsent,
         transcript: prompt,
-        error: 'Something went wrong: $e',
       );
       return;
     }
+
+    state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
+
+    final buf = StringBuffer();
+    TurnSource source =
+        route == AssistantRoute.cloud ? TurnSource.cloud : TurnSource.onDevice;
+    try {
+      if (route == AssistantRoute.cloud) {
+        final ok = (_ensureCloud == null) ? true : await _ensureCloud();
+        if (!ok) {
+          // No session → degrade to local with an honest note.
+          source = TurnSource.onDevice;
+          await _streamLocal(prompt, buf);
+        } else {
+          await _streamCloud(prompt, buf);
+        }
+      } else {
+        await _streamLocal(prompt, buf);
+        // Optional secondary self-signal: local asked to escalate.
+        if (_readMode() == AssistantBackendMode.preferOnDevice &&
+            !_readOnDeviceOnly() &&
+            buf.toString().contains('[[NEEDS_CLOUD]]')) {
+          buf.clear();
+          final ok = (_ensureCloud == null) ? true : await _ensureCloud();
+          if (ok) {
+            source = TurnSource.cloud;
+            await _streamCloud(prompt, buf);
+          }
+        }
+      }
+    } catch (e) {
+      _emitError(prompt, e, source);
+      return;
+    }
+
+    await _finishTurn(prompt, buf, source);
+  }
+
+  /// True when the first-cloud-hop consent gate must intervene: confirm-cloud
+  /// is on AND the user hasn't yet approved a cloud hop this install.
+  bool _needsCloudConsent() {
+    if (!(_readConfirmCloud?.call() ?? false)) return false;
+    return !(_readConsentGiven?.call() ?? false);
+  }
+
+  /// User approved the held cloud turn (once). Marks consent and runs it.
+  Future<void> approveCloudOnce() async {
+    final prompt = _takePendingPrompt();
+    if (prompt == null) return;
+    _markConsentGiven?.call();
+    await _runHeldCloudTurn(prompt);
+  }
+
+  /// User declined the cloud hop. Keep it on-device with an honest spoken note.
+  Future<void> denyCloud() async {
+    final prompt = _takePendingPrompt();
+    if (prompt == null) return;
+
+    state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
+    final buf = StringBuffer();
+    try {
+      await _streamLocal(prompt, buf);
+    } catch (e) {
+      _emitError(prompt, e, TurnSource.onDevice);
+      return;
+    }
+    if (buf.isEmpty) {
+      buf.write(
+          "Okay, keeping this on your phone — I can't reach the internet for that.");
+    }
+    await _finishTurn(prompt, buf, TurnSource.onDevice);
+  }
+
+  /// Runs the approved cloud turn, degrading to local if there's no session.
+  Future<void> _runHeldCloudTurn(String prompt) async {
+    state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
+    final buf = StringBuffer();
+    try {
+      final ok = (_ensureCloud == null) ? true : await _ensureCloud();
+      if (!ok) {
+        await _streamLocal(prompt, buf); // no session → honest local fallback
+        await _finishTurn(prompt, buf, TurnSource.onDevice);
+        return;
+      }
+      await _streamCloud(prompt, buf);
+    } catch (e) {
+      _emitError(prompt, e, TurnSource.cloud);
+      return;
+    }
+    await _finishTurn(prompt, buf, TurnSource.cloud);
+  }
+
+  String? _takePendingPrompt() {
+    final prompt = _pendingCloudPrompt;
+    _pendingCloudPrompt = null;
+    return prompt;
+  }
+
+  void _emitError(String prompt, Object e, TurnSource source) {
+    state = AssistantState(
+      phase: AssistantPhase.error,
+      transcript: prompt,
+      error: 'Something went wrong: $e',
+      source: source,
+    );
+  }
+
+  Future<void> _streamCloud(String prompt, StringBuffer buf) async {
+    await for (final tok in _cloud.streamTurn(prompt)) {
+      buf.write(tok);
+      state = AssistantState(
+        phase: AssistantPhase.thinking,
+        transcript: prompt,
+        response: buf.toString(),
+        source: TurnSource.cloud,
+      );
+    }
+  }
+
+  /// Cleans, shows + speaks the buffered reply, then settles to idle.
+  Future<void> _finishTurn(
+      String prompt, StringBuffer buf, TurnSource source) async {
     final reply = _clean(buf.toString());
     if (reply.isEmpty) {
-      state = AssistantState(phase: AssistantPhase.idle, transcript: prompt);
+      state = AssistantState(
+          phase: AssistantPhase.idle, transcript: prompt, source: source);
       return;
     }
     state = AssistantState(
       phase: AssistantPhase.speaking,
       transcript: prompt,
       response: reply,
+      source: source,
     );
     await _speak(reply);
     state = AssistantState(
       phase: AssistantPhase.idle,
       transcript: prompt,
       response: reply,
+      source: source,
     );
+  }
+
+  Future<void> _streamLocal(String prompt, StringBuffer buf) async {
+    await for (final tok in _engine.generate(
+      [LocalLlmMessage.user(prompt)],
+      systemPrompt: _system,
+    )) {
+      buf.write(tok);
+      state = AssistantState(
+        phase: AssistantPhase.thinking,
+        transcript: prompt,
+        response: buf.toString(),
+        source: TurnSource.onDevice,
+      );
+    }
   }
 
   Future<void> _speak(String text) async {
@@ -204,11 +347,22 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   }
 }
 
-/// One controller for the app's lifetime, sharing the on-device engine with the
-/// local-chat feature (one model in memory).
+/// App-lifetime controller: shares the on-device engine with local-chat (one
+/// model in memory), a dedicated cloud client, the tier router and the
+/// first-hop consent flags.
 final lazyAssistantProvider =
     StateNotifierProvider<LazyAssistantController, AssistantState>((ref) {
-  final c = LazyAssistantController(ref.watch(localLlmEngineProvider));
+  final c = LazyAssistantController(
+    ref.watch(localLlmEngineProvider),
+    ref.watch(cloudTurnClientProvider),
+    () => ref.read(assistantBackendModeProvider),
+    () => ref.read(assistantOnDeviceOnlyProvider),
+    ensureCloud: () => ensureAssistantSocketConnected(ref),
+    readConfirmCloud: () => ref.read(assistantConfirmCloudProvider),
+    readConsentGiven: () => ref.read(assistantFirstCloudConsentGivenProvider),
+    markConsentGiven: () =>
+        ref.read(assistantFirstCloudConsentGivenProvider.notifier).state = true,
+  );
   ref.onDispose(c.dispose);
   return c;
 });

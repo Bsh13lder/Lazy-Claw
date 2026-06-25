@@ -15,5 +15,5 @@ const String kLanFallbackBaseUrl = 'http://BlckIt.local:18789';
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.21.8';
-const int kAppBuild = 68;
+const String kAppVersion = '1.21.9';
+const int kAppBuild = 69;

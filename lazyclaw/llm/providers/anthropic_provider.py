@@ -199,10 +199,24 @@ class AnthropicProvider(BaseLLMProvider):
         disable_prompt_cache: bool = False,
         default_model: str = "claude-sonnet-4-6",
         default_tool_choice: dict | str | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> None:
         client_kwargs: dict = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        # Per-request timeout. The anthropic SDK default is ~600s; for
+        # MiniMax's compat endpoint we pass a tighter bound so a hung call
+        # raises APITimeoutError quickly and the caller can escalate to the
+        # fallback model instead of stalling for minutes. None → SDK default
+        # (real Anthropic is reliable, so it stays unbounded).
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        # Cap SDK-level retries so a persistently-slow endpoint can't multiply
+        # the wait (default max_retries=2 → up to 3× the timeout). None → SDK
+        # default.
+        if max_retries is not None:
+            client_kwargs["max_retries"] = max_retries
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
         self._disable_prompt_cache = disable_prompt_cache
         self._default_model = default_model

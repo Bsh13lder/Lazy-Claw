@@ -38,6 +38,11 @@ class Config:
     # 5-hour request cap (1500 / 4500 / 15000 / 30000). Plus is the
     # default because that's the user's actual subscription.
     minimax_token_plan_tier: str = "plus"
+    # Per-request timeout (seconds) for MiniMax's Anthropic-compat endpoint.
+    # The SDK default is ~600s, which let a single M3 call hang ~9 min on a
+    # 2026-06-24 Task Guardian cron. A hung call now raises APITimeoutError
+    # → the agent escalates to the fallback model instead of stalling.
+    minimax_timeout_s: float = 150.0
     telegram_bot_token: str | None = None
     browser_timeout: int = 300
     computer_timeout: int = 30
@@ -112,6 +117,7 @@ def load_config() -> Config:
         minimax_api_key=minimax_key,
         minimax_base_url=minimax_base_url,
         minimax_token_plan_tier=(os.getenv("MINIMAX_TIER", "plus") or "plus").lower().strip(),
+        minimax_timeout_s=float(os.getenv("MINIMAX_TIMEOUT_S", "150")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),

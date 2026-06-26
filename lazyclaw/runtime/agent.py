@@ -1537,6 +1537,24 @@ def _is_rate_limit_exception(exc: BaseException) -> bool:
     )
 
 
+def _is_timeout_exception(exc: BaseException) -> bool:
+    """Check if an LLM provider exception indicates a request TIMEOUT.
+
+    Catches the anthropic SDK's ``APITimeoutError``, httpx ``ReadTimeout`` /
+    ``ConnectTimeout``, and ``asyncio.TimeoutError``. Used ALONGSIDE
+    :func:`_is_rate_limit_exception` to auto-escalate a hung MiniMax call to
+    the configured fallback model instead of stalling the turn — a single
+    MiniMax-M3 call hung ~9 minutes on 2026-06-24 because the SDK default
+    timeout is ~600s. With the per-request MiniMax timeout (config
+    ``minimax_timeout_s``) the call now raises here in ~150s and escalates.
+    """
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return True
+    msg = str(exc).lower()
+    return "timed out" in msg or "timeout" in msg
+
+
 def _filter_error_messages(history: list[LLMMessage]) -> list[LLMMessage]:
     """Strip/neutralize stale error blobs from PRIOR turns.
 
@@ -4328,7 +4346,10 @@ class Agent:
                         # (`rate_limit_error`, code 2062) and generic provider
                         # 429s should re-route to the configured fallback
                         # model instead of dumping JSON into the user's chat.
-                        if _is_rate_limit_exception(exc) and not _escalated:
+                        if (
+                            _is_rate_limit_exception(exc)
+                            or _is_timeout_exception(exc)
+                        ) and not _escalated:
                             try:
                                 _fallback_name = (
                                     await self.eco_router.get_fallback_model(user_id)
@@ -4336,9 +4357,13 @@ class Agent:
                             except Exception:
                                 _fallback_name = None
                             if _fallback_name:
+                                _esc_reason = (
+                                    "timed out" if _is_timeout_exception(exc)
+                                    else "rate-limited"
+                                )
                                 logger.warning(
-                                    "Brain rate-limited (%s) — escalating to fallback %s",
-                                    type(exc).__name__, _fallback_name,
+                                    "Brain %s (%s) — escalating to fallback %s",
+                                    _esc_reason, type(exc).__name__, _fallback_name,
                                 )
                                 _escalated = True
                                 _escalation_iter = iteration
@@ -4456,7 +4481,10 @@ class Agent:
                     except Exception as exc:
                         # Mirror the chat-path rate-limit escalation: switch
                         # to the configured fallback model on first 429.
-                        if _is_rate_limit_exception(exc) and not _escalated:
+                        if (
+                            _is_rate_limit_exception(exc)
+                            or _is_timeout_exception(exc)
+                        ) and not _escalated:
                             try:
                                 _fallback_name = (
                                     await self.eco_router.get_fallback_model(user_id)

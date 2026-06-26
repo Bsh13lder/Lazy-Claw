@@ -138,6 +138,12 @@ class LLMRouter:
                 disable_prompt_cache=True,
                 default_model="MiniMax-M2.7",
                 default_tool_choice={"type": "auto"},
+                # Bound a hung MiniMax call (SDK default ~600s let one M3
+                # call hang ~9 min). On APITimeoutError the agent escalates
+                # to the fallback model. max_retries=1 so a slow endpoint
+                # can't multiply the wait.
+                timeout=self._config.minimax_timeout_s,
+                max_retries=1,
             )
         raise ValueError(f"Unknown provider: {provider_name}")
 

@@ -4,10 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../assistant/assistant_backend_mode.dart';
 import '../assistant/assistant_settings_providers.dart';
+import '../wake/miui_permissions.dart';
+import '../wake/native_wake_service.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
 import '../core/due_date.dart';
@@ -127,6 +130,13 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _checkingUpdate = false;
 
+  // Real installed version, read at runtime from the platform package so the
+  // About row can never drift from the actual APK. The kApp* constants are only
+  // a compile-time fallback (they go stale when pubspec is bumped without
+  // updating them — which is exactly what showed "v1.21.9 (69)" on a build-70
+  // APK). Same source of truth as [SelfUpdateService].
+  String _versionLabel = 'v$kAppVersion ($kAppBuild)';
+
   @override
   void initState() {
     super.initState();
@@ -135,9 +145,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // NOT show the dialog automatically — that would be intrusive on every open.
     // This complements the one-shot startup check in main.dart.
     Future.microtask(_silentUpdateCheck);
+    // Reflect the TRUE installed version in the About row (not the constant).
+    Future.microtask(_loadInstalledVersion);
     // Seed the "Hey Lazy" privacy mirrors from the server's general settings
     // (mirrors how agent_mode is seeded). Fails soft — defaults are used.
     Future.microtask(_seedAssistantFlags);
+  }
+
+  /// Reads the true installed version from `package_info_plus` so the About row
+  /// reflects the actual APK, not the compile-time constants. Fails soft —
+  /// keeps the constant-based fallback already in [_versionLabel].
+  Future<void> _loadInstalledVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final v = info.version.isNotEmpty ? info.version : kAppVersion;
+      final b = info.buildNumber.isNotEmpty ? info.buildNumber : '$kAppBuild';
+      if (mounted) setState(() => _versionLabel = 'v$v ($b)');
+    } catch (_) {
+      /* keep the compile-time fallback already in _versionLabel */
+    }
   }
 
   /// Reads the server general-settings snapshot once and seeds the local
@@ -1329,16 +1355,74 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const Divider(height: 1, color: AppColors.borderSubtle),
 
-            // Always-listening — wired in a later phase (P3).
-            const _DisabledSwitchTile(
+            // Always-listening "Hey Lazy" hotword (native on-device Vosk). Opt-in,
+            // off by default. Enabling arms the microphone foreground service.
+            _SwitchTile(
               icon: Icons.mic_none_outlined,
               title: 'Hey Lazy always listening',
-              subtitle: 'Hands-free wake word — coming soon.',
+              subtitle: ref.watch(wakeEnabledProvider)
+                  ? 'On — say "Hey Lazy" anytime, even with the screen off.'
+                  : 'Hands-free wake word. Downloads a 40 MB voice model on first use.',
+              value: ref.watch(wakeEnabledProvider),
+              onChanged: _toggleWake,
             ),
+            if (ref.watch(xiaomiDeviceProvider).valueOrNull ?? false) ...[
+              const Divider(height: 1, color: AppColors.borderSubtle),
+              LzListTile(
+                leading: const Icon(Icons.open_in_new,
+                    size: 20, color: AppColors.textSecondary),
+                title: 'Enable background pop-up (Xiaomi)',
+                subtitle:
+                    'Required so Hey Lazy can wake the screen. Also turn on Autostart + No battery limit (Android section above).',
+                onTap: _openWakeBackgroundPopup,
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  /// Toggles the "Hey Lazy" wake word. On enable, surfaces the two reasons it
+  /// can silently fail: a denied mic (the controller already reverts the toggle,
+  /// so we just explain), and — on Android 14+ — a missing full-screen-intent
+  /// grant, without which a wake posts only a silent notification instead of
+  /// surfacing over the lock screen. We deep-link the user to grant it.
+  Future<void> _toggleWake(bool v) async {
+    await ref.read(wakeEnabledProvider.notifier).set(v);
+    if (!mounted) return;
+    final armed = ref.read(wakeEnabledProvider);
+
+    if (v && !armed) {
+      // set() reverted it → the mic wasn't granted, so it couldn't arm.
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Microphone access is needed for "Hey Lazy". Grant it and try again.'),
+        ),
+      );
+      return;
+    }
+
+    if (v && armed && !await NativeWakeService.canFullScreenIntent()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Allow "Hey Lazy" to show full-screen so it can wake the screen.'),
+        ),
+      );
+      await NativeWakeService.requestFullScreenIntent();
+    }
+  }
+
+  /// Opens MIUI's "display pop-up while running in background" permission editor
+  /// — the load-bearing grant that lets Hey Lazy wake the screen over the lock
+  /// screen. Falls back to the app-details page natively if unavailable.
+  Future<void> _openWakeBackgroundPopup() async {
+    final t = miuiTargets('com.lazyclaw.lazyclaw_mobile')
+        .firstWhere((e) => e.key == 'background_popup');
+    await NativeWakeService().launchMiui(t);
   }
 
   // ── Power tools link ─────────────────────────────────────────────────────
@@ -1621,7 +1705,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   size: 20, color: AppColors.textSecondary),
               title: 'Version',
               trailing: Text(
-                'v$kAppVersion ($kAppBuild)',
+                _versionLabel,
                 style: AppText.caption,
               ),
             ),
@@ -1839,34 +1923,6 @@ class _SwitchTile extends StatelessWidget {
         activeThumbColor: AppColors.accent,
         inactiveThumbColor: AppColors.textMuted,
         inactiveTrackColor: AppColors.bgSurfaceHover,
-      ),
-    );
-  }
-}
-
-/// A greyed-out, non-interactive [_SwitchTile] used for "coming soon" features
-/// (the switch is fixed off and disabled). Dual-encoded with a muted "Soon"
-/// chip so the unavailability reads at a glance, not by colour alone.
-class _DisabledSwitchTile extends StatelessWidget {
-  const _DisabledSwitchTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    return Opacity(
-      opacity: 0.5,
-      child: LzListTile(
-        leading: Icon(icon, size: 20, color: AppColors.textMuted),
-        title: title,
-        subtitle: subtitle,
-        trailing: const LzChip(label: 'Soon', dense: true),
       ),
     );
   }

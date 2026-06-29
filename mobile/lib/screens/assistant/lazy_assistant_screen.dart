@@ -9,20 +9,80 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
+import '../../assistant/assistant_backend_mode.dart';
+import '../../assistant/assistant_settings_providers.dart';
 import '../../assistant/lazy_assistant_controller.dart';
 import '../../assistant/widgets/mic_state_indicator.dart';
 import '../../assistant/widgets/provenance_badge.dart';
 import '../../local_ai/local_ai_providers.dart';
 import '../../ui/ui.dart';
 
-class LazyAssistantScreen extends ConsumerWidget {
+class LazyAssistantScreen extends ConsumerStatefulWidget {
   const LazyAssistantScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<LazyAssistantScreen> createState() =>
+      _LazyAssistantScreenState();
+}
+
+class _LazyAssistantScreenState extends ConsumerState<LazyAssistantScreen> {
+  // One-shot guards so we auto-load / auto-listen exactly once per open.
+  bool _triedAutoLoad = false;
+  bool _autoListened = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Google-like: the moment the assistant opens, get ready hands-free —
+    // load the on-device model if needed; once it's ready, start listening
+    // without any taps. Runs after the first frame so providers are live.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoPrepare());
+  }
+
+  /// Loads the local model if one is selected but not loaded yet.
+  void _autoPrepare() {
+    if (_triedAutoLoad) return;
+    final localAi = ref.read(localAiControllerProvider);
+    if (!localAi.isReady &&
+        localAi.activeModelId != null &&
+        localAi.phase != LocalAiPhase.loading) {
+      _triedAutoLoad = true;
+      ref
+          .read(localAiControllerProvider.notifier)
+          .selectAndLoad(localAi.activeModelId!);
+    }
+  }
+
+  /// Starts listening once, as soon as a turn is answerable and we're idle —
+  /// speech capture doesn't need the LLM, so we never wait on the model here.
+  void _maybeAutoListen(bool canAnswer) {
+    if (_autoListened || !canAnswer) return;
+    final phase = ref.read(lazyAssistantProvider).phase;
+    if (phase == AssistantPhase.idle) {
+      _autoListened = true;
+      ref.read(lazyAssistantProvider.notifier).startListening();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(lazyAssistantProvider);
     final ctrl = ref.read(lazyAssistantProvider.notifier);
     final localAi = ref.watch(localAiControllerProvider);
+    final mode = ref.watch(assistantBackendModeProvider);
+    final onDeviceOnly = ref.watch(assistantOnDeviceOnlyProvider);
+
+    // We can run a turn if the cloud is allowed (no model needed) OR a local
+    // model is selected (it loads in parallel). Only the local-only-with-no-
+    // model case is a true dead-end — everything else shows the mic at once and
+    // never makes the user wait on the LLM before they can speak.
+    final localOnly =
+        mode == AssistantBackendMode.onlyOnDevice || onDeviceOnly;
+    final canAnswer = !localOnly || localAi.activeModelId != null;
+
+    // Load the model in the background; start listening as soon as we're idle.
+    _autoPrepare();
+    _maybeAutoListen(canAnswer);
 
     // First-cloud-hop consent: when a turn pauses for approval, present a
     // one-time sheet. Approve runs the held cloud turn; deny keeps it local.
@@ -50,7 +110,7 @@ class LazyAssistantScreen extends ConsumerWidget {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(AppSpacing.lg),
-          child: !localAi.isReady
+          child: !canAnswer
               ? _NeedModel(localAi: localAi)
               : Column(
                   children: [

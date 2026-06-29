@@ -6,6 +6,8 @@
 /// consent. The screen drives this controller and ensures a model is loaded.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -32,11 +34,13 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     this._readOnDeviceOnly, {
     AssistantRouter router = const AssistantRouter(),
     Future<bool> Function()? ensureCloud,
+    Future<bool> Function()? ensureLocalModel,
     bool Function()? readConfirmCloud,
     bool Function()? readConsentGiven,
     void Function()? markConsentGiven,
   })  : _router = router,
         _ensureCloud = ensureCloud,
+        _ensureLocalModel = ensureLocalModel,
         _readConfirmCloud = readConfirmCloud,
         _readConsentGiven = readConsentGiven,
         _markConsentGiven = markConsentGiven,
@@ -48,6 +52,9 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   final bool Function() _readOnDeviceOnly;
   final AssistantRouter _router;
   final Future<bool> Function()? _ensureCloud;
+  // Loads the on-device model on demand (it loads in parallel while the user is
+  // still speaking) so listening never has to wait for the LLM to be resident.
+  final Future<bool> Function()? _ensureLocalModel;
   // First-cloud-hop consent gate (Task 8). When confirm-cloud is on and the
   // user hasn't yet consented, the first cloud turn pauses for an explicit OK.
   final bool Function()? _readConfirmCloud;
@@ -56,6 +63,12 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   final stt.SpeechToText _stt = stt.SpeechToText();
   final FlutterTts _tts = FlutterTts();
   bool _sttReady = false;
+
+  /// Auto-endpoint timer: when no new words arrive for [_silenceWindow] while
+  /// listening, finalize automatically — so the user never has to tap "Done"
+  /// (some Android recognizers don't honor `pauseFor`). Reset on every partial.
+  Timer? _silenceTimer;
+  static const _silenceWindow = Duration(milliseconds: 1600);
 
   /// The utterance held while [AssistantPhase.awaitingCloudConsent] — the
   /// prompt the cloud turn will run once the user approves. Null otherwise.
@@ -96,13 +109,10 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   }
 
   Future<void> startListening() async {
-    if (!_engine.isLoaded) {
-      state = state.copyWith(
-        phase: AssistantPhase.error,
-        error: 'Load a local model first (Settings → Local AI).',
-      );
-      return;
-    }
+    // Speech capture needs no LLM — start it immediately so the mic is hot the
+    // instant the assistant surfaces (Google-like), even on a cold wake while
+    // the on-device model is still loading. The model is ensured in _ask, only
+    // when (and if) a local answer is actually needed.
     await _tts.stop();
     if (!_sttReady) {
       _sttReady = await _stt.initialize(
@@ -120,15 +130,27 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
       listenOptions: stt.SpeechListenOptions(
         partialResults: true,
         cancelOnError: true,
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 2),
       ),
-      listenFor: const Duration(seconds: 30),
-      pauseFor: const Duration(seconds: 3),
     );
+    _bumpSilenceTimer();
   }
 
   /// The "Done" action — stop capturing and use whatever was heard.
   Future<void> finishListening() async {
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
     await _stt.stop();
+  }
+
+  /// Restarts the silence countdown; when it elapses with no new speech we
+  /// finalize automatically (hands-free, no "Done" tap).
+  void _bumpSilenceTimer() {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer(_silenceWindow, () {
+      if (state.phase == AssistantPhase.listening) finishListening();
+    });
   }
 
   Future<void> stopSpeaking() async {
@@ -138,9 +160,13 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
 
   void _onSpeech(SpeechRecognitionResult r) {
     if (r.finalResult) {
+      _silenceTimer?.cancel();
+      _silenceTimer = null;
       _ask(r.recognizedWords);
     } else if (state.phase == AssistantPhase.listening) {
       state = state.copyWith(transcript: r.recognizedWords);
+      // Reset the auto-endpoint countdown each time the user keeps talking.
+      if (r.recognizedWords.trim().isNotEmpty) _bumpSilenceTimer();
     }
   }
 
@@ -184,16 +210,40 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
           await _streamCloud(prompt, buf);
         }
       } else {
-        await _streamLocal(prompt, buf);
-        // Optional secondary self-signal: local asked to escalate.
-        if (_readMode() == AssistantBackendMode.preferOnDevice &&
-            !_readOnDeviceOnly() &&
-            buf.toString().contains('[[NEEDS_CLOUD]]')) {
-          buf.clear();
-          final ok = (_ensureCloud == null) ? true : await _ensureCloud();
-          if (ok) {
+        // Ensure the on-device model is loaded before answering locally. The
+        // load was kicked off while the user was still speaking, so this is
+        // usually instant; it only ever waits on a true cold start.
+        final localReady = (_ensureLocalModel == null)
+            ? _engine.isLoaded
+            : await _ensureLocalModel();
+        if (!localReady) {
+          // Can't answer on-device. Escalate to the cloud when the mode allows;
+          // otherwise say so plainly rather than failing silently.
+          final canCloud = _readMode() != AssistantBackendMode.onlyOnDevice &&
+              !_readOnDeviceOnly();
+          if (canCloud &&
+              (_ensureCloud == null ? true : await _ensureCloud())) {
             source = TurnSource.cloud;
             await _streamCloud(prompt, buf);
+          } else {
+            buf.write(canCloud
+                ? "I couldn't reach the server and my on-device model isn't "
+                    "ready yet — give it a moment and try again."
+                : "I'm still getting my on-device model ready — give me a "
+                    "second and ask again.");
+          }
+        } else {
+          await _streamLocal(prompt, buf);
+          // Optional secondary self-signal: local asked to escalate.
+          if (_readMode() == AssistantBackendMode.preferOnDevice &&
+              !_readOnDeviceOnly() &&
+              buf.toString().contains('[[NEEDS_CLOUD]]')) {
+            buf.clear();
+            final ok = (_ensureCloud == null) ? true : await _ensureCloud();
+            if (ok) {
+              source = TurnSource.cloud;
+              await _streamCloud(prompt, buf);
+            }
           }
         }
       }
@@ -341,6 +391,7 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
 
   @override
   void dispose() {
+    _silenceTimer?.cancel();
     _stt.cancel();
     _tts.stop();
     super.dispose();
@@ -358,6 +409,14 @@ final lazyAssistantProvider =
     () => ref.read(assistantBackendModeProvider),
     () => ref.read(assistantOnDeviceOnlyProvider),
     ensureCloud: () => ensureAssistantSocketConnected(ref),
+    ensureLocalModel: () async {
+      final la = ref.read(localAiControllerProvider);
+      if (la.isReady) return true;
+      final id = la.activeModelId;
+      if (id == null) return false; // nothing selected → can't load
+      await ref.read(localAiControllerProvider.notifier).selectAndLoad(id);
+      return ref.read(localAiControllerProvider).isReady;
+    },
     readConfirmCloud: () => ref.read(assistantConfirmCloudProvider),
     readConsentGiven: () => ref.read(assistantFirstCloudConsentGivenProvider),
     markConsentGiven: () =>

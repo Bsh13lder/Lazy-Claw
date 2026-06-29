@@ -5,6 +5,7 @@ import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'core/actions/app_actions.dart';
+import 'wake/native_wake_service.dart';
 import 'core/actions/deep_link_service.dart';
 import 'core/crash_log.dart';
 import 'core/config/server_config.dart';
@@ -131,6 +132,14 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _deepLinks?.init();
+    });
+
+    // Re-arm the "Hey Lazy" wake word on launch if the user left it on. Android
+    // 14/15 block silent boot resume of a mic foreground service, so we re-arm
+    // here (reading the provider triggers its restoreAndRearm) instead of from a
+    // boot receiver.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(wakeEnabledProvider);
     });
 
     // Deep-link a tapped server notification into the Chat tab. Reuses the

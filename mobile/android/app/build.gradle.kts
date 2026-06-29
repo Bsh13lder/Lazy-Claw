@@ -96,4 +96,8 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // Native offline wake-word ("Hey Lazy"). The Flutter Vosk bindings conflict
+    // with llamadart (archive) and timezone (http), so we use the native Android
+    // Vosk library directly from a Kotlin foreground service instead.
+    implementation("com.alphacephei:vosk-android:0.3.47")
 }

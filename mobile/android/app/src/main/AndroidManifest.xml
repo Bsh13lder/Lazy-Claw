@@ -5,6 +5,14 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Hey Lazy voice assistant: on-device speech-to-text (SpeechRecognizer). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- "Hey Lazy" always-on wake word: a microphone foreground service runs Vosk
+         on-device; WAKE_LOCK keeps the CPU alive with the screen off; the
+         full-screen intent surfaces the assistant over the lock screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
@@ -114,11 +122,19 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/tasks_widget_info"/>
         </receiver>
+        <!-- "Hey Lazy" wake-word service: microphone-typed foreground service that
+             runs Vosk on-device and posts the full-screen wake notification. -->
+        <service
+            android:name=".WakeWordService"
+            android:foregroundServiceType="microphone"
+            android:exported="false"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"

@@ -209,6 +209,14 @@ class SkillRegistry:
         self.register(RescheduleTaskSkill(config=config))
         self.register(AskAboutTaskSkill(config=config))
 
+        # Persistent lists — "add X to my grocery list" appends a deduped
+        # sub-step to ONE list task instead of spawning a fresh task per item.
+        from lazyclaw.skills.builtin.list_manager import (
+            AddToListSkill, CheckOffListItemSkill,
+        )
+        self.register(AddToListSkill(config=config))
+        self.register(CheckOffListItemSkill(config=config))
+
         # Awake mode — keep the macOS host running lid-closed via caffeinate +
         # pmset. Works through the host awake bridge (root LaunchDaemon). NL-
         # discoverable: "stay awake", "sleep for 2h", "wake me at 7am", etc.

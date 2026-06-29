@@ -1229,6 +1229,47 @@ async def set_steps(
     return normalized
 
 
+async def append_steps(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    items: list[str],
+) -> list[dict] | None:
+    """Append checklist items to a task's steps, skipping duplicate titles.
+
+    Dedup is case-insensitive and whitespace-trimmed against the existing
+    titles. Builds a NEW step list (the fetched task is never mutated) and
+    persists it through the existing ``set_steps`` encrypt/write path.
+
+    Returns the normalized full step list, or None if the task is missing.
+    """
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return None
+
+    existing = _normalize_steps(_parse_steps(task.get("steps")))
+    seen_titles = {(s.get("title") or "").strip().casefold() for s in existing}
+
+    appended: list[dict] = []
+    for raw in items or []:
+        title = (raw or "").strip() if isinstance(raw, str) else str(raw or "").strip()
+        if not title:
+            continue
+        key = title.casefold()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        appended.append({"title": title, "done": False})
+
+    if not appended:
+        # Nothing new to add — return the current normalized list unchanged.
+        return existing
+
+    # Immutable: a brand-new list, never an in-place edit of ``existing``.
+    merged = [*existing, *appended]
+    return await set_steps(config, user_id, task_id, merged)
+
+
 async def toggle_step(
     config: Config,
     user_id: str,

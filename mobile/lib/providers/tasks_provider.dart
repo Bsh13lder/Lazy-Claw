@@ -270,6 +270,44 @@ class TasksNotifier extends StateNotifier<TasksState> {
     }
   }
 
+  /// Reschedule a *set* of tasks to the same target in one batch — the
+  /// "Reschedule all" overdue flow. Applies `dueDate` (date-only) + `reminderAt`
+  /// to every id, then does ONE cache refresh + ONE best-effort sync (instead of
+  /// the N refresh/sync churn N separate [updateTask] calls would cause).
+  ///
+  /// Each id's local update lands optimistically in the cache + outbox; per-task
+  /// local notifications are rescheduled against the new time. Mirrors
+  /// [updateTask]'s error handling — a DAO throw surfaces as [TasksState.error]
+  /// rather than escaping.
+  Future<void> rescheduleMany(
+    List<String> ids, {
+    required String dueDate,
+    required String reminderAt,
+  }) async {
+    if (ids.isEmpty) return;
+    try {
+      // Apply every local update first — no per-item refresh, so the cache is
+      // re-read exactly once below.
+      final updated = <Task>[];
+      for (final id in ids) {
+        final t = await _dao.applyLocalUpdate(
+          id,
+          dueDate: dueDate,
+          reminderAt: reminderAt,
+        );
+        if (t != null) updated.add(t);
+      }
+      await _refreshFromCache();
+      // Reschedule each task's local notification against the new reminder time.
+      for (final t in updated) {
+        unawaited(_reminders?.scheduleForTask(t) ?? Future<void>.value());
+      }
+      unawaited(_syncThenRefresh());
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
   /// Persist a typed list of sub-tasks for [id]. Serialises to the canonical
   /// `[{id,title,done}]` JSON string and routes through [updateTask] so it
   /// lands optimistically in the cache + outbox like any other field. An empty

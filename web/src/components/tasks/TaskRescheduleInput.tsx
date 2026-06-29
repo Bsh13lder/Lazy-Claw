@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { rescheduleTask } from "../../api";
+import { rescheduleTask, updateTask } from "../../api";
+import {
+  QUICK_DATES,
+  toQuickReschedule,
+  toQuickRescheduleFromInput,
+} from "./rescheduleDates";
 
 /**
  * Inline NL reschedule composer.
@@ -32,8 +37,8 @@ type Variant = "compact" | "full";
 const QUICK_PICKS: { label: string; phrase: string; hint: string }[] = [
   { label: "+1h", phrase: "in 1 hour", hint: "Push by an hour" },
   { label: "+3h", phrase: "in 3 hours", hint: "Push by three hours" },
-  { label: "tom", phrase: "tomorrow 9am", hint: "Tomorrow 9 AM" },
-  { label: "+1w", phrase: "next monday 9am", hint: "Next Monday 9 AM" },
+  { label: "tom", phrase: "tomorrow 10am", hint: "Tomorrow 10 AM" },
+  { label: "+1w", phrase: "next monday 10am", hint: "Next Monday 10 AM" },
 ];
 
 export function TaskRescheduleInput({
@@ -91,6 +96,29 @@ export function TaskRescheduleInput({
     }
   };
 
+  // Deterministic quick-date path: compute the target day client-side and
+  // PATCH { due_date, reminder_at } directly (default 10:00 local). Bypasses
+  // the NL parser entirely so the semantics match mobile exactly.
+  const applyQuickDate = async (
+    payload: { due_date: string; reminder_at: string },
+    label: string,
+  ): Promise<void> => {
+    setTone("thinking");
+    setMessage(`moving to ${label}…`);
+    try {
+      await updateTask(taskId, payload);
+      setTone("ok");
+      setMessage(`✓ ${label} · 10:00 AM`);
+      setPhrase("");
+      onChanged();
+    } catch (err) {
+      setTone("error");
+      const detail =
+        err instanceof Error ? err.message : "couldn't reschedule — try again";
+      setMessage(detail.slice(0, 120));
+    }
+  };
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const v = phrase.trim();
@@ -98,10 +126,50 @@ export function TaskRescheduleInput({
     void apply(v, "nl");
   };
 
+  const onPickDate = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const iso = e.target.value; // YYYY-MM-DD (already local-calendar)
+    if (!iso) return;
+    void applyQuickDate(toQuickRescheduleFromInput(iso), iso);
+    e.target.value = "";
+  };
+
   const compact = variant === "compact";
 
   return (
     <div className="flex flex-col gap-1.5">
+      {/* Quick-date chips — one tap drops the task onto that day at 10:00 AM
+          via a deterministic PATCH (no NL parsing). */}
+      <div className="flex items-center gap-1 flex-wrap">
+        {QUICK_DATES.map((q) => (
+          <button
+            key={q.label}
+            type="button"
+            title={`${q.label} · 10:00 AM`}
+            onClick={() => void applyQuickDate(toQuickReschedule(q.fn()), q.label)}
+            disabled={tone === "thinking"}
+            className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-text-secondary hover:text-accent hover:border-accent/50 hover:bg-accent-soft/30 transition-colors disabled:opacity-40"
+          >
+            {q.label}
+          </button>
+        ))}
+        {/* "Pick a date…" — native date input; chosen day also lands at 10am. */}
+        <label
+          title="Pick a date · 10:00 AM"
+          className={`relative text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-text-secondary hover:text-accent hover:border-accent/50 hover:bg-accent-soft/30 transition-colors cursor-pointer ${
+            tone === "thinking" ? "opacity-40 pointer-events-none" : ""
+          }`}
+        >
+          Pick a date…
+          <input
+            type="date"
+            onChange={onPickDate}
+            disabled={tone === "thinking"}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            aria-label="Pick a date to reschedule"
+          />
+        </label>
+      </div>
+
       <div
         className={`flex items-center gap-1.5 rounded-md bg-bg-tertiary/60 border border-border/60 ${
           compact ? "px-1.5 py-1" : "px-2 py-1.5"

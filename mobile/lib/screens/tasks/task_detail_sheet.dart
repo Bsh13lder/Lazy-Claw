@@ -14,6 +14,7 @@ import '../settings/settings_prefs.dart';
 import 'chip_edit.dart';
 import 'recurrence_picker.dart';
 import 'reminder_lead_picker.dart';
+import 'reschedule_sheet.dart';
 import 'subtask_editor.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
@@ -185,6 +186,20 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     Navigator.of(context).pop();
   }
 
+  /// Close this sheet and open the Smart Fast Reschedule sheet for the task.
+  /// The reschedule writes through [TasksNotifier.updateTask] itself, so we just
+  /// hand off — any in-progress edits here are intentionally discarded (a quick
+  /// reschedule is a deliberate "just move the date" action).
+  Future<void> _reschedule() async {
+    final navigator = Navigator.of(context);
+    // Use the navigator's (still-mounted) context to present the next sheet —
+    // this sheet's own context becomes defunct once we pop it below.
+    final rootContext = navigator.context;
+    final task = widget.task;
+    navigator.pop();
+    await showRescheduleSheet(rootContext, ref, task);
+  }
+
   Future<void> _pickProject() async {
     final result = await showProjectPicker(
       context,
@@ -294,7 +309,18 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           const SizedBox(height: AppSpacing.xl),
 
           // ── Due date quick-pick ────────────────────────────────────────
-          _SectionLabel('DUE DATE'),
+          Row(
+            children: [
+              _SectionLabel('DUE DATE'),
+              const Spacer(),
+              LzButton.ghost(
+                key: const Key('task-detail-reschedule'),
+                label: 'Reschedule',
+                icon: Icons.event_repeat_outlined,
+                onPressed: _reschedule,
+              ),
+            ],
+          ),
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [

@@ -52,6 +52,21 @@ String dueDateDisplay(String due) {
   return label == null ? day : '$day · $label';
 }
 
+/// The time-of-day label to show on a card's due chip, accounting for the
+/// Smart-Reschedule shape where [due] is **date-only** but a separate
+/// [reminderAt] carries the time-of-day (e.g. the 10:00 AM default).
+///
+/// * When [due] already carries a time → that time (datetime dueDates are
+///   unchanged).
+/// * When [due] is date-only but [reminderAt] has a time → the reminder's time.
+/// * Otherwise → null (a bare calendar date with no time at all).
+String? cardDueTimeLabel(String? due, String? reminderAt) {
+  final ownTime = formatDueTimeLabel(due);
+  if (ownTime != null) return ownTime;
+  if (due == null || due.isEmpty) return null;
+  return formatDueTimeLabel(reminderAt);
+}
+
 /// Composes a `dueDate` string from a calendar [day] plus an optional
 /// time-of-day. With both [hour] and [minute] → a full local ISO datetime
 /// `yyyy-MM-ddTHH:mm:00`; otherwise a date-only `yyyy-MM-dd` string.

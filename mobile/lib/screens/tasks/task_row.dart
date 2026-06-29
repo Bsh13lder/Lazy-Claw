@@ -45,6 +45,7 @@ class TaskRow extends StatefulWidget {
     this.onDueDateChanged,
     this.onCategoryChanged,
     this.onSubtasksChanged,
+    this.onReschedule,
   });
 
   final Task task;
@@ -80,6 +81,11 @@ class TaskRow extends StatefulWidget {
   /// Commits an inline subtask checklist edit (the full new list). Null → the
   /// subtask chip is a static progress badge (no fold/checklist).
   final ValueChanged<List<Subtask>>? onSubtasksChanged;
+
+  /// Opens the Smart Fast Reschedule sheet (the screen owns the [WidgetRef]).
+  /// When set AND the task is overdue, tapping the due chip routes here instead
+  /// of the bare date picker. Null → overdue cards keep the plain date picker.
+  final VoidCallback? onReschedule;
 
   @override
   State<TaskRow> createState() => _TaskRowState();
@@ -151,6 +157,26 @@ class _TaskRowState extends State<TaskRow> {
     cb(picked);
   }
 
+  /// True when the task's due day is strictly before today (the overdue
+  /// section). Overdue cards route their due chip to the reschedule sheet.
+  bool get _isOverdue {
+    final raw = widget.task.dueDate;
+    if (raw == null || widget.task.isDone) return false;
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final dueDay = DateTime(parsed.year, parsed.month, parsed.day);
+    return dueDay.isBefore(today);
+  }
+
+  /// The due-chip tap handler: the reschedule sheet for overdue cards (when an
+  /// [TaskRow.onReschedule] is wired), else the plain date picker.
+  VoidCallback? get _onDueChipTap {
+    if (_isOverdue && widget.onReschedule != null) return widget.onReschedule;
+    return widget.onDueDateChanged != null ? _editDueDate : null;
+  }
+
   Future<void> _editDueDate() async {
     final cb = widget.onDueDateChanged;
     if (cb == null) return;
@@ -208,6 +234,9 @@ class _TaskRowState extends State<TaskRow> {
     final projectColor = hasCategory ? _projectColor(task.category!) : null;
     final progress = subtaskProgressLabel(task.subtasks);
     final hasSubtasks = progress != null;
+    // The time tag's label: the due date's own time, or the reminderAt time on
+    // a date-only due (the Smart-Reschedule 10:00 AM default). Null = no time.
+    final cardTimeLabel = cardDueTimeLabel(task.dueDate, task.reminderAt);
     // A subtle "🔁 <label>" chip when the task repeats (the recurrence cron
     // parses to a known kind, or a generic "Repeats" for a custom cron).
     final recurLabel = cronChipLabel(task.recurring);
@@ -307,22 +336,26 @@ class _TaskRowState extends State<TaskRow> {
                         icon: Icons.calendar_today_outlined,
                         color: _dueDateColor(task.dueDate!),
                         selected: !isDone,
-                        onTap: widget.onDueDateChanged != null
-                            ? _editDueDate
-                            : null,
+                        onTap: _onDueChipTap,
                       ),
-                    // Time-of-day tag — only when the due date carries a time.
-                    if (dueDateHasTime(task.dueDate))
+                    // Time-of-day tag — shown when the due date carries a time,
+                    // OR when it's date-only but a reminderAt time exists (the
+                    // Smart-Reschedule 10:00 AM default), so the time is visible.
+                    if (cardTimeLabel != null)
                       LzChip(
                         key: ValueKey('task-row-time-${task.id}'),
-                        label: formatDueTimeLabel(task.dueDate)!,
+                        label: cardTimeLabel,
                         dense: true,
                         icon: Icons.schedule_outlined,
                         color: _dueDateColor(task.dueDate!),
                         selected: !isDone,
-                        onTap: widget.onDueDateChanged != null
-                            ? _editDueTime
-                            : null,
+                        // Date-only + reminder time → tapping reschedules;
+                        // an own-time chip edits the time in place as before.
+                        onTap: dueDateHasTime(task.dueDate)
+                            ? (widget.onDueDateChanged != null
+                                  ? _editDueTime
+                                  : null)
+                            : _onDueChipTap,
                       ),
                     // Recurrence chip — subtle, static (editing happens in the
                     // detail sheet's REPEAT picker).

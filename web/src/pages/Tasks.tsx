@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TaskItem } from "../api";
-import { listTasks, parseSteps } from "../api";
+import { listTasks, parseSteps, updateTask } from "../api";
+import {
+  QUICK_DATES,
+  toQuickReschedule,
+  toQuickRescheduleFromInput,
+} from "../components/tasks/rescheduleDates";
 import { QuickAddBar } from "../components/tasks/QuickAddBar";
 import { TaskCard } from "../components/tasks/TaskCard";
 import { TaskDetail } from "../components/tasks/TaskDetail";
@@ -280,6 +285,122 @@ function SectionHeader({
   );
 }
 
+/**
+ * "Reschedule all" — a subtle control for the Overdue group header. Opens a
+ * tiny quick-date menu (Tomorrow · This weekend · Next week · Pick a date…)
+ * built from `rescheduleDates.ts`. Choosing a date computes
+ * `{ due_date, reminder_at }` ONCE (date-only day @ 10:00 local) and PATCHes it
+ * to every task in `tasks` via the existing `updateTask`, then refetches the
+ * list. Errors surface inline and never crash the page.
+ */
+function RescheduleAllControl({
+  tasks,
+  onDone,
+}: {
+  tasks: TaskItem[];
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+
+  // Auto-clear the result toast so the header stays calm at rest.
+  useEffect(() => {
+    if (!result) return;
+    const id = window.setTimeout(() => setResult(null), result.tone === "error" ? 5000 : 2500);
+    return () => window.clearTimeout(id);
+  }, [result]);
+
+  const applyToAll = async (
+    payload: { due_date: string; reminder_at: string },
+    label: string,
+  ): Promise<void> => {
+    const ids = tasks.map((t) => t.id);
+    if (ids.length === 0) return;
+    setBusy(true);
+    setOpen(false);
+    try {
+      const outcomes = await Promise.allSettled(
+        ids.map((id) => updateTask(id, payload)),
+      );
+      const ok = outcomes.filter((o) => o.status === "fulfilled").length;
+      const failed = outcomes.length - ok;
+      if (failed > 0) {
+        setResult({
+          tone: "error",
+          text: `${ok}/${outcomes.length} rescheduled to ${label} · ${failed} failed`,
+        });
+      } else {
+        setResult({ tone: "ok", text: `✓ ${ok} rescheduled · ${label} 10:00 AM` });
+      }
+      onDone();
+    } catch {
+      setResult({ tone: "error", text: "couldn't reschedule — try again" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickDate = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const iso = e.target.value; // YYYY-MM-DD (local calendar)
+    if (!iso) return;
+    void applyToAll(toQuickRescheduleFromInput(iso), iso);
+    e.target.value = "";
+  };
+
+  return (
+    <div className="relative flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={busy}
+        aria-expanded={open}
+        title="Move every overdue task to a new day at 10:00 AM"
+        className="text-[10px] uppercase tracking-[0.1em] px-1.5 py-0.5 rounded border border-border/50 text-text-muted hover:text-accent hover:border-accent/40 hover:bg-accent-soft/30 transition-colors disabled:opacity-40"
+      >
+        {busy ? "rescheduling…" : "reschedule all"}
+      </button>
+
+      {result && (
+        <span
+          className={`text-[10px] ${result.tone === "error" ? "text-red-400" : "text-accent"}`}
+          role="status"
+        >
+          {result.text}
+        </span>
+      )}
+
+      {open && !busy && (
+        <div className="absolute top-full left-0 mt-1 z-20 flex items-center gap-1 rounded-md border border-border/60 bg-bg-secondary/95 backdrop-blur-md px-1.5 py-1 shadow-lg">
+          {QUICK_DATES.map((q) => (
+            <button
+              key={q.label}
+              type="button"
+              title={`${q.label} · 10:00 AM`}
+              onClick={() => void applyToAll(toQuickReschedule(q.fn()), q.label)}
+              className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-text-secondary hover:text-accent hover:border-accent/50 hover:bg-accent-soft/30 transition-colors"
+            >
+              {q.label}
+            </button>
+          ))}
+          <label
+            title="Pick a date · 10:00 AM"
+            className="relative text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-text-secondary hover:text-accent hover:border-accent/50 hover:bg-accent-soft/30 transition-colors cursor-pointer"
+          >
+            Pick a date…
+            <input
+              type="date"
+              onChange={onPickDate}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              aria-label="Pick a date to reschedule all overdue tasks"
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Tasks() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(readActiveTab);
   const [channel, setChannel] = useState<Channel>("mine");
@@ -525,6 +646,14 @@ export default function Tasks() {
                   {groupName}
                 </p>
                 <span className="text-[10px] ticker text-text-muted">{groupTasks.length}</span>
+                {groupName === "Overdue" && groupTasks.length > 0 && (
+                  <div className="ml-auto">
+                    <RescheduleAllControl
+                      tasks={groupTasks}
+                      onDone={() => setReloadTick((n) => n + 1)}
+                    />
+                  </div>
+                )}
               </header>
               {groupTasks.map((t) => (
                 <TaskCard

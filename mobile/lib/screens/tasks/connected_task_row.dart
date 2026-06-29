@@ -26,6 +26,7 @@ class ConnectedTaskRow extends StatelessWidget {
     this.onDueDateChanged,
     this.onCategoryChanged,
     this.onSubtasksChanged,
+    this.onReschedule,
   });
 
   final Task task;
@@ -41,6 +42,10 @@ class ConnectedTaskRow extends StatelessWidget {
   final void Function(String id, String category)? onCategoryChanged;
   final void Function(String id, List<Subtask> subtasks)? onSubtasksChanged;
 
+  /// Opens the Smart Fast Reschedule sheet for [task]. When set, an overdue
+  /// card's due chip routes here instead of the plain date picker.
+  final void Function(Task task)? onReschedule;
+
   @override
   Widget build(BuildContext context) {
     final t = task;
@@ -51,6 +56,7 @@ class ConnectedTaskRow extends StatelessWidget {
       onComplete: () => onComplete(t.id),
       onDelete: () => onDelete(t.id),
       onTap: () => onOpen(t),
+      onReschedule: onReschedule == null ? null : () => onReschedule!(t),
       onTitleChanged:
           onRenameTitle == null ? null : (title) => onRenameTitle!(t.id, title),
       onPriorityChanged: onPriorityChanged == null

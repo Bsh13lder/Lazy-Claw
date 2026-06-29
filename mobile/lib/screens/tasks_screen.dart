@@ -17,6 +17,8 @@ import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
 import 'tasks/ai_task_badge.dart';
 import 'tasks/connected_task_row.dart';
+import 'tasks/overdue_view.dart';
+import 'tasks/reschedule_sheet.dart';
 import 'tasks/task_calendar_view.dart';
 import 'tasks/task_detail_sheet.dart';
 import 'tasks/task_owner_filter.dart';
@@ -30,8 +32,10 @@ enum _Segment { tasks, notes }
 
 // ── View mode ─────────────────────────────────────────────────────────────────
 
-/// The three ways to view tasks (nested under the Tasks segment).
-enum _TasksView { list, calendar, projects }
+/// The ways to view tasks (nested under the Tasks segment). Overdue is a
+/// first-class peer of List/Calendar/Projects (full control over the overdue
+/// set, incl. "Reschedule all").
+enum _TasksView { list, overdue, calendar, projects }
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +71,30 @@ extension _SectionLabel on _Section {
 }
 
 // ── Grouping helper ───────────────────────────────────────────────────────────
+
+/// True when [task] is overdue: it has a parseable due date whose calendar day
+/// is strictly before today, and it isn't done. The single source of truth for
+/// "overdue" — shared by [_groupTasks] (the inline section) and the dedicated
+/// Overdue view ([isOverdueTask] re-exports it).
+bool _isOverdueOn(Task task, DateTime today) {
+  if (task.isDone || task.dueDate == null) return false;
+  final DateTime dueDay;
+  try {
+    final d = DateTime.parse(task.dueDate!);
+    dueDay = DateTime(d.year, d.month, d.day);
+  } catch (_) {
+    return false;
+  }
+  return dueDay.isBefore(today);
+}
+
+/// Whether [task] is overdue as of [now] (defaults to the wall clock). The
+/// dedicated Overdue view filters with this so its rule matches [_groupTasks]
+/// exactly.
+bool isOverdueTask(Task task, {DateTime? now}) {
+  final n = now ?? DateTime.now();
+  return _isOverdueOn(task, DateTime(n.year, n.month, n.day));
+}
 
 /// Splits [tasks] into the four section buckets.
 Map<_Section, List<Task>> _groupTasks(List<Task> tasks) {
@@ -424,11 +452,54 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     switch (_view) {
       case _TasksView.list:
         return _buildBody(state, visibleTasks, projects);
+      case _TasksView.overdue:
+        return _buildOverdueBody(state, visibleTasks, projects);
       case _TasksView.calendar:
         return _buildCalendarBody(state, visibleTasks, projects);
       case _TasksView.projects:
         return _buildProjectsBody(state, visibleTasks, projects);
     }
+  }
+
+  /// The dedicated Overdue view: an error/skeleton guard around [OverdueView]
+  /// (which owns its own filter/sort + "Reschedule all"). Reuses the same
+  /// per-task callbacks as the List view so every row control still works.
+  Widget _buildOverdueBody(
+    TasksState state,
+    List<Task> visibleTasks,
+    List<Project> projects,
+  ) {
+    if (state.isLoading && state.tasks.isEmpty && state.error == null) {
+      return LzSkeleton.list(
+        count: 4,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+      );
+    }
+    if (state.tasks.isEmpty && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(tasksProvider.notifier).load(),
+      );
+    }
+
+    return OverdueView(
+      tasks: visibleTasks,
+      projects: projects,
+      dirtyIds: state.dirtyIds,
+      onRefresh: _refresh,
+      onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
+      onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
+      onOpen: (task) => _openDetail(task, projects),
+      onReschedule: _openReschedule,
+      onRenameTitle: _commitTitle,
+      onPriorityChanged: _commitPriority,
+      onDueDateChanged: _commitDueDate,
+      onCategoryChanged: _commitCategory,
+      onSubtasksChanged: _commitSubtasks,
+    );
   }
 
   /// Calendar body: an error/skeleton guard around [TaskCalendarView]. The
@@ -475,6 +546,10 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       ),
     );
   }
+
+  /// Open the Smart Fast Reschedule sheet for [task] (overdue cards route here).
+  void _openReschedule(Task task) =>
+      showRescheduleSheet(context, ref, task);
 
   /// Open the full detail sheet for [task], handing it the project list so its
   /// project picker is populated.
@@ -614,6 +689,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               onDueDateChanged: _commitDueDate,
               onCategoryChanged: _commitCategory,
               onSubtasksChanged: _commitSubtasks,
+              onReschedule: _openReschedule,
             ),
         ],
       ),
@@ -637,6 +713,7 @@ class _TaskSection extends StatefulWidget {
     required this.onDueDateChanged,
     required this.onCategoryChanged,
     required this.onSubtasksChanged,
+    required this.onReschedule,
   });
 
   final _Section section;
@@ -651,6 +728,7 @@ class _TaskSection extends StatefulWidget {
   final void Function(String id, String dueDate) onDueDateChanged;
   final void Function(String id, String category) onCategoryChanged;
   final void Function(String id, List<Subtask> subtasks) onSubtasksChanged;
+  final void Function(Task task) onReschedule;
 
   @override
   State<_TaskSection> createState() => _TaskSectionState();
@@ -776,6 +854,7 @@ class _TaskSectionState extends State<_TaskSection> {
                 onDueDateChanged: widget.onDueDateChanged,
                 onCategoryChanged: widget.onCategoryChanged,
                 onSubtasksChanged: widget.onSubtasksChanged,
+                onReschedule: widget.onReschedule,
               ),
             ),
           ),
@@ -889,9 +968,11 @@ class _OwnerFilterRow extends StatelessWidget {
 
 // ── View toggle ────────────────────────────────────────────────────────────────
 
-/// A compact three-segment toggle that swaps the Tasks body between the
-/// sectioned List, the month Calendar, and the Projects breakdown. Built from
-/// [LzChip]s so it inherits the kit styling (no bespoke colors).
+/// A compact segment toggle that swaps the Tasks body between the sectioned
+/// List, the dedicated Overdue view, the month Calendar, and the Projects
+/// breakdown. Built from [LzChip]s so it inherits the kit styling (no bespoke
+/// colors). Horizontally scrollable so the four segments never overflow on
+/// narrow screens.
 class _ViewToggle extends StatelessWidget {
   const _ViewToggle({required this.view, required this.onChanged});
 
@@ -900,29 +981,40 @@ class _ViewToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        LzChip(
-          label: 'List',
-          icon: Icons.view_agenda_outlined,
-          selected: view == _TasksView.list,
-          onTap: () => onChanged(_TasksView.list),
-        ),
-        const SizedBox(width: AppSpacing.sm),
-        LzChip(
-          label: 'Calendar',
-          icon: Icons.calendar_month_outlined,
-          selected: view == _TasksView.calendar,
-          onTap: () => onChanged(_TasksView.calendar),
-        ),
-        const SizedBox(width: AppSpacing.sm),
-        LzChip(
-          label: 'Projects',
-          icon: Icons.folder_outlined,
-          selected: view == _TasksView.projects,
-          onTap: () => onChanged(_TasksView.projects),
-        ),
-      ],
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          LzChip(
+            label: 'List',
+            icon: Icons.view_agenda_outlined,
+            selected: view == _TasksView.list,
+            onTap: () => onChanged(_TasksView.list),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          LzChip(
+            label: 'Overdue',
+            icon: Icons.warning_amber_rounded,
+            color: AppColors.error,
+            selected: view == _TasksView.overdue,
+            onTap: () => onChanged(_TasksView.overdue),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          LzChip(
+            label: 'Calendar',
+            icon: Icons.calendar_month_outlined,
+            selected: view == _TasksView.calendar,
+            onTap: () => onChanged(_TasksView.calendar),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          LzChip(
+            label: 'Projects',
+            icon: Icons.folder_outlined,
+            selected: view == _TasksView.projects,
+            onTap: () => onChanged(_TasksView.projects),
+          ),
+        ],
+      ),
     );
   }
 }

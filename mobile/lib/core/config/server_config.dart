@@ -65,27 +65,36 @@ class ServerConfig {
     }
   }
 
-  /// Resolves the gateway used at startup.
+  /// The gateways the app will try at startup, in preference order.
   ///
-  /// PREFERS [kDefaultBaseUrl] (the baked DuckDNS + Caddy front door) and only
-  /// falls back to [kLanFallbackBaseUrl] (the home-LAN mDNS host) when the front
-  /// door is unreachable — e.g. the Mac is asleep or off the internet. The
-  /// in-app server picker was removed, so this self-heal is the app's only path
-  /// to the server when the tunnel is down.
-  ///
-  /// Fail-safe contract: any UNEXPECTED error returns [kDefaultBaseUrl], which
-  /// is the prior (pre-probe) behavior — so new code can never make startup
-  /// worse than the locked-tunnel default. The probe itself never throws (it
-  /// maps every failure to `false`); the outer guard exists only for the
-  /// genuinely unexpected (e.g. a custom [probe] that throws).
+  /// 1. [kDefaultBaseUrl] — the public DuckDNS + Caddy front door. Works on
+  ///    cellular and away from home.
+  /// 2. [kLanFallbackBaseUrl] — the Mac's mDNS name. Works on home WiFi, where
+  ///    the router won't hairpin the public IP back inside, so the public URL
+  ///    is unreachable there.
+  /// 3. [kLanFallbackIpBaseUrl] — the Mac's LAN IP directly. Same job as (2)
+  ///    for platforms whose HTTP client can't resolve `.local`.
+  static const List<String> _candidates = [
+    kDefaultBaseUrl,
+    kLanFallbackBaseUrl,
+    kLanFallbackIpBaseUrl,
+  ];
+
+  /// Resolves the gateway used at startup by probing [_candidates] in order and
+  /// returning the FIRST that actually answers `/api/health`. Every candidate is
+  /// verified (we never hand back an unreachable URL we merely assumed), so the
+  /// app self-heals whether it's on cellular (public front door) or home WiFi
+  /// (LAN host). If nothing answers — server asleep / no network — it falls back
+  /// to [kDefaultBaseUrl] so behavior matches the pre-probe build.
   static Future<String> resolveBaseUrl({HealthProbe? probe}) async {
     final check = probe ?? _defaultProbe;
-    try {
-      final reachable = await check(kDefaultBaseUrl);
-      return reachable ? kDefaultBaseUrl : kLanFallbackBaseUrl;
-    } catch (_) {
-      // Fail-safe: behave exactly as the locked build did before the probe.
-      return kDefaultBaseUrl;
+    for (final url in _candidates) {
+      try {
+        if (await check(url)) return url;
+      } catch (_) {
+        // Probe threw unexpectedly — treat as unreachable, try the next.
+      }
     }
+    return kDefaultBaseUrl;
   }
 }

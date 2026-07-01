@@ -12,10 +12,18 @@ const String kDefaultBaseUrl = 'https://lazyclaw.duckdns.org:8443';
 /// stranded with no reachable server. `BlckIt.local` is the Mac's mDNS name.
 const String kLanFallbackBaseUrl = 'http://BlckIt.local:18789';
 
+/// Second home-LAN fallback: the Mac's LAN IP directly. Used when the platform's
+/// HTTP client can't resolve the `BlckIt.local` mDNS name (Android's `.local`
+/// resolution is unreliable inside Dart's HttpClient, even when the OS shell can
+/// resolve it). Assumes the Mac keeps this DHCP address (pin it with a router
+/// reservation). Only reached on the home network — off-home it simply won't
+/// answer and the app moves on.
+const String kLanFallbackIpBaseUrl = 'http://192.168.0.12:18789';
+
 /// Compile-time version/build, used ONLY as a fallback. The real running
 /// version is read at runtime from `package_info_plus` inside the self-update
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.21.19';
-const int kAppBuild = 79;
+const String kAppVersion = '1.21.20';
+const int kAppBuild = 80;

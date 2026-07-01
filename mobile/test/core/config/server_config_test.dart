@@ -17,23 +17,38 @@ void main() {
   });
 
   group('resolveBaseUrl', () {
-    test('primary reachable → returns primary tunnel URL', () async {
-      String? probed;
+    test('primary reachable → returns primary, probes it first', () async {
+      final probed = <String>[];
       final url = await ServerConfig.resolveBaseUrl(probe: (b) async {
-        probed = b;
+        probed.add(b);
         return true;
       });
       expect(url, kDefaultBaseUrl);
-      // The probe must target the primary tunnel, not the LAN host.
-      expect(probed, kDefaultBaseUrl);
+      // Stops at the first reachable candidate — never probes the LAN hosts.
+      expect(probed, [kDefaultBaseUrl]);
     });
 
-    test('primary unreachable → falls back to LAN host', () async {
-      final url = await ServerConfig.resolveBaseUrl(probe: (b) async => false);
+    test('primary unreachable, mDNS reachable → returns mDNS LAN host',
+        () async {
+      final url = await ServerConfig.resolveBaseUrl(
+        probe: (b) async => b == kLanFallbackBaseUrl,
+      );
       expect(url, kLanFallbackBaseUrl);
     });
 
-    test('probe throws → fail-safe to primary (current behavior)', () async {
+    test('only the LAN IP answers → returns the LAN IP host', () async {
+      final url = await ServerConfig.resolveBaseUrl(
+        probe: (b) async => b == kLanFallbackIpBaseUrl,
+      );
+      expect(url, kLanFallbackIpBaseUrl);
+    });
+
+    test('nothing reachable → fail-safe to primary', () async {
+      final url = await ServerConfig.resolveBaseUrl(probe: (b) async => false);
+      expect(url, kDefaultBaseUrl);
+    });
+
+    test('probe throws for every candidate → fail-safe to primary', () async {
       final url = await ServerConfig.resolveBaseUrl(
         probe: (b) async => throw StateError('boom'),
       );

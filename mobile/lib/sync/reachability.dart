@@ -14,8 +14,10 @@ abstract class ConnectivityProbe {
   Future<bool> hasLink();
 
   /// Active health ping to the user's own computer. Internet != the box being
-  /// up, so we hit `GET {baseUrl}/api/system/about` and treat any 2xx/served
-  /// response as reachable.
+  /// up, so we hit the UNAUTHENTICATED `GET {baseUrl}/api/health` — "reachable"
+  /// means the server answers, independent of login state. (The old
+  /// `/api/system/about` needs auth and 401s before/without a valid session,
+  /// which wrongly read as "offline" even while the app was connected.)
   Future<bool> pingHost();
 }
 
@@ -40,7 +42,9 @@ class DefaultConnectivityProbe implements ConnectivityProbe {
   @override
   Future<bool> pingHost() async {
     try {
-      await _client.get<dynamic>('/api/system/about');
+      // Unauthenticated + always-2xx when the gateway is up. Do NOT use an
+      // authed endpoint here — a 401 means "up but not logged in", not "offline".
+      await _client.get<dynamic>('/api/health');
       return true;
     } catch (_) {
       return false;

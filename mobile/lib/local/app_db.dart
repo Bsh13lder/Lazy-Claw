@@ -31,7 +31,10 @@ import 'uuid.dart';
 ///     LWW). PDFs sync METADATA + tombstones only (content stays import-only,
 ///     immutable server-side) so a delete on web/agent propagates to mobile.
 ///     The LRU `byte_size`/`cached_at` columns are retained unchanged.
-const int kAppDbVersion = 7;
+/// v8: adds `expense_cache.is_favorite` (INTEGER 0/1, default 0) so a starred
+///     expense round-trips through the budgets sync — the per-expense mirror of
+///     the v5 per-project favorite flag. Feeds the Money "★ Starred only" total.
+const int kAppDbVersion = 8;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -160,6 +163,7 @@ const List<String> kAppDbSchema = [
     recurring_expense_id TEXT,
     lazybrain_note_id TEXT,
     project_name TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
     created_at TEXT,
     updated_at TEXT,
     dirty INTEGER NOT NULL DEFAULT 0,
@@ -278,6 +282,18 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
     await addCol('deleted', 'deleted INTEGER NOT NULL DEFAULT 0');
     await addCol('last_synced_at', 'last_synced_at TEXT');
     await addCol('base_updated_at', 'base_updated_at TEXT');
+  }
+  // v7 → v8: add the per-expense favorite flag (the mirror of the v5 per-project
+  // one). Idempotent — only ALTER when the column is genuinely absent so a
+  // re-run can't throw. Scoped to expense_cache; no other table is touched.
+  if (oldVersion < 8) {
+    final cols = await db.rawQuery("PRAGMA table_info('expense_cache')");
+    final hasFavorite = cols.any((c) => c['name'] == 'is_favorite');
+    if (!hasFavorite) {
+      await db.execute(
+        'ALTER TABLE expense_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
+      );
+    }
   }
 }
 

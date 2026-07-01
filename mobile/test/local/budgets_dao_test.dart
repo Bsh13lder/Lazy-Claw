@@ -217,6 +217,74 @@ void main() {
     });
   });
 
+  group('BudgetsDao expense favorite (per-expense starring)', () {
+    test('a freshly created expense defaults isFavorite=false', () async {
+      final dao = await _freshDao();
+      final exp = await dao.applyLocalExpenseCreate('p1', 5.0, 'Coffee');
+      final stored = await dao.getExpense(exp.id);
+      expect(stored!.isFavorite, isFalse);
+    });
+
+    test(
+        'applyLocalExpenseFavorite sets the flag, marks dirty + enqueues an '
+        'update op carrying is_favorite as a real JSON bool', () async {
+      final dao = await _freshDao();
+      final exp = await dao.applyLocalExpenseCreate('p1', 5.0, 'Coffee');
+      // Drain the create so we isolate the favorite update op.
+      final createSeq = (await dao.readBudgetsOutbox()).first.seq;
+      await dao.commitPush(createSeq, kExpenseEntity, exp.id);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+
+      final updated = await dao.applyLocalExpenseFavorite(exp.id, true);
+      expect(updated, isNotNull);
+      expect(updated!.isFavorite, isTrue);
+
+      // The stored row reflects the star + is dirty again.
+      final stored = await dao.getExpense(exp.id);
+      expect(stored!.isFavorite, isTrue);
+      expect(await dao.dirtyExpenseIds(), contains(exp.id));
+
+      // One queued update op targeting the expense, with a REAL bool payload.
+      final outbox = await dao.readBudgetsOutbox();
+      expect(outbox, hasLength(1));
+      final op = outbox.single;
+      expect(op.op, BudgetsOutboxOp.update);
+      expect(op.entity, kExpenseEntity);
+      expect(op.entityId, exp.id);
+      expect(op.payload['id'], exp.id);
+      expect(op.payload['is_favorite'], isTrue);
+      expect(op.payload['is_favorite'], isA<bool>());
+    });
+
+    test('applyLocalExpenseFavorite can un-star (false) an expense', () async {
+      final dao = await _freshDao();
+      final exp = await dao.applyLocalExpenseCreate('p1', 5.0, 'Coffee');
+      await dao.applyLocalExpenseFavorite(exp.id, true);
+      final off = await dao.applyLocalExpenseFavorite(exp.id, false);
+      expect(off!.isFavorite, isFalse);
+      expect((await dao.getExpense(exp.id))!.isFavorite, isFalse);
+      final lastOp = (await dao.readBudgetsOutbox()).last;
+      expect(lastOp.payload['is_favorite'], isFalse);
+    });
+
+    test('applyLocalExpenseFavorite on a missing expense is a no-op', () async {
+      final dao = await _freshDao();
+      expect(await dao.applyLocalExpenseFavorite('nope', true), isNull);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('is_favorite round-trips through a server upsert (row ↔ model)',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+        _serverExpense(id: 'srvfav').copyWith(isFavorite: true),
+        serverUpdatedAt: '2026-06-05T11:00:00Z',
+      );
+      final stored = await dao.getExpense('srvfav');
+      expect(stored!.isFavorite, isTrue);
+    });
+  });
+
   group('BudgetsDao expense delete', () {
     test('delete tombstones + enqueues a delete', () async {
       final dao = await _freshDao();

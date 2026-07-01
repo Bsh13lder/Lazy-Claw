@@ -144,6 +144,20 @@ double rangeTotal(Iterable<Expense> expenses) {
   return total;
 }
 
+/// Sum of the live (non-void) FAVORITED expense amounts — the "★ Starred only"
+/// subtotal the Money overview surfaces so the user can total just the entries
+/// they pinned. When [currency] is non-null the sum is scoped to that currency
+/// (mixed currencies are never reconciled); when null every starred row counts.
+double starredExpenseTotal(Iterable<Expense> expenses, {String? currency}) {
+  var total = 0.0;
+  for (final e in expenses) {
+    if (e.isVoid || !e.isFavorite) continue;
+    if (currency != null && e.currency != currency) continue;
+    total += e.amount;
+  }
+  return total;
+}
+
 /// Human-readable label for [range] (e.g. "Today", "Last 7 days", "June 2026",
 /// "All time", "Jun 1 – Jun 7"). The month label includes the year only when the
 /// shifted month falls outside [now]'s calendar year (so "June" for the current

@@ -19,6 +19,7 @@ Expense _expense(
   String currency = 'USD',
   String status = 'posted',
   String? spentAt,
+  bool isFavorite = false,
 }) =>
     Expense.fromJson({
       'id': id,
@@ -27,6 +28,7 @@ Expense _expense(
       'currency': currency,
       'status': status,
       'spent_at': spentAt,
+      'is_favorite': isFavorite,
     });
 
 void main() {
@@ -434,6 +436,42 @@ void main() {
           closeTo(0.25, 0.001));
       expect(_projectWithSpent(budget: 100, spent: 250).spentFraction, 1.0);
       expect(_projectWithSpent(budget: 0, spent: 50).spentFraction, 0.0);
+    });
+  });
+
+  group('starredExpenseTotal (Money "★ Starred only" subtotal)', () {
+    test('sums only favorited, non-void expenses', () {
+      final expenses = [
+        _expense('e1', 'p1', 10, isFavorite: true),
+        _expense('e2', 'p1', 5.5, isFavorite: true),
+        _expense('e3', 'p1', 100), // not starred → excluded
+        _expense('e4', 'p1', 99, isFavorite: true, status: 'void'), // void out
+      ];
+      expect(starredExpenseTotal(expenses), closeTo(15.5, 0.001));
+    });
+
+    test('is 0 when nothing is starred', () {
+      final expenses = [
+        _expense('e1', 'p1', 10),
+        _expense('e2', 'p1', 5),
+      ];
+      expect(starredExpenseTotal(expenses), 0.0);
+    });
+
+    test('is 0 for an empty list', () {
+      expect(starredExpenseTotal(const <Expense>[]), 0.0);
+    });
+
+    test('scopes to a single currency when one is given', () {
+      final expenses = [
+        _expense('e1', 'p1', 10, isFavorite: true, currency: 'USD'),
+        _expense('e2', 'p1', 20, isFavorite: true, currency: 'EUR'),
+        _expense('e3', 'p1', 5, isFavorite: true, currency: 'USD'),
+      ];
+      expect(starredExpenseTotal(expenses, currency: 'USD'), closeTo(15, 0.001));
+      expect(starredExpenseTotal(expenses, currency: 'EUR'), closeTo(20, 0.001));
+      // No currency filter → sums every starred row regardless of currency.
+      expect(starredExpenseTotal(expenses), closeTo(35, 0.001));
     });
   });
 }

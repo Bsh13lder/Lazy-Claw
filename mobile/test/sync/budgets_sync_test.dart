@@ -555,6 +555,35 @@ void main() {
       expect(result.pushed, greaterThanOrEqualTo(1));
     });
 
+    test(
+        'an expense whose ONLY dirty change is is_favorite pushes a PATCH '
+        'carrying is_favorite (real bool) to /api/budgets/expenses/{id}',
+        () async {
+      final dao = await _freshDao();
+      // Create + commit so the row is clean and server-known first.
+      await dao.applyLocalExpenseCreate('projF', 5.0, 'Latte', id: 'favexp');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+
+      // The only pending change is the star flip.
+      await dao.applyLocalExpenseFavorite('favexp', true);
+
+      final transport = _FakeTransport();
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushed, 1);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      final patches = transport.calls
+          .where((c) =>
+              c.method == 'PATCH' &&
+              c.path == '/api/budgets/expenses/favexp')
+          .toList();
+      expect(patches, hasLength(1));
+      expect(patches.single.body!['is_favorite'], isTrue);
+      // The id rides in the URL, never the PATCH body.
+      expect(patches.single.body!.containsKey('id'), isFalse);
+    });
+
     test('commitPush is idempotent — replaying a retired item is a no-op',
         () async {
       final dao = await _freshDao();
@@ -702,6 +731,80 @@ void main() {
       expect((await dao.getExpense('ec1'))!.description, 'Server desc');
       final conflicts = await dao.readConflicts();
       expect(conflicts.any((c) => c.field == 'description'), isTrue);
+    });
+
+    test(
+        'expense is_favorite LWW: a genuine local↔server disagreement is logged '
+        '(never silently dropped)', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      // Local dirty (older) expense that is NOT starred.
+      await dao.applyLocalExpenseCreate('p1', 5.0, 'Same desc', id: 'favc1');
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [
+          {
+            ..._serverExpenseJson(
+                id: 'favc1',
+                amount: 5.0,
+                description: 'Same desc',
+                updatedAt: '2026-06-05T11:00:00Z'),
+            'is_favorite': true, // server starred it → real disagreement
+          }
+        ],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      // Server wins (newer) and the starred flag now reflects the server.
+      expect((await dao.getExpense('favc1'))!.isFavorite, isTrue);
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      final favConflict = (await dao.readConflicts())
+          .where((c) => c.field == 'is_favorite')
+          .toList();
+      expect(favConflict, hasLength(1));
+      expect(favConflict.single.local, 'false');
+      expect(favConflict.single.server, 'true');
+    });
+
+    test(
+        'expense is_favorite LWW: matching stars do NOT false-conflict across '
+        'the 0/1(cache) vs bool(server) shape divergence', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      // Local dirty (older) expense the user starred → cache stores INTEGER 1.
+      await dao.applyLocalExpenseCreate('p1', 5.0, 'Same desc', id: 'favc2');
+      await dao.applyLocalExpenseFavorite('favc2', true);
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [
+          {
+            // Server agrees on the star (JSON bool true) but changed the
+            // description, so it wins LWW and the merge re-checks every field.
+            ..._serverExpenseJson(
+                id: 'favc2',
+                amount: 5.0,
+                description: 'Server desc',
+                updatedAt: '2026-06-05T11:00:00Z'),
+            'is_favorite': true,
+          }
+        ],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      // The star matches (1 ↔ true) → no is_favorite conflict may be logged,
+      // even though the description legitimately diverged.
+      expect(
+        (await dao.readConflicts()).where((c) => c.field == 'is_favorite'),
+        isEmpty,
+      );
+      expect((await dao.getExpense('favc2'))!.isFavorite, isTrue);
     });
 
     test('applies project + expense tombstones (removes from lists)', () async {

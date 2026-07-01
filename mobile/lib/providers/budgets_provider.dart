@@ -235,6 +235,28 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Flip an expense's favorite (star) flag (optimistic). Reads the current
+  /// value from the loaded state, writes the inverse through the DAO, and
+  /// best-effort syncs. Starred expenses feed the Money "★ Starred only"
+  /// subtotal. Returns true on success, false (with `state.error` set on a
+  /// local throw, or silently for an unknown id) otherwise.
+  Future<bool> toggleExpenseFavorite(String id) async {
+    final match = state.expenses.where((e) => e.id == id).firstOrNull;
+    if (match == null) return false;
+    final next = !match.isFavorite;
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalExpenseFavorite(id, next);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
   Future<bool> addExpense(
     String projectId,
     double amount,

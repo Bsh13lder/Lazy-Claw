@@ -631,12 +631,17 @@ class BudgetsSync {
       'description',
       'vendor',
       'status',
+      'is_favorite',
     ];
     final serverJson = serverExpense.toJson();
     var any = false;
     for (final col in fields) {
-      final localVal = localRow[col]?.toString();
-      final serverVal = serverJson[col]?.toString();
+      // Canonicalize so the local cache's INTEGER 0/1 for `is_favorite` never
+      // reads as a conflict against the server model's JSON bool ("1" vs
+      // "true"). Other fields pass through unchanged (same helper the project
+      // merge uses).
+      final localVal = _canonField(col, localRow[col]);
+      final serverVal = _canonField(col, serverJson[col]);
       if (localVal != serverVal) {
         any = true;
         await txn.logConflict(

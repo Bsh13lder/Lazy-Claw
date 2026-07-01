@@ -292,5 +292,69 @@ void main() {
       expect(moved.createdAt, '2026-06-08T00:00:00Z');
       expect(e.createdAt, '2026-06-07T14:32:00Z'); // original unchanged
     });
+
+    // ── is_favorite (per-expense starring) ──────────────────────────────────
+
+    test('isFavorite defaults to false when is_favorite is absent', () {
+      final e =
+          Expense.fromJson({'id': 'e12', 'project_id': 'p1', 'amount': 10.0});
+      expect(e.isFavorite, isFalse);
+    });
+
+    test('fromJson reads is_favorite: true', () {
+      final e = Expense.fromJson({
+        'id': 'e13',
+        'project_id': 'p1',
+        'amount': 10.0,
+        'is_favorite': true,
+      });
+      expect(e.isFavorite, isTrue);
+    });
+
+    test('fromJson coerces is_favorite sent as 1/0 (int) or "true"/"false"', () {
+      expect(
+        Expense.fromJson(
+                {'id': 'e14', 'project_id': 'p1', 'amount': 1.0, 'is_favorite': 1})
+            .isFavorite,
+        isTrue,
+      );
+      expect(
+        Expense.fromJson(
+                {'id': 'e15', 'project_id': 'p1', 'amount': 1.0, 'is_favorite': 0})
+            .isFavorite,
+        isFalse,
+      );
+      expect(
+        Expense.fromJson({
+          'id': 'e16',
+          'project_id': 'p1',
+          'amount': 1.0,
+          'is_favorite': 'true'
+        }).isFavorite,
+        isTrue,
+      );
+    });
+
+    test('toJson writes is_favorite as a JSON bool', () {
+      final e = Expense.fromJson({
+        'id': 'rt3',
+        'project_id': 'proj1',
+        'amount': 5.0,
+        'is_favorite': true,
+      });
+      expect(e.toJson()['is_favorite'], isTrue);
+
+      final plain =
+          Expense.fromJson({'id': 'rt4', 'project_id': 'proj1', 'amount': 5.0});
+      expect(plain.toJson()['is_favorite'], isFalse);
+    });
+
+    test('copyWith round-trips isFavorite without mutating the original', () {
+      final e =
+          Expense.fromJson({'id': 'rt5', 'project_id': 'proj1', 'amount': 5.0});
+      final starred = e.copyWith(isFavorite: true);
+      expect(starred.isFavorite, isTrue);
+      expect(e.isFavorite, isFalse); // original unchanged (immutable)
+    });
   });
 }

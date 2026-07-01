@@ -106,6 +106,42 @@ void main() {
       expect(exp.projectName, 'Proj');
     });
 
+    test(
+        'toggleExpenseFavorite flips the star, persists + marks dirty offline',
+        () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Proj');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await n.addExpense(n.state.projects.first.id, 5.0, 'Latte');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final id = n.state.expenses.first.id;
+      expect(n.state.expenses.first.isFavorite, isFalse);
+
+      // Star it.
+      final ok = await n.toggleExpenseFavorite(id);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(ok, isTrue);
+      expect(n.state.expenses.firstWhere((e) => e.id == id).isFavorite, isTrue);
+      expect(n.state.dirtyExpenseIds, contains(id));
+      // It persisted to the cache, not just the in-memory state.
+      expect((await dao.getExpense(id))!.isFavorite, isTrue);
+
+      // Un-star it.
+      await n.toggleExpenseFavorite(id);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(n.state.expenses.firstWhere((e) => e.id == id).isFavorite, isFalse);
+    });
+
+    test('toggleExpenseFavorite on an unknown id is a no-op (false)', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+      expect(await n.toggleExpenseFavorite('nope'), isFalse);
+    });
+
     test('removeExpense drops it from the visible list offline', () async {
       final dao = await _freshDao();
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));

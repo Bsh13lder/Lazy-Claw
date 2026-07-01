@@ -301,6 +301,8 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           onDeleteExpense: (id) =>
               ref.read(budgetsProvider.notifier).removeExpense(id),
           onTapExpense: _showExpenseDetail,
+          onToggleExpenseFavorite: (id) =>
+              ref.read(budgetsProvider.notifier).toggleExpenseFavorite(id),
           onRefresh: _refresh,
         ),
       ],
@@ -310,7 +312,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
 
 // ── Overview Tab ─────────────────────────────────────────────────────────────
 
-class _OverviewTab extends StatelessWidget {
+class _OverviewTab extends StatefulWidget {
   const _OverviewTab({
     required this.state,
     required this.onDeleteProject,
@@ -326,14 +328,38 @@ class _OverviewTab extends StatelessWidget {
   final Future<void> Function() onRefresh;
 
   @override
+  State<_OverviewTab> createState() => _OverviewTabState();
+}
+
+class _OverviewTabState extends State<_OverviewTab> {
+  /// When true, the Overview narrows to just the projects that own a starred
+  /// expense (each card scoped to its starred rows). Defaults to false so first
+  /// use shows everything — the star subtotal alone is enough of a hint.
+  bool _starredOnly = false;
+
+  @override
   Widget build(BuildContext context) {
+    final state = widget.state;
+
     // Aggregate totals — derived from the live expense set (not a stale/absent
     // server rollup) and currency-aware so mixed currencies aren't summed.
     final totals = BudgetTotals.from(state.projects, state.expenses);
 
-    // Favorites lead — the same starred set the Home dashboard pins, so the
-    // projects the user actually budgets against sit on top instead of being
-    // buried in a flat created-at list.
+    // The "★ Starred only" subtotal — sum of just the pinned expenses, scoped
+    // to the same headline currency the hero card uses.
+    final starredTotal =
+        starredExpenseTotal(state.expenses, currency: totals.currency);
+    final starredExpenseIds = state.expenses
+        .where((e) => e.isFavorite && !e.isVoid)
+        .map((e) => e.projectId)
+        .toSet();
+    final hasStarred = starredExpenseIds.isNotEmpty;
+    // A stale toggle collapses back to "show all" once the last star is gone.
+    final starredOnly = _starredOnly && hasStarred;
+
+    // Favorites lead — the same starred (project-level) set the Home dashboard
+    // pins, so the projects the user actually budgets against sit on top instead
+    // of being buried in a flat created-at list.
     final favorites = state.projects
         .where((p) => p.isFavorite && !p.isArchived)
         .toList();
@@ -341,35 +367,53 @@ class _OverviewTab extends StatelessWidget {
     final others =
         state.projects.where((p) => !favoriteIds.contains(p.id)).toList();
 
+    // Starred-only mode: a flat list of just the projects with a starred
+    // expense (each card is scoped to its starred rows below).
+    final starredProjects =
+        state.projects.where((p) => starredExpenseIds.contains(p.id)).toList();
+
     return LzRefresh(
-      onRefresh: onRefresh,
+      onRefresh: widget.onRefresh,
       child: ListView(
         padding: EdgeInsets.zero,
         children: [
           // Hero summary card.
           BudgetSummaryCard(totals: totals),
-          if (favorites.isNotEmpty) ...[
-            const _SectionLabel('★ FAVORITES'),
-            ...favorites.map(_projectCard),
-          ],
-          if (others.isNotEmpty) ...[
-            _SectionLabel(favorites.isEmpty ? 'PROJECTS' : 'OTHER PROJECTS'),
-            // No favorites yet → teach the star (same affordance as Home).
-            if (favorites.isEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  0,
-                  AppSpacing.lg,
-                  AppSpacing.sm,
+          // Visible starred subtotal + the show-all/starred-only toggle. Only
+          // surfaces once at least one expense is starred.
+          if (hasStarred)
+            _StarredControl(
+              starredOnly: starredOnly,
+              subtotalText: fmtMoney(totals.currency, starredTotal),
+              onChanged: (v) => setState(() => _starredOnly = v),
+            ),
+          if (starredOnly) ...[
+            const _SectionLabel('★ STARRED EXPENSES'),
+            ...starredProjects.map((p) => _projectCard(p, starredOnly: true)),
+          ] else ...[
+            if (favorites.isNotEmpty) ...[
+              const _SectionLabel('★ FAVORITES'),
+              ...favorites.map((p) => _projectCard(p)),
+            ],
+            if (others.isNotEmpty) ...[
+              _SectionLabel(favorites.isEmpty ? 'PROJECTS' : 'OTHER PROJECTS'),
+              // No favorites yet → teach the star (same affordance as Home).
+              if (favorites.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.lg,
+                    0,
+                    AppSpacing.lg,
+                    AppSpacing.sm,
+                  ),
+                  child: Text(
+                    'Star a project to pin it here and on Home.',
+                    style:
+                        AppText.caption.copyWith(color: AppColors.textMuted),
+                  ),
                 ),
-                child: Text(
-                  'Star a project to pin it here and on Home.',
-                  style:
-                      AppText.caption.copyWith(color: AppColors.textMuted),
-                ),
-              ),
-            ...others.map(_projectCard),
+              ...others.map((p) => _projectCard(p)),
+            ],
           ],
           if (state.projects.isNotEmpty)
             const SizedBox(height: AppSpacing.xxxl),
@@ -378,17 +422,83 @@ class _OverviewTab extends StatelessWidget {
     );
   }
 
-  Widget _projectCard(Project p) {
-    final projectExpenses = state.expenses
-        .where((e) => e.projectId == p.id && !e.isVoid)
+  Widget _projectCard(Project p, {bool starredOnly = false}) {
+    final projectExpenses = widget.state.expenses
+        .where((e) =>
+            e.projectId == p.id &&
+            !e.isVoid &&
+            (!starredOnly || e.isFavorite))
         .toList();
     return ProjectCard(
       project: p,
       expenses: projectExpenses,
-      pendingSync: state.dirtyProjectIds.contains(p.id),
-      onDelete: () => onDeleteProject(p.id),
-      onEdit: () => onEditProject(p),
-      onToggleFavorite: () => onToggleFavorite(p.id),
+      pendingSync: widget.state.dirtyProjectIds.contains(p.id),
+      onDelete: () => widget.onDeleteProject(p.id),
+      onEdit: () => widget.onEditProject(p),
+      onToggleFavorite: () => widget.onToggleFavorite(p.id),
+    );
+  }
+}
+
+/// The Overview's "★ Starred only" control: a toggle chip plus an always-visible
+/// starred subtotal pill (sum of just the pinned expenses). Defaults to showing
+/// everything — the toggle only narrows the view when the user opts in.
+class _StarredControl extends StatelessWidget {
+  const _StarredControl({
+    required this.starredOnly,
+    required this.subtotalText,
+    required this.onChanged,
+  });
+
+  final bool starredOnly;
+  final String subtotalText;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.xs,
+        AppSpacing.lg,
+        0,
+      ),
+      child: Row(
+        children: [
+          LzChip(
+            label: '★ Starred only',
+            dense: true,
+            selected: starredOnly,
+            color: AppColors.warn,
+            onTap: () => onChanged(!starredOnly),
+          ),
+          const Spacer(),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.sm,
+              vertical: 2,
+            ),
+            decoration: BoxDecoration(
+              color: AppColors.warn.withValues(alpha: 0.12),
+              borderRadius: AppRadii.rPill,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.star_rounded, size: 13, color: AppColors.warn),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  subtotalText,
+                  style: AppText.caption.copyWith(
+                    color: AppColors.warn,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -426,12 +536,14 @@ class _LedgerTab extends StatefulWidget {
     required this.state,
     required this.onDeleteExpense,
     required this.onTapExpense,
+    required this.onToggleExpenseFavorite,
     required this.onRefresh,
   });
 
   final BudgetsState state;
   final void Function(String id) onDeleteExpense;
   final void Function(Expense expense) onTapExpense;
+  final void Function(String id) onToggleExpenseFavorite;
   final Future<void> Function() onRefresh;
 
   @override
@@ -678,6 +790,8 @@ class _LedgerTabState extends State<_LedgerTab> {
               pendingSync: widget.state.dirtyExpenseIds.contains(expenses[j].id),
               onDelete: () => widget.onDeleteExpense(expenses[j].id),
               onTap: () => widget.onTapExpense(expenses[j]),
+              onToggleFavorite: () =>
+                  widget.onToggleExpenseFavorite(expenses[j].id),
               showProject: true,
             ),
             if (j < expenses.length - 1)

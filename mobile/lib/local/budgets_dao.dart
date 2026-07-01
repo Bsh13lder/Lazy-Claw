@@ -608,6 +608,44 @@ class BudgetsDao {
     return getExpense(id);
   }
 
+  /// Flip an expense's favorite (star) flag locally. Bumps updated_at + dirty
+  /// and enqueues an `update` op carrying `is_favorite` as a real JSON bool so
+  /// the replayed `PATCH /api/budgets/expenses/{id}` body reads
+  /// `{"is_favorite": true|false}`. Returns the patched Expense (or null when
+  /// the id is unknown). Mirrors [applyLocalProjectUpdate]'s dual-shape handling
+  /// for `is_favorite`: the SQLite cache stores an INTEGER 0/1 (sqflite rejects a
+  /// raw Dart bool), while the server PATCH body wants a JSON bool.
+  Future<Expense?> applyLocalExpenseFavorite(String id, bool isFavorite) async {
+    final existing = await getExpense(id);
+    if (existing == null) return null;
+
+    final now = _now();
+    final updated = existing.copyWith(isFavorite: isFavorite);
+
+    await _db.transaction((txn) async {
+      await txn.update(
+        'expense_cache',
+        {
+          'is_favorite': isFavorite ? 1 : 0,
+          'updated_at': now,
+          'dirty': 1,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await _enqueueTxn(
+        txn,
+        BudgetsOutboxOp.update,
+        kExpenseEntity,
+        id,
+        {'id': id, 'is_favorite': isFavorite},
+        now,
+      );
+    });
+
+    return updated;
+  }
+
   /// Tombstone an expense locally (deleted=1) + enqueue a `delete`.
   Future<bool> applyLocalExpenseDelete(String id) async {
     final existing = await getExpense(id);
@@ -903,6 +941,8 @@ class BudgetsDao {
         recurringExpenseId: row['recurring_expense_id'] as String?,
         lazybrainNoteId: row['lazybrain_note_id'] as String?,
         projectName: row['project_name'] as String?,
+        // Stored as INTEGER 0/1; treat anything non-zero as favorited.
+        isFavorite: ((row['is_favorite'] as num?)?.toInt() ?? 0) != 0,
       );
 
   Map<String, Object?> _rowFromExpense(Expense e) => {
@@ -923,6 +963,8 @@ class BudgetsDao {
         'recurring_expense_id': e.recurringExpenseId,
         'lazybrain_note_id': e.lazybrainNoteId,
         'project_name': e.projectName,
+        // sqflite has no bool column type — persist as INTEGER 0/1.
+        'is_favorite': e.isFavorite ? 1 : 0,
       };
 }
 

@@ -22,6 +22,7 @@ class ExpenseRow extends StatelessWidget {
     required this.onDelete,
     this.showProject = true,
     this.onTap,
+    this.onToggleFavorite,
   });
 
   final Expense expense;
@@ -32,6 +33,10 @@ class ExpenseRow extends StatelessWidget {
 
   /// Opens the expense detail/edit sheet. Null leaves the row non-tappable.
   final VoidCallback? onTap;
+
+  /// Flips the expense's favorite (star) flag. When null the star affordance is
+  /// hidden — e.g. the read-only rows nested inside a project card.
+  final VoidCallback? onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
@@ -172,6 +177,30 @@ class ExpenseRow extends StatelessWidget {
               ],
             ),
           ),
+          // Star toggle — pin an individual expense so it feeds the Money
+          // "★ Starred only" subtotal. Hidden on read-only nested rows.
+          if (onToggleFavorite != null) ...[
+            const SizedBox(width: AppSpacing.xs),
+            GestureDetector(
+              onTap: onToggleFavorite,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.xs),
+                child: Icon(
+                  expense.isFavorite
+                      ? Icons.star_rounded
+                      : Icons.star_outline_rounded,
+                  color: expense.isFavorite
+                      ? AppColors.warn
+                      : AppColors.textMuted,
+                  size: 20,
+                  semanticLabel: expense.isFavorite
+                      ? 'Unfavorite expense'
+                      : 'Favorite expense',
+                ),
+              ),
+            ),
+          ],
           const SizedBox(width: AppSpacing.md),
           // Amount + sync badge — the row's prominent figure.
           Column(

@@ -24,6 +24,11 @@ class Expense {
   /// Decrypted project name — present on the cross-project ledger only.
   final String? projectName;
 
+  /// Whether the user pinned this expense as a favorite. Starred expenses feed
+  /// the Money "★ Starred only" subtotal so the user can total just the entries
+  /// they care about. Round-trips through the budgets offline sync.
+  final bool isFavorite;
+
   const Expense({
     required this.id,
     required this.projectId,
@@ -39,6 +44,7 @@ class Expense {
     this.recurringExpenseId,
     this.lazybrainNoteId,
     this.projectName,
+    this.isFavorite = false,
   });
 
   bool get isVoid => status == 'void';
@@ -66,6 +72,7 @@ class Expense {
       recurringExpenseId: _str(json['recurring_expense_id']),
       lazybrainNoteId: _str(json['lazybrain_note_id']),
       projectName: _str(json['project_name']),
+      isFavorite: _bool(json['is_favorite']),
     );
   }
 
@@ -84,6 +91,7 @@ class Expense {
         'recurring_expense_id': recurringExpenseId,
         'lazybrain_note_id': lazybrainNoteId,
         'project_name': projectName,
+        'is_favorite': isFavorite,
       };
 
   Expense copyWith({
@@ -101,6 +109,7 @@ class Expense {
     String? recurringExpenseId,
     String? lazybrainNoteId,
     String? projectName,
+    bool? isFavorite,
   }) =>
       Expense(
         id: id ?? this.id,
@@ -117,6 +126,7 @@ class Expense {
         recurringExpenseId: recurringExpenseId ?? this.recurringExpenseId,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
         projectName: projectName ?? this.projectName,
+        isFavorite: isFavorite ?? this.isFavorite,
       );
 
   @override
@@ -142,4 +152,15 @@ double? _double(dynamic v) {
   if (v is double) return v;
   if (v is int) return v.toDouble();
   return double.tryParse(v.toString());
+}
+
+/// Coerce a JSON/SQLite favorite flag to a bool. The server sends a JSON bool,
+/// the local cache stores an INTEGER 0/1, and a pre-migration row is null —
+/// all map cleanly to false unless explicitly truthy.
+bool _bool(dynamic v) {
+  if (v == null) return false;
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  final s = v.toString().toLowerCase();
+  return s == 'true' || s == '1';
 }

@@ -36,6 +36,24 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     return () => { alive = false; };
   }, [tick]);
 
+  // Refetch when the user returns to this tab/window. Expenses land on the
+  // server out-of-band (a mobile sync push), and this view is otherwise a
+  // one-shot fetch that stays stale until a full reload — so a phone-added
+  // expense looked "missing on Web" even after it synced. Cheap: two GETs when
+  // focus/visibility is regained, not a poll.
+  useEffect(() => {
+    const refetch = () => setTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
   const refresh = () => { setTick((n) => n + 1); onChanged?.(); };
 
   const currencyByProject = useMemo(() => {

@@ -27,6 +27,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   const [adding, setAdding] = useState(false);
   const [addProject, setAddProject] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [starredOnly, setStarredOnly] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -64,8 +65,9 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
 
   const groups = useMemo<Group[]>(() => {
     if (!expenses) return [];
+    const src = starredOnly ? expenses.filter((e) => e.is_favorite) : expenses;
     const byId = new Map<string, Group>();
-    for (const e of expenses) {
+    for (const e of src) {
       const pid = e.project_id;
       let g = byId.get(pid);
       if (!g) {
@@ -82,12 +84,27 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
       g.subtotal += e.amount || 0;
     }
     return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [expenses, currencyByProject]);
+  }, [expenses, currencyByProject, starredOnly]);
 
-  // Grand total split per currency — no FX conversion (matches spending report).
+  // Total of the currently-shown set (all, or starred-only when filtered), split
+  // per currency — no FX conversion (matches spending report).
   const totalsByCurrency = useMemo(() => {
+    const src = starredOnly
+      ? (expenses || []).filter((e) => e.is_favorite)
+      : expenses || [];
     const m = new Map<string, number>();
-    for (const e of expenses || []) {
+    for (const e of src) {
+      const c = e.currency || "EUR";
+      m.set(c, (m.get(c) || 0) + (e.amount || 0));
+    }
+    return Array.from(m.entries());
+  }, [expenses, starredOnly]);
+
+  // Always-visible starred subtotal, so the "★" total shows even without the
+  // filter on — this is the "starred only" overview number the user wanted.
+  const starredTotalsByCurrency = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of (expenses || []).filter((x) => x.is_favorite)) {
       const c = e.currency || "EUR";
       m.set(c, (m.get(c) || 0) + (e.amount || 0));
     }
@@ -130,8 +147,24 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
         >
           {adding ? "Close" : "+ Add expense"}
         </button>
+        <button
+          onClick={() => setStarredOnly((v) => !v)}
+          title="Show only starred expenses"
+          className={`text-[12px] px-3 py-1.5 rounded-lg border ${
+            starredOnly
+              ? "border-amber-400/50 text-amber-300 bg-amber-400/10"
+              : "border-border/60 text-text-secondary hover:text-amber-300"
+          }`}
+        >
+          {starredOnly ? "★ Starred only" : "☆ Starred only"}
+        </button>
         <span className="ml-auto text-[12px] text-text-secondary">
-          Total:{" "}
+          {starredTotalsByCurrency.length > 0 && !starredOnly && (
+            <span className="mr-3 text-amber-300/90">
+              ★ {starredTotalsByCurrency.map(([c, v]) => fmtMoney(v, c)).join(" · ")}
+            </span>
+          )}
+          {starredOnly ? "Starred total" : "Total"}:{" "}
           <span className="font-medium text-text-primary">
             {totalsByCurrency.length === 0
               ? fmtMoney(0)
@@ -162,8 +195,9 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
 
       {groups.length === 0 ? (
         <p className="text-sm text-text-muted">
-          No expenses yet. Add one above, or just say "spent 12 on coffee" in chat —
-          it lands under General.
+          {starredOnly
+            ? "No starred expenses yet. Tap the ☆ on an expense to star it."
+            : 'No expenses yet. Add one above, or just say "spent 12 on coffee" in chat — it lands under General.'}
         </p>
       ) : (
         groups.map((g) => {

@@ -17,8 +17,19 @@ export function ExpenseRow({
     try { await api.deleteExpense(expense.id); onChanged(); }
     finally { setBusy(false); }
   };
+  const toggleStar = async () => {
+    setBusy(true);
+    try { await api.setExpenseFavorite(expense.id, !expense.is_favorite); onChanged(); }
+    finally { setBusy(false); }
+  };
   return (
     <div className="flex items-center gap-2 text-[11px] text-text-secondary px-2 py-1 rounded bg-bg-tertiary/40">
+      <button
+        onClick={() => void toggleStar()}
+        className={expense.is_favorite ? "text-amber-400" : "text-text-muted hover:text-amber-400"}
+        title={expense.is_favorite ? "Un-star expense" : "Star expense"}
+        disabled={busy}
+      >{expense.is_favorite ? "★" : "☆"}</button>
       <span className="text-text-muted w-20 shrink-0">{date}</span>
       <span className="flex-1 truncate">
         {expense.description || expense.vendor || "expense"}

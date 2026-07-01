@@ -838,6 +838,8 @@ export interface Expense {
   status: "posted" | "void";
   recurring_expense_id: string | null;
   lazybrain_note_id: string | null;
+  /** Per-expense star. Powers the "starred only" overview total. */
+  is_favorite: boolean;
   /** Decrypted project name — present on the cross-project ledger only. */
   project_name?: string | null;
 }
@@ -918,6 +920,13 @@ export const createExpense = (
 export const deleteExpense = (expenseId: string) =>
   request<{ status: string }>(`/api/budgets/expenses/${expenseId}`, {
     method: "DELETE",
+  });
+
+/** Star / un-star an expense — the "starred only" overview total sums these. */
+export const setExpenseFavorite = (expenseId: string, isFavorite: boolean) =>
+  request<{ status: string }>(`/api/budgets/expenses/${expenseId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_favorite: isFavorite }),
   });
 
 export const createRecurringExpense = (
@@ -2259,8 +2268,36 @@ export const extractPdfText = (id: string) =>
     `/api/pdf/${encodeURIComponent(id)}/extract`,
   );
 
-// Raw PDF bytes for the react-pdf <Document file={...}> viewer.
-export const pdfRawUrl = (id: string) => `/api/pdf/${encodeURIComponent(id)}/raw`;
+// Raw PDF bytes for the react-pdf <Document file={...}> viewer. react-pdf uses
+// `===` to detect a changed source, so after an IN-PLACE ✨ edit (same id, new
+// bytes) pass a bumped `v` token to force a re-fetch — without it the viewer
+// keeps showing the stale document.
+export const pdfRawUrl = (id: string, v?: number) => {
+  const base = `/api/pdf/${encodeURIComponent(id)}/raw`;
+  return v ? `${base}?v=${v}` : base;
+};
+
+// A recoverable pre-edit snapshot of a PDF (created when ✨ edits in place).
+export interface PdfVersion {
+  id: string;
+  name: string;
+  pages?: number | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export const listPdfVersions = (id: string) =>
+  request<{ versions: PdfVersion[]; count: number }>(
+    `/api/pdf/${encodeURIComponent(id)}/versions`,
+  ).then((r) => r.versions);
+
+// Restore a snapshot back into the live PDF (itself undoable). Returns the
+// refreshed live file metadata.
+export const restorePdfVersion = (id: string, versionId: string) =>
+  request<{ file: PdfMeta }>(
+    `/api/pdf/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`,
+    { method: "POST" },
+  ).then((r) => r.file);
 
 // Download as an attachment.
 export const pdfDownloadUrl = (id: string) =>

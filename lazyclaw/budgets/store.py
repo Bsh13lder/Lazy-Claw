@@ -50,6 +50,9 @@ EXPENSE_COLUMNS = [
     "id", "user_id", "project_id", "task_id", "amount", "currency",
     "description", "vendor", "notes", "spent_at", "status",
     "recurring_expense_id", "lazybrain_note_id", "created_at", "updated_at",
+    # Per-expense favorite flag (star) — plaintext INTEGER 0/1, default 0,
+    # serialized to clients as a JSON bool. Powers the "starred only" overview.
+    "is_favorite",
     # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
     "deleted_at",
 ]
@@ -137,7 +140,12 @@ def _project_to_dict(row, key: bytes) -> dict:
 
 
 def _expense_to_dict(row, key: bytes) -> dict:
-    return _row_to_dict(row, EXPENSE_COLUMNS, ENCRYPTED_EXPENSE_FIELDS, key)
+    result = _row_to_dict(row, EXPENSE_COLUMNS, ENCRYPTED_EXPENSE_FIELDS, key)
+    # Serialize the stored INTEGER 0/1 as a JSON boolean (NULL on a pre-migration
+    # row → False), exactly like ``_project_to_dict``.
+    if "is_favorite" in result:
+        result["is_favorite"] = bool(result["is_favorite"])
+    return result
 
 
 def _recur_to_dict(row, key: bytes) -> dict:
@@ -706,7 +714,7 @@ async def create_expense(
         "spent_at": spent_at, "status": "posted",
         "recurring_expense_id": recurring_expense_id,
         "lazybrain_note_id": note_id, "created_at": now, "updated_at": now,
-        "deleted_at": None,
+        "is_favorite": False, "deleted_at": None,
     }
 
 
@@ -780,6 +788,10 @@ async def update_expense(
 ) -> bool:
     if not fields:
         return False
+    # Normalize the star flag to a stored INTEGER 0/1 (a stray truthy payload
+    # can never write a non-0/1), exactly like ``update_project``.
+    if "is_favorite" in fields:
+        fields = {**fields, "is_favorite": _clean_favorite(fields["is_favorite"])}
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
     params: list = []

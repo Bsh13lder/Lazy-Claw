@@ -219,6 +219,11 @@ async def init_db(config: Config) -> None:
             # un-favorited. Exposed via list + /api/budgets/changes for the
             # offline sync pull, exactly like `color`.
             ("projects", "is_favorite", "ALTER TABLE projects ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
+            # Per-expense favorite flag (star) — plaintext INTEGER 0/1, default 0.
+            # Stars an individual expense so the web/mobile overview can show a
+            # "starred only" total. Exposed via list + /api/budgets/changes for
+            # the offline sync pull, exactly like projects.is_favorite.
+            ("project_expenses", "is_favorite", "ALTER TABLE project_expenses ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
             # Document tags (feat/sheets-next-level) — plaintext JSON array so the
             # sidebar and agent skills can filter/group sheets/docs/PDFs by tag.
             # Default '[]' (empty array) so pre-migration rows return [] cleanly.
@@ -234,6 +239,13 @@ async def init_db(config: Config) -> None:
             ("sheets", "deleted_at", "ALTER TABLE sheets ADD COLUMN deleted_at TEXT"),
             ("docs", "deleted_at", "ALTER TABLE docs ADD COLUMN deleted_at TEXT"),
             ("pdf_files", "deleted_at", "ALTER TABLE pdf_files ADD COLUMN deleted_at TEXT"),
+            # In-editor ✨ PDF edits (fix/pdf-seamless-in-place) replace the live
+            # file in place and stash the prior bytes as a hidden "version" row so
+            # the sidebar never accumulates ``foo - signed - filled.pdf`` clutter
+            # while the original stays recoverable. NULL = a normal live file;
+            # non-NULL = the parent pdf id this row is a pre-edit snapshot of.
+            # Filtered out of list/changes; surfaced only via /versions + /restore.
+            ("pdf_files", "version_of", "ALTER TABLE pdf_files ADD COLUMN version_of TEXT"),
         ]
         for table, column, sql in migrations:
             try:

@@ -84,6 +84,9 @@ class UpdateExpenseBody(BaseModel):
     task_id: str | None = None
     spent_at: str | None = None
     status: Literal["posted", "void"] | None = None
+    # Per-expense favorite flag (star). None = leave unchanged (dropped by the
+    # route's None-filter); True/False set it — powers the "starred only" overview.
+    is_favorite: bool | None = None
 
 
 class CreateRecurringBody(BaseModel):

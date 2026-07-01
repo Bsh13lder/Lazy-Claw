@@ -51,14 +51,25 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "fallback": "claude-cli",
     },
     "minimax": {
-        # MiniMax Token Plan ($20/mo Plus). ALL roles on MiniMax — no
-        # dependency on the unfunded Anthropic key. M3 brain (1M ctx,
-        # multimodal, strongest agentic) + M2.7 worker + M2.5 fallback.
-        # Routed through MiniMax's Anthropic-compatible endpoint
-        # (api.minimax.io/anthropic) via AnthropicProvider — the proven
-        # structured-tool path. Vision (M3 image input) will ride the same
-        # endpoint's image blocks (pending live verification with a key).
-        "brain":    "MiniMax-M3",
+        # MiniMax Token Plan ($20/mo Plus = 4,500 M2.7 req / 5h). ALL roles on
+        # MiniMax — no dependency on the unfunded Anthropic key.
+        #
+        # BRAIN = M2.7, NOT M3 (reverted 2026-07-01). The M3-brain swap from
+        # e2c8c32 was a bundled "upgrade" — but that commit's OWN root cause
+        # was conversational (drop_capability_denial_history breaks the refusal
+        # loop, model-independent), not the model. M3 as brain regressed on
+        # three fronts: (1) it is NOT in the Token Plan 5h request bucket (that
+        # covers M2.7 / m2.7-highspeed only — see PAID section below), yet
+        # rate_limiter counts every minimax call against that one bucket, so the
+        # paid workhorse ran off-plan; (2) documented ~9-min hangs (router.py
+        # timeout note); (3) narrated/fabricated results after tool failures in
+        # production (2026-07-01 automation_specialist intent_flail). A live A/B
+        # confirmed BOTH models emit native tool_use in a clean context, so this
+        # is a reliability/cost choice, not an endpoint defect. M2.7 is the
+        # proven structured-tool path and is already the provider default_model.
+        # Vision is served by Apple Vision OCR (ask_vision), not the brain, so
+        # dropping M3's image input costs nothing here.
+        "brain":    "MiniMax-M2.7",
         "worker":   "MiniMax-M2.7",
         "fallback": "minimax-m2.5",
     },

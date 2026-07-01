@@ -134,7 +134,27 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
       _sourceCtrl.clear();
       await _afterMutation();
     } catch (e) {
-      _snack(_friendly(e));
+      // Offline / server-unreachable: don't silently lose the top-up (the old
+      // behavior just surfaced an error and dropped it). Fall back to an
+      // offline-safe project-budget credit that queues + syncs via the project
+      // update path. ONLY on a network error — a definitive server rejection may
+      // have already been processed server-side, and a local credit on top would
+      // double-count the money.
+      if (_isNetworkError(e)) {
+        final ok = await ref
+            .read(budgetsProvider.notifier)
+            .creditProjectBudget(widget.projectId, amount);
+        if (ok) {
+          _amountCtrl.clear();
+          _sourceCtrl.clear();
+          _snack('Saved offline — will sync. (No ledger note while offline.)');
+          await _afterMutation();
+        } else {
+          _snack(_friendly(e));
+        }
+      } else {
+        _snack(_friendly(e));
+      }
     } finally {
       if (mounted) setState(() => _adding = false);
     }
@@ -185,6 +205,12 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
     if (e is ApiError) return e.message;
     return 'Something went wrong. Try again.';
   }
+
+  /// True when [e] is a transport-level failure (no HTTP response reached us),
+  /// so the top-up definitely didn't land server-side and an offline credit is
+  /// safe. `ApiError(status: 0)` is the network shape the budgets transport
+  /// surfaces (see BudgetsSync._isNetworkError).
+  static bool _isNetworkError(Object e) => e is ApiError && e.status == 0;
 
   @override
   Widget build(BuildContext context) {

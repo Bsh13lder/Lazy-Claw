@@ -59,6 +59,34 @@ void main() {
       expect(n.state.dirtyProjectIds, contains(created.id));
     });
 
+    test(
+        'creditProjectBudget bumps the local budget by the delta + queues it '
+        '(offline-safe Add-Budget fallback; additive, survives coalescing)',
+        () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('ClubBay', budget: 1000.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final proj = n.state.projects.firstWhere((p) => p.name == 'ClubBay');
+
+      final ok = await n.creditProjectBudget(proj.id, 500.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(ok, isTrue);
+      expect(
+          n.state.projects.firstWhere((p) => p.id == proj.id).budget, 1500.0);
+      expect(n.state.dirtyProjectIds, contains(proj.id));
+
+      // A second offline top-up reads the running local total → additive, so two
+      // queued credits don't collapse to just the last one under LWW coalescing.
+      await n.creditProjectBudget(proj.id, 250.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(
+          n.state.projects.firstWhere((p) => p.id == proj.id).budget, 1750.0);
+    });
+
     test('addExpense writes to cache + marks dirty while offline', () async {
       final dao = await _freshDao();
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));

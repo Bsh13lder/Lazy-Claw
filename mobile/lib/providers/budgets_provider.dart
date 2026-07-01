@@ -187,6 +187,33 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Add [amount] to a project's budget OFFLINE-SAFELY — the fallback the
+  /// "Add Budget" ledger uses when its online top-up POST can't reach the
+  /// server. Reads the current (optimistically up-to-date) local budget and
+  /// writes `budget = current + amount` through the already-synced project
+  /// update path, so the top-up is never lost and survives outbox coalescing
+  /// (each credit reads the running local total, so two queued credits stay
+  /// additive instead of collapsing to just the last absolute value under LWW).
+  /// Unlike the online ledger POST this creates NO `budget_entries` audit row —
+  /// the money moves, the where-from note is simply skipped while offline.
+  /// Returns true on success, false (with `state.error` set) on a local throw.
+  Future<bool> creditProjectBudget(String id, double amount) async {
+    final match = state.projects.where((p) => p.id == id).firstOrNull;
+    if (match == null) return false;
+    final next = match.budget + amount;
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(id, budget: next);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
   /// Flip a project's favorite flag (optimistic). Reads the current value from
   /// the loaded state, writes the inverse through the DAO, and best-effort
   /// syncs. A favorited project surfaces in the Home "Favorites" section.

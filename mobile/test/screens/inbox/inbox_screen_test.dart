@@ -45,6 +45,21 @@ const _threadNoName = InboxThread(
   updatedAt: '2026-06-09T09:00:00Z',
 );
 
+/// BUG 8 — a row whose encrypted fields failed to decrypt server-side.
+/// The server flags it with `decrypt_error: true`; the UI must render it as a
+/// distinct "unreadable — re-sync" state, never as a normal openable thread.
+const _threadCorrupt = InboxThread(
+  id: 't3',
+  channel: 'whatsapp',
+  contactHandle: '[encrypted]',
+  contactName: '[encrypted]',
+  lastPreview: '[encrypted]',
+  unreadCount: 1,
+  lastActivity: '2026-06-09T08:00:00Z',
+  updatedAt: '2026-06-09T08:00:00Z',
+  decryptError: true,
+);
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 void main() {
@@ -138,5 +153,39 @@ void main() {
     // but we can check it indirectly: the screen settled without errors.
     expect(find.text('All'), findsOneWidget);
     expect(find.text('Email'), findsOneWidget);
+  });
+
+  // ── BUG 7 — Telegram is no longer an offered inbox channel ──────────────────
+
+  /// Spec: the Telegram filter chip must NOT be offered — telegram threads
+  /// can't be read (no ChannelGateway dispatch), so any open was empty.
+  testWidgets('telegram chip is not offered', (tester) async {
+    await _pumpInbox(tester, overrides: [
+      inboxThreadsProvider.overrideWith((ref) async => [_threadAlice]),
+    ]);
+    // The other three channels stay.
+    expect(find.text('WhatsApp'), findsOneWidget);
+    expect(find.text('Email'), findsOneWidget);
+    expect(find.text('Instagram'), findsOneWidget);
+    // Telegram must be gone.
+    expect(find.text('Telegram'), findsNothing);
+  });
+
+  // ── BUG 8 — decrypt-error rows render distinctly (not as normal threads) ────
+
+  /// Spec: a thread flagged `decryptError` renders a muted "unreadable —
+  /// re-sync" row, never the raw "[encrypted]" sentinel as a normal title,
+  /// and is NOT tappable (no navigation onTap).
+  testWidgets('decrypt-error thread renders a distinct unreadable row',
+      (tester) async {
+    await _pumpInbox(tester, overrides: [
+      inboxThreadsProvider.overrideWith((ref) async => [_threadCorrupt]),
+    ]);
+    // Distinct unreadable state is shown.
+    expect(find.textContaining('Unreadable'), findsOneWidget);
+    // The raw sentinel must NOT leak as a normal thread title/preview.
+    expect(find.text('[encrypted]'), findsNothing);
+    // No unread badge on an unreadable row.
+    expect(find.byType(LzBadge), findsNothing);
   });
 }

@@ -195,6 +195,14 @@ async def _upsert_threads_for_items(
         # `from` is a DISPLAY NAME (pushName) there — storing it as the
         # handle broke every later read/send ("Maria 🌸" never resolves);
         # email/instagram keep using from/user, which ARE stable handles.
+        #
+        # LEGACY DUPLICATE MIGRATION (BUG 6): rows written before this fix are
+        # keyed on the pushName. We deliberately do NOT run a data migration —
+        # merging encrypted PII rows blind is riskier than the stale rows.
+        # Instead they self-heal: the first message after the fix creates the
+        # correct JID-keyed thread; the old pushName-keyed row simply stops
+        # receiving updates and can be swipe-deleted from the inbox. No live
+        # duplication continues once this path is deployed.
         handle = (
             item.get("chat_jid")
             or item.get("from")
@@ -476,6 +484,14 @@ def _extract_new_items(
                 "chatName": msg.get("chatName", ""),
                 "participantName": msg.get("participantName", ""),
                 "pushName": msg.get("pushName", ""),
+                # STABLE chat identity (msg.key.remoteJid). `from` here is the
+                # pushName / DISPLAY NAME — carrying `chat_jid` forward is what
+                # lets `_upsert_threads_for_items` key the thread on the JID
+                # instead of a mutable name (a pushName edit must NOT fork the
+                # thread). `participant` lets the group-sender resolver find the
+                # saved contact for the actual sender inside a group.
+                "chat_jid": msg.get("chat_jid", ""),
+                "participant": msg.get("participant", ""),
                 "muted": msg.get("muted", False),
             })
 

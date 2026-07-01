@@ -65,12 +65,41 @@ def test_lone_started_with_unknown_running_set_is_replayed() -> None:
     assert [e.kind for e in out] == ["background_started"]
 
 
-def test_running_set_check_never_applies_to_teamlead_kinds() -> None:
-    # A still-running TeamLead task has no terminal event yet AND its id
-    # is not a TaskRunner id — both events must survive an empty running set.
+def test_live_teamlead_frames_kept_when_in_running_set() -> None:
+    # A genuinely-running TeamLead task: its id IS in the caller's combined
+    # (TaskRunner + TeamLead) live-id set → both frames survive.
     events = [_evt("task_started", "tl-2"), _evt("task_step", "tl-2")]
-    out = chat_ws._initial_paint_events(events, running_task_ids=frozenset())
+    out = chat_ws._initial_paint_events(
+        events, running_task_ids=frozenset({"tl-2"}),
+    )
     assert [e.kind for e in out] == ["task_started", "task_step"]
+
+
+def test_orphaned_teamlead_frames_dropped_when_terminal_aged_out() -> None:
+    # BUG 3: the task's ``task_completed`` aged out of the 20-slot ring, so
+    # ``finished_ids`` can't suppress the lone non-terminal frames. The
+    # caller's live-id set says tl-3 is no longer running → drop them so the
+    # client doesn't strand a spinner that never settles.
+    events = [_evt("task_started", "tl-3"), _evt("task_step", "tl-3")]
+    assert chat_ws._initial_paint_events(
+        events, running_task_ids=frozenset(),
+    ) == []
+
+
+def test_orphaned_teamlead_frames_kept_when_running_set_unknown() -> None:
+    # running_task_ids=None means the registries are unreachable — never
+    # false-drop a possibly-live task.
+    events = [_evt("task_started", "tl-4"), _evt("task_step", "tl-4")]
+    out = chat_ws._initial_paint_events(events, running_task_ids=None)
+    assert [e.kind for e in out] == ["task_started", "task_step"]
+
+
+def test_orphaned_task_phase_dropped_when_not_live() -> None:
+    # task_phase is also a non-terminal lifecycle frame subject to the guard.
+    events = [_evt("task_phase", "tl-5")]
+    assert chat_ws._initial_paint_events(
+        events, running_task_ids=frozenset(),
+    ) == []
 
 
 # ── Existing rule pinned: bg terminals never replay ──────────────────────

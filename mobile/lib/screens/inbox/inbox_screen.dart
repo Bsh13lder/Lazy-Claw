@@ -16,12 +16,15 @@ const _kChannelIconSize = AppSpacing.xl;
 
 /// Ordered list of channel filter entries: (key, label, icon).
 /// key=null means "All".
+///
+/// Telegram is intentionally absent: it's the control channel (no MCP read
+/// tool / ChannelGateway dispatch), so a telegram thread could never be
+/// opened — advertising it produced empty "No messages yet" opens (BUG 7).
 const _kChannels = [
   (key: null, label: 'All', icon: Icons.all_inbox_outlined),
   (key: 'whatsapp', label: 'WhatsApp', icon: Icons.chat_outlined),
   (key: 'email', label: 'Email', icon: Icons.email_outlined),
   (key: 'instagram', label: 'Instagram', icon: Icons.camera_alt_outlined),
-  (key: 'telegram', label: 'Telegram', icon: Icons.send_outlined),
 ];
 
 // ── Leading icon per channel ───────────────────────────────────────────────────
@@ -95,8 +98,8 @@ class InboxView extends ConsumerWidget {
                   return const LzEmptyState(
                     icon: Icons.inbox_outlined,
                     title: 'No messages yet',
-                    hint: 'Replies from WhatsApp, Email, Instagram and '
-                        'Telegram will appear here.',
+                    hint: 'Replies from WhatsApp, Email and Instagram '
+                        'will appear here.',
                   );
                 }
                 return ListView.builder(
@@ -172,6 +175,14 @@ class _ThreadRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // BUG 8 — a row whose encrypted fields failed to decrypt server-side can't
+    // be opened (its handle is the "[encrypted]" sentinel, not a resolvable
+    // contact). Render a distinct, muted, NON-tappable "unreadable" state so
+    // it never masquerades as a normal thread that opens empty.
+    if (thread.decryptError) {
+      return const _UnreadableThreadRow();
+    }
+
     final displayName = (thread.contactName?.isNotEmpty == true)
         ? thread.contactName!
         : thread.contactHandle;
@@ -198,6 +209,36 @@ class _ThreadRow extends StatelessWidget {
           height: 1,
           color: AppColors.borderSubtle,
           indent: AppSpacing.lg + _kChannelIconSize + AppSpacing.md, // align under title
+        ),
+      ],
+    );
+  }
+}
+
+/// Muted, non-tappable row for a thread whose server-side decrypt failed.
+class _UnreadableThreadRow extends StatelessWidget {
+  const _UnreadableThreadRow();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        LzListTile(
+          leading: const Icon(
+            Icons.error_outline,
+            size: _kChannelIconSize,
+            color: AppColors.textMuted,
+          ),
+          title: 'Unreadable message',
+          titleStyle: AppText.body.copyWith(color: AppColors.textMuted),
+          subtitle: 'Could not decrypt — re-sync to restore.',
+          // onTap intentionally omitted → the row is not openable.
+        ),
+        const Divider(
+          height: 1,
+          color: AppColors.borderSubtle,
+          indent: AppSpacing.lg + _kChannelIconSize + AppSpacing.md,
         ),
       ],
     );

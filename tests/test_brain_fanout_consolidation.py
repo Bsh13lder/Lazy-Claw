@@ -227,15 +227,21 @@ async def test_consolidator_factory_is_used_for_callback(tmp_path):
 class _FakeWebCallback:
     """Duck-typed like ``gateway.routes.chat_ws.WebSocketCallback`` — owns a
     live ``ws`` + ``streaming_state`` and is NOT closed, so
-    ``is_live_web_callback`` recognizes it."""
+    ``is_live_web_callback`` recognizes it. Also mirrors the real
+    ``send_terminal_done`` public method so the streaming-ON terminal path
+    (BUG 1) can be duck-typed and asserted."""
 
     def __init__(self):
         self.ws = MagicMock()
         self.streaming_state = {"bg_streaming": False}
         self.events: list[AgentEvent] = []
+        self.terminals: list[str] = []
 
     async def on_event(self, event: AgentEvent) -> None:
         self.events.append(event)
+
+    async def send_terminal_done(self, content: str) -> None:
+        self.terminals.append(content)
 
 
 class _FakeTelegramNotifier:
@@ -306,6 +312,107 @@ async def test_consolidate_web_streaming_on_no_rescue(tmp_path, monkeypatch):
 
     lane_queue.enqueue.assert_awaited_once()
     assert web_cb.events == []  # no out-of-band background_done rescue
+
+
+# ── Streaming-ON terminal `done` for the live bubble (BUG 1) ───────────
+#
+# With bg_streaming ON (default) the reused live web callback streams the
+# synthetic consolidation turn's tokens into a chat bubble — but the lane-
+# queue path never reaches ``chat_ws._run_one_turn`` which normally flushes
+# the terminal ``{"type":"done"}`` frame, so the bubble spins forever.
+# ``_consolidate`` must emit a terminal ``done`` (via ``send_terminal_done``)
+# to settle it, WITHOUT firing the quiet-mode ``background_done`` rescue.
+
+
+@pytest.mark.asyncio
+async def test_consolidate_web_streaming_on_sends_terminal_done(
+    tmp_path, monkeypatch,
+):
+    """Streaming ON + live web callback: the consolidated reply must settle
+    the spinning chat bubble with a terminal ``done`` frame carrying the
+    merged text (BUG 1)."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=True))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(return_value="Merged: A=1, B=2.")
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    web_cb = _FakeWebCallback()
+    web_cb.streaming_state = {"bg_streaming": True}
+    _seed_group(runner, "gt1", "u1", [], cb=web_cb)
+    runner._brain_groups["gt1"].results.extend([
+        _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
+        _FanoutResult(task_id="t2", name="B", success=True, result="r2"),
+    ])
+
+    await runner._consolidate("gt1")
+
+    lane_queue.enqueue.assert_awaited_once()
+    # Terminal `done` frame settles the streaming bubble.
+    assert web_cb.terminals == ["Merged: A=1, B=2."]
+    # No quiet-mode background_done rescue in streaming mode (no double-send).
+    assert web_cb.events == []
+
+
+@pytest.mark.asyncio
+async def test_consolidate_web_quiet_mode_no_terminal_done(
+    tmp_path, monkeypatch,
+):
+    """Quiet-web keeps its ``background_done`` rescue and must NOT also send
+    a terminal ``done`` — that path never streamed a live bubble, so a
+    duplicate terminal would be wrong."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=False))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(return_value="quiet merged reply")
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    web_cb = _FakeWebCallback()  # bg_streaming=False by default
+    _seed_group(runner, "gt2", "u1", [], cb=web_cb)
+    runner._brain_groups["gt2"].results.extend([
+        _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
+        _FanoutResult(task_id="t2", name="B", success=True, result="r2"),
+    ])
+
+    await runner._consolidate("gt2")
+
+    lane_queue.enqueue.assert_awaited_once()
+    # Quiet rescue fired.
+    assert len(web_cb.events) == 1
+    assert web_cb.events[0].kind == "background_done"
+    assert web_cb.events[0].metadata["result"] == "quiet merged reply"
+    # No duplicate terminal.
+    assert web_cb.terminals == []
+
+
+@pytest.mark.asyncio
+async def test_consolidate_telegram_cb_no_terminal_done(tmp_path, monkeypatch):
+    """Non-web (Telegram) callback with streaming ON: has no
+    ``send_terminal_done`` and isn't a live web socket — the terminal must
+    NOT fire for it (delivered during the turn by its own notifier)."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=True))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(return_value="telegram reply")
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    tg_cb = _FakeTelegramNotifier()
+    _seed_group(runner, "gt3", "u1", [], cb=tg_cb)
+    runner._brain_groups["gt3"].results.extend([
+        _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
+        _FanoutResult(task_id="t2", name="B", success=True, result="r2"),
+    ])
+
+    await runner._consolidate("gt3")
+
+    lane_queue.enqueue.assert_awaited_once()
+    assert tg_cb.events == []  # Telegram path unchanged
 
 
 @pytest.mark.asyncio

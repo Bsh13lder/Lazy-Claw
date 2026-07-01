@@ -13,6 +13,12 @@ class InboxThread {
   final String lastActivity;
   final String updatedAt;
 
+  /// Server flag: the row's encrypted identity fields (handle/name) failed to
+  /// decrypt (mis-keyed / corrupted). Such a thread can't be opened, so the UI
+  /// renders a distinct "unreadable — re-sync" row instead of a broken thread
+  /// titled "[encrypted]".
+  final bool decryptError;
+
   const InboxThread({
     required this.id,
     required this.channel,
@@ -22,6 +28,7 @@ class InboxThread {
     this.unreadCount = 0,
     required this.lastActivity,
     required this.updatedAt,
+    this.decryptError = false,
   });
 
   factory InboxThread.fromJson(Map<String, dynamic> j) => InboxThread(
@@ -33,6 +40,7 @@ class InboxThread {
         unreadCount: (j['unread_count'] as int?) ?? 0,
         lastActivity: (j['last_activity'] ?? '').toString(),
         updatedAt: (j['updated_at'] ?? '').toString(),
+        decryptError: j['decrypt_error'] == true,
       );
 }
 

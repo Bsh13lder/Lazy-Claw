@@ -25,5 +25,5 @@ const String kLanFallbackIpBaseUrl = 'http://192.168.0.12:18789';
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.21.21';
+const String kAppVersion = '1.21.22';
 const int kAppBuild = 81;

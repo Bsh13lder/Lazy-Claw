@@ -31,6 +31,13 @@ class ChatReducer {
   /// arrives (the `done` payload's own usage wins when both exist).
   UsageInfo? _pendingUsage;
 
+  /// True while a genuine foreground user turn is in flight (set when the
+  /// assistant turn starts, cleared on its terminal done/error/cancelled).
+  /// Guards [_settleBubbleIfActivitiesDone]: a concurrent background/specialist
+  /// terminal must NEVER clear the spinner on a bubble still receiving
+  /// foreground `token` frames.
+  bool _foregroundActive = false;
+
   /// True while an agent turn is streaming — drives the input bar's
   /// stop button.
   bool get isStreaming => messages.any((m) => m.streaming);
@@ -67,6 +74,7 @@ class ChatReducer {
   void _startAssistantTurn() {
     _buf.clear();
     _pendingUsage = null;
+    _foregroundActive = true;
     messages.add(
         const ChatMessage(role: 'assistant', content: '', streaming: true));
   }
@@ -111,6 +119,7 @@ class ChatReducer {
             messages.last.copyWith(content: _buf.toString(), thinking: false));
 
       case DoneFrame(:final content, :final usage):
+        _foregroundActive = false;
         if (messages.isEmpty) return;
         final finalText = content.isNotEmpty ? content : _buf.toString();
         _replaceLast(messages.last.copyWith(
@@ -125,6 +134,7 @@ class ChatReducer {
         _pendingUsage = usage;
 
       case ErrorFrame(:final message):
+        _foregroundActive = false;
         if (messages.isEmpty) {
           messages.add(ChatMessage(
               role: 'assistant', content: '⚠️ $message'));
@@ -153,6 +163,7 @@ class ChatReducer {
         messages.add(ChatMessage(role: 'assistant', content: '⚠️ $message'));
 
       case CancelledFrame():
+        _foregroundActive = false;
         if (messages.isEmpty) return;
         _replaceLast(messages.last.copyWith(streaming: false));
 
@@ -220,11 +231,13 @@ class ChatReducer {
           :final detail,
           :final done,
           :final failed,
-          :final tool
+          :final tool,
+          :final taskId
         ):
         final activity = AgentActivity(
           kind: kind,
           subject: subject,
+          taskId: taskId,
           detail: detail,
           done: done,
           failed: failed,
@@ -235,22 +248,35 @@ class ChatReducer {
         if (done || failed) {
           // Terminal frames settle an existing row in place — if the row
           // lives on an EARLIER message (the turn already finished), it is
-          // settled there instead of touching the streaming bubble.
-          final key = '$kind:$subject';
-          final located = _findActivityRow(kind, subject);
+          // settled there instead of touching the streaming bubble. Dedup by
+          // the stable task_id when present, else the (kind, subject) shape.
+          final taskKey = (taskId != null && taskId.isNotEmpty)
+              ? '$kind:task:$taskId'
+              : null;
+          final subjKey = '$kind:$subject';
+          final located = _findActivityRow(kind, subject, taskId: taskId);
           if (located != null) {
-            _seenTerminalActivityKeys.add(key);
+            if (taskKey != null) _seenTerminalActivityKeys.add(taskKey);
+            _seenTerminalActivityKeys.add(subjKey);
             final (msgIdx, existing) = located;
             // Already settled ⇒ a reconnect replay; merging again would only
             // append duplicate event lines.
             if (existing.done) return;
             messages[msgIdx] = messages[msgIdx].withAgentActivity(activity);
+            // Bug 2: settling the row may leave the host bubble spinning —
+            // clear its spinner when nothing else is still running.
+            _settleBubbleIfActivitiesDone(msgIdx);
             return;
           }
           // No row: either a reconnect replay of an outcome we already
           // surfaced (drop it) …
-          if (_seenTerminalActivityKeys.contains(key)) return;
-          _seenTerminalActivityKeys.add(key);
+          if ((taskKey != null &&
+                  _seenTerminalActivityKeys.contains(taskKey)) ||
+              _seenTerminalActivityKeys.contains(subjKey)) {
+            return;
+          }
+          if (taskKey != null) _seenTerminalActivityKeys.add(taskKey);
+          _seenTerminalActivityKeys.add(subjKey);
           // … or the FIRST news of a task that finished while the chat was
           // closed (the server never replays background_done). Surface it as
           // a settled row so the completion isn't invisible. Mirrors the
@@ -259,6 +285,7 @@ class ChatReducer {
           // render with no spinner and no phantom in-flight bubble.
           _ensureSettledBubble();
           _replaceLast(messages.last.withAgentActivity(activity));
+          _settleBubbleIfActivitiesDone(messages.length - 1);
           return;
         }
         _ensureStreamingBubble();
@@ -299,7 +326,12 @@ class ChatReducer {
   /// completion as a settled activity row.
   void _addBgResult(BackgroundTaskResult card) {
     _seenTerminalActivityKeys.add('bg:${card.name}');
-    final located = _findActivityRow('bg', card.name);
+    // Also register the task-id key so a replayed `task_completed`
+    // (task_event_bus) frame for the same task can't re-surface a settled row.
+    if (card.taskId != null && card.taskId!.isNotEmpty) {
+      _seenTerminalActivityKeys.add('bg:task:${card.taskId}');
+    }
+    final located = _findActivityRow('bg', card.name, taskId: card.taskId);
     // Heartbeat/scheduled turns deliver the same text twice — consolidated
     // assistant message + background result. Flag the echo so the card
     // collapses to header-only instead of repeating the wall of text.
@@ -335,6 +367,9 @@ class ChatReducer {
           messages[msgIdx] = messages[msgIdx].withAgentActivities(updated);
         }
       }
+      // Bug 2: the host bubble may still be a phantom spinner — settle it once
+      // its activity rows are all done and no foreground turn is live.
+      _settleBubbleIfActivitiesDone(msgIdx);
     }
     messages.add(ChatMessage(
       role: 'bg_task',
@@ -375,18 +410,49 @@ class ChatReducer {
   static String _normalizeWs(String s) =>
       s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
-  /// Newest assistant message carrying an activity row for (kind, subject),
-  /// returned with its message index. Reverse scan so the most recent turn
-  /// wins when the same subject appeared in older turns too.
-  (int, AgentActivity)? _findActivityRow(String kind, String subject) {
+  /// Newest assistant message carrying an activity row for the frame, returned
+  /// with its message index. Keyed by the stable [taskId] when present (with a
+  /// subject fallback for legacy task_id-less rows that never steals a row
+  /// already bound to a different task), else by (kind, subject). Reverse scan
+  /// so the most recent turn wins when the same subject appeared earlier too.
+  (int, AgentActivity)? _findActivityRow(String kind, String subject,
+      {String? taskId}) {
+    if (taskId != null && taskId.isNotEmpty) {
+      final byId =
+          _scanActivityRow((a) => a.kind == kind && a.taskId == taskId);
+      if (byId != null) return byId;
+      return _scanActivityRow((a) =>
+          a.kind == kind && a.taskId == null && a.subject == subject);
+    }
+    return _scanActivityRow((a) => a.kind == kind && a.subject == subject);
+  }
+
+  /// Reverse-scan assistant messages for the first activity row matching [test].
+  (int, AgentActivity)? _scanActivityRow(bool Function(AgentActivity) test) {
     for (var i = messages.length - 1; i >= 0; i--) {
       final m = messages[i];
       if (m.role != 'assistant') continue;
       for (final a in m.agentActivities) {
-        if (a.kind == kind && a.subject == subject) return (i, a);
+        if (test(a)) return (i, a);
       }
     }
     return null;
+  }
+
+  /// Bug 2: after a background/specialist terminal settles a row, clear the
+  /// host bubble's streaming spinner IFF it is an assistant bubble that is
+  /// still `streaming`, carries ≥1 activity rows, ALL of which are done/failed,
+  /// AND no foreground token turn is live. Belt-and-suspenders for dropped or
+  /// reconnect-lost `done` frames — the server consolidation `done` covers the
+  /// happy path; this keeps a phantom bg/watcher bubble from spinning forever.
+  void _settleBubbleIfActivitiesDone(int msgIdx) {
+    if (_foregroundActive) return;
+    if (msgIdx < 0 || msgIdx >= messages.length) return;
+    final m = messages[msgIdx];
+    if (m.role != 'assistant' || !m.streaming) return;
+    if (m.agentActivities.isEmpty) return;
+    if (!m.agentActivities.every((a) => a.done || a.failed)) return;
+    messages[msgIdx] = m.copyWith(streaming: false);
   }
 
   void _replaceLast(ChatMessage m) => messages[messages.length - 1] = m;

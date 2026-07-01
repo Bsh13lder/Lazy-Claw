@@ -19,6 +19,13 @@ from lazyclaw.db.connection import db_session
 # for services beyond the built-in comms channels.
 _CHANNEL_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
+# Sentinel `decrypt_field` returns when an `enc:`-prefixed value fails to
+# decrypt (wrong key / corruption). Must mirror the default `fallback` in
+# `crypto.encryption.decrypt_field`. A row whose handle/name decrypts to this
+# is unreadable — we flag it so the client renders a distinct "re-sync" state
+# instead of a broken thread titled "[encrypted]" whose live read also fails.
+_DECRYPT_SENTINEL = "[encrypted]"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -32,13 +39,21 @@ def _handle_hash(key: bytes, contact_handle: str) -> str:
 
 
 def _row_to_dict(row, key: bytes) -> dict:
+    # Plaintext-tolerant decrypt: rows written before handle encryption
+    # (2026-06-10) hold the raw handle and pass through unchanged.
+    contact_handle = decrypt_field(row["contact_handle"], key)
+    contact_name = decrypt_field(row["contact_name"], key)
+    # A row whose identity fields decrypt to the sentinel is mis-keyed /
+    # corrupted — surface it so the UI can render a distinct "unreadable —
+    # re-sync" state rather than a broken thread whose live read also fails.
+    decrypt_error = (
+        contact_handle == _DECRYPT_SENTINEL or contact_name == _DECRYPT_SENTINEL
+    )
     return {
         "id": row["id"],
         "channel": row["channel"],
-        # Plaintext-tolerant decrypt: rows written before handle encryption
-        # (2026-06-10) hold the raw handle and pass through unchanged.
-        "contact_handle": decrypt_field(row["contact_handle"], key),
-        "contact_name": decrypt_field(row["contact_name"], key),
+        "contact_handle": contact_handle,
+        "contact_name": contact_name,
         "last_preview": decrypt_field(row["last_preview"], key),
         "unread_count": row["unread_count"],
         "last_activity": row["last_activity"],
@@ -52,6 +67,7 @@ def _row_to_dict(row, key: bytes) -> dict:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "deleted_at": row["deleted_at"],
+        "decrypt_error": decrypt_error,
     }
 
 

@@ -128,6 +128,13 @@ class AgentActivityFrame extends ServerFrame {
   /// bg_tool_call) — feeds the per-subject tools-used counter.
   final String? tool;
 
+  /// Stable server-minted task identity carried by every task_* / bg_* frame.
+  /// task_step/task_phase/task_completed carry NO `name`, so their [subject]
+  /// falls back to the literal 'task'; the reducer keys rows by [taskId] when
+  /// present so a terminal always settles the row its task_started opened.
+  /// Null for specialist_* / delegate / browser frames (subject-keyed).
+  final String? taskId;
+
   const AgentActivityFrame({
     required this.kind,
     required this.subject,
@@ -135,6 +142,7 @@ class AgentActivityFrame extends ServerFrame {
     this.done = false,
     this.failed = false,
     this.tool,
+    this.taskId,
   });
 }
 
@@ -271,18 +279,21 @@ ServerFrame parseServerFrame(String raw) {
           subject: (m['task_name'] as String?) ?? 'background task',
           detail: 'using ${(m['name'] as String?) ?? 'a tool'}',
           tool: m['name'] as String?,
+          taskId: m['task_id'] as String?,
         );
       case 'bg_tool_result':
         return AgentActivityFrame(
           kind: 'bg',
           subject: (m['task_name'] as String?) ?? 'background task',
           detail: '${(m['name'] as String?) ?? 'tool'} done',
+          taskId: m['task_id'] as String?,
         );
       case 'bg_event':
         return AgentActivityFrame(
           kind: 'bg',
           subject: (m['task_name'] as String?) ?? 'background task',
           detail: _bgEventDetail(m),
+          taskId: m['task_id'] as String?,
         );
       case 'plan_pending':
         final rawSteps = m['steps'];
@@ -305,24 +316,28 @@ ServerFrame parseServerFrame(String raw) {
           kind: 'bg',
           subject: _taskSubject(m),
           detail: 'started',
+          taskId: m['task_id'] as String?,
         );
       case 'task_started':
         return AgentActivityFrame(
           kind: 'bg',
           subject: _taskSubject(m),
           detail: _firstNonEmpty([m['description']]) ?? 'started',
+          taskId: m['task_id'] as String?,
         );
       case 'task_step':
         return AgentActivityFrame(
           kind: 'bg',
           subject: _taskSubject(m),
           detail: _firstNonEmpty([m['step']]) ?? 'working…',
+          taskId: m['task_id'] as String?,
         );
       case 'task_phase':
         return AgentActivityFrame(
           kind: 'bg',
           subject: _taskSubject(m),
           detail: _firstNonEmpty([m['phase']]) ?? 'working…',
+          taskId: m['task_id'] as String?,
         );
       case 'task_completed':
         final status = _firstNonEmpty([m['status']]) ?? 'done';
@@ -332,6 +347,7 @@ ServerFrame parseServerFrame(String raw) {
           detail: status,
           done: true,
           failed: status == 'failed',
+          taskId: m['task_id'] as String?,
         );
       case 'browser_event':
         return _parseBrowserEvent(m);

@@ -31,6 +31,13 @@ class AgentActivity {
   final String kind; // 'delegate' | 'specialist' | 'bg' | 'browser'
   final String subject;
 
+  /// Stable server-minted task id (task_* / bg_* frames). When present it,
+  /// not [subject], is the upsert key — task_step/phase/completed carry no
+  /// name so their subject degrades to 'task', but their task_id still binds
+  /// them to the row task_started opened. Null for subject-keyed rows
+  /// (specialist / delegate / browser).
+  final String? taskId;
+
   /// Latest state line, e.g. 'using web_search'.
   final String detail;
   final bool done;
@@ -50,6 +57,7 @@ class AgentActivity {
     required this.kind,
     required this.subject,
     required this.detail,
+    this.taskId,
     this.done = false,
     this.failed = false,
     this.events = const [],
@@ -63,6 +71,7 @@ class AgentActivity {
   AgentActivity merge(AgentActivity next) => AgentActivity(
         kind: kind,
         subject: subject,
+        taskId: next.taskId ?? taskId,
         detail: next.detail,
         done: next.done,
         failed: next.failed,
@@ -79,6 +88,7 @@ class AgentActivity {
   AgentActivity settle({required bool success}) => AgentActivity(
         kind: kind,
         subject: subject,
+        taskId: taskId,
         detail: success ? 'finished' : 'failed',
         done: true,
         failed: !success,
@@ -250,13 +260,30 @@ class ChatMessage {
   /// Returns a copy with approval fields cleared (prevents double-tap).
   ChatMessage clearApproval() => _clone(clearApprovalFields: true);
 
-  /// Upserts an [AgentActivity] by (kind, subject): an existing row for the
-  /// same specialist/background task absorbs the new event via
-  /// [AgentActivity.merge], otherwise the row is appended.
+  /// Upserts an [AgentActivity]: keyed by (kind, taskId) when the incoming
+  /// activity carries a task_id — so task_step/phase/completed (whose subject
+  /// degrades to 'task') fold onto the row task_started opened — else by
+  /// (kind, subject) for the subject-keyed specialist/browser rows. A row
+  /// already bound to a DIFFERENT task_id is never stolen by the subject
+  /// fallback. Missing rows are appended.
   ChatMessage withAgentActivity(AgentActivity activity) {
     final updated = List<AgentActivity>.from(agentActivities);
-    final idx = updated.indexWhere(
-        (a) => a.kind == activity.kind && a.subject == activity.subject);
+    int idx = -1;
+    if (activity.taskId != null) {
+      idx = updated.indexWhere(
+          (a) => a.kind == activity.kind && a.taskId == activity.taskId);
+      if (idx == -1) {
+        // Legacy row minted before task_id threading — match by subject, but
+        // only if it isn't already owned by another task.
+        idx = updated.indexWhere((a) =>
+            a.kind == activity.kind &&
+            a.taskId == null &&
+            a.subject == activity.subject);
+      }
+    } else {
+      idx = updated.indexWhere(
+          (a) => a.kind == activity.kind && a.subject == activity.subject);
+    }
     if (idx == -1) {
       updated.add(activity);
     } else {

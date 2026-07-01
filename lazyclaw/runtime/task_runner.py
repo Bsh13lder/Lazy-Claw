@@ -1251,6 +1251,12 @@ class TaskRunner:
         except Exception:
             logger.debug("bg_streaming lookup failed in _consolidate", exc_info=True)
 
+        # BUG-1 note: this 1-result streaming branch fires ONE
+        # ``background_done`` card and returns early — it does NOT run a
+        # lane-queue synthetic turn, so it never streams ``token`` frames
+        # into a live chat bubble. No spinning bubble is mounted here, so
+        # no terminal ``done`` frame is needed (the streaming-ON terminal
+        # below only guards the multi-result synthetic-turn path).
         if len(group.results) == 1 and not _quiet:
             r = group.results[0]
             cb = group.consolidator_cb
@@ -1410,6 +1416,34 @@ class TaskRunner:
                 COHERENCE_LOG_TAG, len(group.results), group_id,
                 result_text,
             )
+
+        # ── Streaming-ON terminal `done` for the live bubble (BUG 1) ─────
+        # The synthetic turn above ran on the LANE QUEUE, NOT through the WS
+        # request loop (``gateway.routes.chat_ws._run_one_turn``) that emits
+        # the terminal ``{"type":"done","content":...}`` frame. With
+        # ``bg_streaming`` ON (default) the reused live ``WebSocketCallback``
+        # streamed the brain's tokens into a chat bubble — but no terminal
+        # ever arrives on this path, so the bubble spins forever on
+        # web/mobile. Emit the terminal here to settle it.
+        #
+        # Gated so there is NO double-send: quiet mode keeps its
+        # ``background_done`` rescue below (streaming was OFF, no live
+        # bubble); Telegram (non-web callback) has no ``send_terminal_done``
+        # and is delivered during the turn by its own notifier. Duck-typed
+        # (``hasattr``) so this runtime module needs no gateway import.
+        if (
+            result_text
+            and not _quiet
+            and is_live_web_callback(cb)
+            and hasattr(cb, "send_terminal_done")
+        ):
+            try:
+                await cb.send_terminal_done(result_text)
+            except Exception:
+                logger.debug(
+                    "streaming-ON terminal done delivery failed for %s",
+                    group_id, exc_info=True,
+                )
 
         # ── Web quiet-mode delivery rescue (2026-06-04) ──────────────────
         # The synthetic turn above ran on the LANE QUEUE, NOT through the WS

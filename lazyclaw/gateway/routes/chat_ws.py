@@ -54,6 +54,15 @@ _TASK_TERMINAL_KINDS = frozenset(
     {"background_done", "background_failed", "task_completed"}
 )
 
+# Non-terminal task-lifecycle frames that mount a live spinner on the
+# client. Each must settle via a terminal sibling — so on initial paint we
+# only replay one when the task is proven still live (see lost-terminal
+# guard below). TaskRunner emits ``background_started``; the TeamLead bridge
+# emits ``task_started`` / ``task_step`` / ``task_phase``.
+_TASK_NON_TERMINAL_KINDS = frozenset(
+    {"background_started", "task_started", "task_step", "task_phase"}
+)
+
 
 def _initial_paint_events(events, running_task_ids=None) -> list:
     """Filter ring-buffer events down to what's safe to replay on (re)connect.
@@ -71,12 +80,16 @@ def _initial_paint_events(events, running_task_ids=None) -> list:
     - Non-terminal events whose task has a terminal sibling in the window
       are dropped — replaying them alone mounts a spinner that never
       settles.
-    - Lost-terminal guard: a lone ``background_started`` whose terminal
-      sibling aged out of the ring is dropped when ``running_task_ids``
-      says the task is no longer running. Applies ONLY to
-      ``background_started`` — TeamLead ``task_*`` ids aren't TaskRunner
-      ids. ``None`` means the runner is unwired/unknown → fail-open,
-      never false-drop.
+    - Lost-terminal guard (BUG 3): a non-terminal lifecycle frame
+      (``_TASK_NON_TERMINAL_KINDS``) whose terminal sibling aged out of the
+      20-slot ring is dropped when ``running_task_ids`` says the task is no
+      longer live. ``running_task_ids`` is the caller's COMBINED live-id set
+      (TaskRunner ``list_running`` + TeamLead ``active_tasks``), so this now
+      covers TeamLead ``task_*`` ids too — previously only
+      ``background_started`` was guarded, stranding spinners for TeamLead
+      tasks whose ``task_completed`` fell off the ring. ``None`` means the
+      registries are unwired/unreachable → fail-open, never false-drop (a
+      genuinely-live task re-emits progress within seconds anyway).
     """
     finished_ids = frozenset(
         e.task_id for e in events if e.kind in _TASK_TERMINAL_KINDS
@@ -88,7 +101,7 @@ def _initial_paint_events(events, running_task_ids=None) -> list:
         if evt.kind != "task_completed" and evt.task_id in finished_ids:
             continue
         if (
-            evt.kind == "background_started"
+            evt.kind in _TASK_NON_TERMINAL_KINDS
             and running_task_ids is not None
             and evt.task_id not in running_task_ids
         ):
@@ -177,6 +190,19 @@ class WebSocketCallback:
         except (WebSocketDisconnect, RuntimeError):
             self._closed = True
             self.cancel_token.cancel()
+
+    async def send_terminal_done(self, content: str) -> None:
+        """Settle the client's streaming chat bubble with a terminal
+        ``{"type":"done"}`` frame.
+
+        The lane-queue brain-fanout consolidation path
+        (``task_runner._consolidate``) runs OUTSIDE the WS request loop
+        (``_run_one_turn``) that normally flushes this frame — so with
+        ``bg_streaming`` ON the consolidated reply streams as ``token``
+        frames into a bubble that would otherwise spin forever. That path
+        duck-types this public method (``hasattr``) to close the bubble.
+        """
+        await self._send({"type": "done", "content": content})
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
@@ -702,16 +728,32 @@ async def chat_websocket(ws: WebSocket):
         # from the runner's running set) — replaying those alone mounted
         # a spinner that never settled on mobile/web.
         try:
+            # Combined live-id set: TaskRunner background ids +
+            # TeamLead active task ids. Feeds the lost-terminal guard so an
+            # orphaned non-terminal frame (terminal aged out of the ring) is
+            # dropped only when the task is provably NOT live. Any registry
+            # hiccup → None (fail-open) so we never strand a running task.
             running_ids = None
-            if _task_runner is not None:
-                try:
-                    running_ids = frozenset(
+            try:
+                _live_ids: set[str] = set()
+                _queried = False
+                if _task_runner is not None:
+                    _queried = True
+                    _live_ids.update(
                         t["id"] for t in _task_runner.list_running(user.id)
                     )
-                except Exception:
-                    logger.debug(
-                        "list_running for initial paint failed", exc_info=True,
+                if _team_lead is not None:
+                    _queried = True
+                    _live_ids.update(
+                        t.task_id for t in _team_lead.active_tasks
                     )
+                if _queried:
+                    running_ids = frozenset(_live_ids)
+            except Exception:
+                running_ids = None
+                logger.debug(
+                    "live-id gather for initial paint failed", exc_info=True,
+                )
             events = task_event_bus.recent_events(
                 user.id, limit=10, max_age_s=300,
             )

@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-VALID_COMMS_CHANNELS = ("whatsapp", "email", "instagram", "telegram")
+# Inbox-facing channels — those the ChannelGateway can actually READ/SEND via
+# a per-channel MCP tool (see gateway._DISPATCH). Telegram is intentionally
+# EXCLUDED: it's the control channel (native adapter, no MCP read tool), so a
+# telegram thread could never be opened — advertising it produced empty
+# "No messages yet" opens. This does NOT affect telegram notifications
+# (notifications/channel.py) or contact naming (contact_naming._HANDLE_KEYS).
+VALID_COMMS_CHANNELS = ("whatsapp", "email", "instagram")
 
 
 @dataclass(frozen=True)

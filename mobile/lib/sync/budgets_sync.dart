@@ -171,6 +171,9 @@ class BudgetsSync {
               (p['description'] ?? '').toString(),
               id: p['id']?.toString() ?? item.entityId,
               vendor: p['vendor']?.toString(),
+              currency: p['currency']?.toString(),
+              spentAt: p['spent_at']?.toString(),
+              notes: p['notes']?.toString(),
             );
             break;
           case BudgetsOutboxOp.update:
@@ -220,16 +223,22 @@ class BudgetsSync {
       return true;
     }
 
+    // 404 on a CREATE means the PARENT is missing server-side. An expense create
+    // (`POST /projects/{id}/expenses`) 404s ONLY when the project row doesn't
+    // exist yet for this user (see budgets.py `create_expense_route` → the route
+    // 404s exclusively on `store.create_expense`'s "project not found"). Unlike a
+    // 400/422 validation reject, this is TRANSIENT: the parent project may still
+    // be queued ahead of a stalled drain, or land via a later pull. So RETRY
+    // (keep queued, dead-letter after kMaxPushAttempts) instead of stranding the
+    // child on the very first failure — this is the reserva-1000 data-loss fix.
+    // A definitively-unresolvable 404 still bounds out and logs a conflict.
+    if (status == 404 && item.op == BudgetsOutboxOp.create) {
+      return _retryOrDeadLetter(item, e, logRejectionOnDeadLetter: true);
+    }
+
     if (status >= 500) {
-      // Retryable. Count the attempt; dead-letter a poison item (drop just the
-      // outbox row, leave the cache dirty), else stop and keep it queued for the
-      // next sync — NEVER silently drop.
-      final attempts = await _dao.bumpOutboxAttempts(item.seq);
-      if (attempts >= kMaxPushAttempts) {
-        await _dao.deadLetterOutboxItem(item.seq);
-        return false; // drained the poison item; local stays dirty for next pull
-      }
-      throw _PushInterrupted(e);
+      // Retryable server error.
+      return _retryOrDeadLetter(item, e);
     }
 
     if (status >= 400) {
@@ -248,6 +257,32 @@ class BudgetsSync {
     }
 
     // Unknown shape with no usable status → treat as network-ish and keep it.
+    throw _PushInterrupted(e);
+  }
+
+  /// Keep a transiently-failed push queued and bump its attempt counter; once it
+  /// has failed [kMaxPushAttempts] times, dead-letter it (drop just the outbox
+  /// row, leave the cache row dirty) so one poison item can't wedge the queue
+  /// forever. NEVER silently drops. Shared by the 5xx path and the 404-parent-
+  /// not-found create path. When [logRejectionOnDeadLetter] is set, a
+  /// `create_rejected` conflict is logged at dead-letter time so a create that
+  /// never found its parent still surfaces to the UI. Returns `false` when
+  /// dead-lettered; throws [_PushInterrupted] to STOP the drain and keep the
+  /// queue while retries remain.
+  Future<bool> _retryOrDeadLetter(
+    BudgetsOutboxItem item,
+    Object e, {
+    bool logRejectionOnDeadLetter = false,
+  }) async {
+    final attempts = await _dao.bumpOutboxAttempts(item.seq);
+    if (attempts >= kMaxPushAttempts) {
+      if (logRejectionOnDeadLetter) {
+        final status = _asApiError(e)?.status ?? _statusOf(e) ?? 0;
+        await _logCreateRejected(item, status);
+      }
+      await _dao.deadLetterOutboxItem(item.seq);
+      return false; // drained the poison item; local stays dirty for next pull
+    }
     throw _PushInterrupted(e);
   }
 

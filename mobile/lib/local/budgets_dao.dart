@@ -532,11 +532,15 @@ class BudgetsDao {
       // Server create accepts the client id + the user-facing fields. The
       // project id rides in the URL path (handled by the sync engine), not the
       // body, but we keep it in the payload so the replay knows the target.
+      // currency + spent_at ride along so an offline create doesn't lose the
+      // user's chosen currency (e.g. EUR → server-default) or the spend date.
       final payload = <String, dynamic>{
         'id': expenseId,
         'project_id': projectId,
         'amount': amount,
         'description': description,
+        'currency': currency,
+        'spent_at': now,
         'vendor': ?vendor,
       };
       await _enqueueTxn(

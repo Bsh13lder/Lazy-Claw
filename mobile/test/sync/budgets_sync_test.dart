@@ -210,6 +210,24 @@ void main() {
       expect(writes[2].body!['name'], 'Proj2');
     });
 
+    test(
+        'H4: an expense create pushes currency + spent_at (no fidelity loss) so '
+        'the server + web render the right money + date', () async {
+      final dao = await _freshDao(now: () => '2026-07-01T10:00:00Z');
+      // A EUR expense (the reserva) — currency must not be silently dropped to
+      // the server default, or the web renders it as the wrong currency.
+      await dao.applyLocalExpenseCreate('projE', 1000.0, 'Reserva',
+          id: 'eurexp', currency: 'EUR');
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      final call = transport.calls
+          .firstWhere((c) => c.path.contains('/projects/projE/expenses'));
+      expect(call.body!['currency'], 'EUR');
+      expect(call.body!['spent_at'], '2026-07-01T10:00:00Z');
+      expect(call.body!['amount'], 1000.0);
+      expect(call.body!['id'], 'eurexp');
+    });
+
     test('project create replays the client id (idempotent)', () async {
       final dao = await _freshDao();
       await dao.applyLocalProjectCreate('Pinned', id: 'fixed-proj');
@@ -432,6 +450,61 @@ void main() {
           (await dao.readConflicts())
               .where((c) => c.field == 'create_rejected'),
           isEmpty);
+    });
+
+    test(
+        'H3: a 404 on an EXPENSE create (parent project not on the server yet) '
+        'is RETRYABLE — kept queued + attempts bumped, NOT stranded on the first '
+        'failure (the reserva-1000 data-loss bug)', () async {
+      final dao = await _freshDao();
+      // A child expense whose parent project has not synced to the server yet:
+      // the create route 404s (store.create_expense can\'t find the project).
+      await dao.applyLocalExpenseCreate('unsyncedProj', 1000.0, 'Reserva',
+          id: 'reserva1');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/expenses': () => _serverDio(404)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      // A 404-parent-not-found is transient (the project may still sync), so the
+      // child create is KEPT queued for the next sync — never dropped on the
+      // first failure the way a 400/422 validation reject is.
+      expect(result.pushInterrupted, isTrue);
+      expect(result.pushed, 0);
+      final remaining = await dao.readBudgetsOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.single.entityId, 'reserva1');
+      expect(remaining.single.attempts, 1); // counted toward eventual dead-letter
+      // Not stranded, and no premature create_rejected while it can still recover.
+      expect(
+          (await dao.readConflicts())
+              .where((c) => c.field == 'create_rejected'),
+          isEmpty);
+    });
+
+    test(
+        'H3: an expense create that 404s past kMaxPushAttempts dead-letters '
+        '(bounded) — cache stays dirty + one create_rejected conflict is logged',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('unsyncedProj', 1000.0, 'Reserva',
+          id: 'reserva2');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/expenses': () => _serverDio(404)},
+      );
+      for (var i = 0; i < BudgetsSync.kMaxPushAttempts; i++) {
+        await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      }
+      // Bounded: the poison child stops retrying, but is NEVER silently lost.
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      expect(await dao.dirtyExpenseIds(), contains('reserva2'));
+      final rejected = (await dao.readConflicts())
+          .where((c) => c.field == 'create_rejected')
+          .toList();
+      expect(rejected, hasLength(1));
+      expect(rejected.single.id, 'reserva2');
+      expect(rejected.single.local, contains('404'));
     });
 
     test('a 5xx item dead-letters after kMaxPushAttempts, never wedges',

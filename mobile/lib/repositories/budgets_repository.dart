@@ -176,6 +176,9 @@ class BudgetsRepository {
     String description, {
     String? id,
     String? vendor,
+    String? currency,
+    String? spentAt,
+    String? notes,
   }) async {
     final body = <String, dynamic>{
       'amount': amount,
@@ -183,6 +186,9 @@ class BudgetsRepository {
     };
     if (id != null) body['id'] = id;
     if (vendor != null) body['vendor'] = vendor;
+    if (currency != null) body['currency'] = currency;
+    if (spentAt != null) body['spent_at'] = spentAt;
+    if (notes != null) body['notes'] = notes;
 
     final json = await _t.postJson(
       '/api/budgets/projects/$projectId/expenses',

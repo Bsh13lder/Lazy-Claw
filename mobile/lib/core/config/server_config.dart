@@ -33,8 +33,9 @@ class ServerConfig {
     return '$ws/ws/chat';
   }
 
-  // Locked build: the server URL is baked into [kDefaultBaseUrl] (the ngrok
-  // tunnel) and cannot be changed from inside the app. The app talks to exactly
+  // Locked build: the server URL is baked into [kDefaultBaseUrl] (the
+  // self-hosted DuckDNS + Caddy front door) and cannot be changed from inside
+  // the app. The app talks to exactly
   // ONE host so the session cookie + auth cache stay consistent on WiFi and
   // mobile data alike — no URL flipping, no per-host re-login. load()/save()
   // return that single URL.
@@ -53,9 +54,6 @@ class ServerConfig {
     try {
       final uri = Uri.parse('${normalizeBaseUrl(baseUrl)}/api/health');
       final request = await client.getUrl(uri).timeout(probeTimeout);
-      // ngrok's free tier shows a browser interstitial unless this header is
-      // set; harmless on the LAN/gateway path.
-      request.headers.set('ngrok-skip-browser-warning', 'true');
       final response = await request.close().timeout(probeTimeout);
       // Drain so the socket can be reused/closed cleanly; ignore the body.
       await response.drain<void>().timeout(probeTimeout, onTimeout: () {});
@@ -69,9 +67,9 @@ class ServerConfig {
 
   /// Resolves the gateway used at startup.
   ///
-  /// PREFERS [kDefaultBaseUrl] (the baked ngrok tunnel) and only falls back to
-  /// [kLanFallbackBaseUrl] (the home-LAN mDNS host) when the tunnel is
-  /// unreachable — e.g. the Mac is asleep or the ngrok session rotated. The
+  /// PREFERS [kDefaultBaseUrl] (the baked DuckDNS + Caddy front door) and only
+  /// falls back to [kLanFallbackBaseUrl] (the home-LAN mDNS host) when the front
+  /// door is unreachable — e.g. the Mac is asleep or off the internet. The
   /// in-app server picker was removed, so this self-heal is the app's only path
   /// to the server when the tunnel is down.
   ///

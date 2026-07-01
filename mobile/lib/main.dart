@@ -64,8 +64,8 @@ Future<void> main() async {
     );
   };
 
-  // The app is locked to a single gateway (the ngrok tunnel) so the session
-  // cookie + auth cache stay consistent on WiFi and cellular alike.
+  // The app is locked to a single gateway (the DuckDNS + Caddy front door) so
+  // the session cookie + auth cache stay consistent on WiFi and cellular alike.
   final baseUrl = await ServerConfig.resolveBaseUrl();
 
   // Open the encrypted offline DB up front so the Tasks tab is instant and

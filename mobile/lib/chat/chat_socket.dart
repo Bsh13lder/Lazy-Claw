@@ -118,11 +118,8 @@ class ChatSocket {
 
     // IMPORTANT: send the session cookie, and DO NOT send an Origin header
     // (native client → server allows absent Origin; presence triggers CORS).
-    // `ngrok-skip-browser-warning` skips ngrok's free-tier interstitial on the
-    // WS upgrade (ignored on the LAN/gateway path).
     final sink = _factory(_wsUrl!, {
       'Cookie': _cookie!,
-      'ngrok-skip-browser-warning': 'true',
     });
     _sink = sink;
     _sub = sink.stream.listen(

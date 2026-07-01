@@ -33,9 +33,6 @@ class ApiClient {
       receiveTimeout: const Duration(seconds: 30),
       headers: {
         'Content-Type': 'application/json',
-        // Skip ngrok's free-tier browser-warning interstitial so API calls go
-        // straight through. Harmless on the LAN/gateway path (ignored there).
-        'ngrok-skip-browser-warning': 'true',
       },
     ));
 

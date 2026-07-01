@@ -1,8 +1,10 @@
-/// Primary (locked) gateway URL. This build is PINNED to the remote-access
-/// tunnel (frp + sslip.io, see docs/REMOTE_ACCESS.md) — the in-app server field
-/// is hidden, so the user can never point it elsewhere. The app PREFERS this URL
+/// Primary (locked) gateway URL. This build is PINNED to the self-hosted
+/// remote-access front door (DuckDNS + Caddy/Let's Encrypt over a forwarded
+/// router port — see docs/REMOTE_ACCESS.md). Fully self-owned: TLS terminates
+/// on the Mac, no third party decrypts traffic. The in-app server field is
+/// hidden, so the user can never point it elsewhere. The app PREFERS this URL
 /// and only falls back to [kLanFallbackBaseUrl] when it is unreachable.
-const String kDefaultBaseUrl = 'https://detoxify-culinary-resonant.ngrok-free.dev';
+const String kDefaultBaseUrl = 'https://lazyclaw.duckdns.org:8443';
 
 /// Home-LAN fallback, used automatically when the tunnel is unreachable — e.g.
 /// before the tunnel is deployed, or when the phone is on the home WiFi. This is
@@ -15,5 +17,5 @@ const String kLanFallbackBaseUrl = 'http://BlckIt.local:18789';
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.21.15';
-const int kAppBuild = 75;
+const String kAppVersion = '1.21.18';
+const int kAppBuild = 78;

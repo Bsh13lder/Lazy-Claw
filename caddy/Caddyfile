@@ -1,34 +1,35 @@
-# LazyClaw HTTPS front door.
+# LazyClaw HTTPS front door — fully self-owned.
 #
-# Caddy terminates TLS with a REAL Let's Encrypt certificate obtained via
-# the Cloudflare DNS-01 challenge. Because the challenge is solved over the
-# Cloudflare API (a TXT record), the cert is issued without any public
-# inbound port — app.lazytasker.com can resolve purely to the Mac's private
-# WireGuard IP and the cert is still browser-trusted. Chrome on the phone
-# then sees a valid secure context → the PWA installs.
+# Caddy terminates TLS with a REAL Let's Encrypt certificate, obtained over
+# the forwarded router port (TLS-ALPN-01 on :443, HTTP-01 on :80 as fallback).
+# DuckDNS only provides the name → home-IP DNS record; NO third party is in the
+# traffic path and NO third party ever decrypts application data.
 #
-# Traffic path: phone (on the private VPN) → Caddy (TLS) → lazyclaw-web
-# (nginx, serves the SPA + proxies /api + /ws to the lazyclaw gateway).
-# No third party ever decrypts application traffic; Cloudflare only ever
-# sees the _acme-challenge TXT during issuance/renewal.
+# Traffic path: phone --TLS--> home router (:443) --> Mac:443 --> Caddy (TLS
+# terminates HERE, on your hardware) --> lazyclaw-web (nginx, serves the SPA
+# and proxies /api + /ws to the lazyclaw gateway). reverse_proxy upgrades
+# WebSockets automatically.
+#
+# Prereqs (see docs/REMOTE_ACCESS.md): a DuckDNS subdomain pointed at the home
+# IP (kept fresh by scripts/duckdns-update.sh), and the router forwarding TCP
+# 80 + 443 to the Mac's LAN IP.
 
 {
 	# ACME account email — renewal + expiry notices. Set in .env.
 	email {$ACME_EMAIL}
 }
 
-{$LAZYCLAW_DOMAIN:app.lazytasker.com} {
+{$LAZYCLAW_DOMAIN:lazyclaw.duckdns.org} {
 	tls {
-		dns cloudflare {$CLOUDFLARE_API_TOKEN}
-		# Resolve the ACME challenge against public resolvers, not the
-		# split-horizon LAN view, so propagation checks see the TXT.
-		resolvers 1.1.1.1 8.8.8.8
+		# DNS-01 via DuckDNS: prove domain ownership with a TXT record, so NO
+		# inbound port (80/443) is needed for the cert. Required because the
+		# Vodafone router reserves public 80/443 for its own admin — external
+		# traffic reaches us on 8443 instead, mapped to this container's 443.
+		dns duckdns {$DUCKDNS_TOKEN}
 	}
-
 	encode zstd gzip
 
-	# nginx already routes the SPA, /api/* and /ws/* internally, so we
-	# hand the whole request surface to it. reverse_proxy upgrades
-	# WebSockets automatically.
+	# nginx already routes the SPA, /api/* and /ws/* internally, so we hand it
+	# the whole request surface. reverse_proxy upgrades WebSockets automatically.
 	reverse_proxy lazyclaw-web:80
 }

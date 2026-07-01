@@ -1,13 +1,11 @@
-# Caddy built with the Cloudflare DNS plugin so it can solve the ACME
-# DNS-01 challenge (writes the _acme-challenge TXT record via the
-# Cloudflare API). DNS-01 needs no inbound port — the cert is issued
-# even though app.lazytasker.com only ever resolves to a private VPN IP.
-#
-# The official caddy image does NOT ship DNS provider modules, so we
-# rebuild it with xcaddy. Pinned to the 2-builder tag.
+# Caddy built with the DuckDNS DNS plugin so it can solve the ACME DNS-01
+# challenge (writes _acme-challenge TXT via the DuckDNS API). DNS-01 needs NO
+# inbound port — essential here because the Vodafone router reserves public
+# 80/443, so the cert can't be issued over those ports. The official caddy
+# image ships no DNS modules, so we rebuild it with xcaddy.
 FROM caddy:2-builder AS builder
 RUN xcaddy build \
-    --with github.com/caddy-dns/cloudflare
+    --with github.com/caddy-dns/duckdns
 
 FROM caddy:2
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

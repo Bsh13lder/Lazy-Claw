@@ -1,5 +1,31 @@
 # Remote Access — Installable Mobile PWA, From Anywhere, No Third Party
 
+> **CURRENT SETUP (2026-06-30): DuckDNS + Caddy over a forwarded router port.**
+> Fully self-owned — no VPN on the phone, no third party in the data path.
+> Data path: `phone --TLS--> home router (:443) --> Mac:443 --> Caddy (TLS
+> terminates HERE) --> lazyclaw-web (nginx → gateway)`. DuckDNS only maps the
+> name → home IP; Let's Encrypt issues the cert over the forwarded port (no
+> Cloudflare, no DNS-01). Replaces the ngrok stopgap (which decrypted at its edge).
+>
+> **Pieces:** app pinned to `https://lazyclaw.duckdns.org`
+> (`mobile/.../app_constants.dart`) · `caddy/Caddyfile` (default ACME) ·
+> `caddy/Dockerfile` (plain `caddy:2`) · `.env` `LAZYCLAW_DOMAIN`/`ACME_EMAIL` ·
+> `scripts/duckdns-update.sh` + `scripts/install-duckdns-updater.sh` (keep the
+> subdomain on the home IP).
+>
+> **Manual prereqs (one-time):** ① register the DuckDNS subdomain + token →
+> `~/.lazyclaw/duckdns.env`; ② router: reserve the Mac at its LAN IP and forward
+> TCP **80 + 443** to it, **disable UPnP**; ③ `docker compose up -d` so nginx +
+> gateway run and Caddy can fetch the cert. Hardening: only :443 is exposed
+> (Caddy is the single entry point); add Caddy `basic_auth`/`rate_limit` +
+> fail2ban/CrowdSec as desired. **Trade-off:** the home IP becomes publicly
+> resolvable — accepted in exchange for zero third-party decryption.
+>
+> The WireGuard + Cloudflare-DNS-01 design below is the prior model, kept for
+> reference.
+
+---
+
 Goal: open LazyClaw on your phone from **anywhere** (cellular too), install it as a
 real app (icon + fullscreen), with **no company ever decrypting your traffic**.
 

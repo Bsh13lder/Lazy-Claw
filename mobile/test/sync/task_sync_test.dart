@@ -926,6 +926,35 @@ void main() {
       // One ran, one returned the empty default — neither throws.
       expect(results, hasLength(2));
     });
+
+    test('self-heals a stranded orphan create on the next sync() (ZZsynctest)',
+        () async {
+      final dao = await _freshDao();
+      // A locally-created task whose create op was dropped (drained by an older
+      // build / outage): dirty=1, last_synced_at=null, NOTHING in the outbox.
+      await dao.applyLocalCreate('ZZsynctest', id: 'orphan-1');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      expect(await dao.outboxCount(), 0);
+
+      final transport = _FakeTransport();
+      final sync = TaskSync(dao, TasksRepository(transport));
+
+      final result = await sync.sync();
+
+      // The heal re-queued the create, push drained it → a real POST happened.
+      final posts = transport.calls
+          .where((c) => c.method == 'POST' && c.path.contains('/api/tasks'))
+          .toList();
+      expect(posts, hasLength(1));
+      expect(posts.single.body?['id'], 'orphan-1');
+      expect(posts.single.body?['title'], 'ZZsynctest');
+      expect(result.pushed, 1);
+      // Row is now clean (no longer shows the un-synced badge).
+      expect(await dao.dirtyIds(), isNot(contains('orphan-1')));
+      expect(await dao.outboxCount(), 0);
+    });
   });
 }
 

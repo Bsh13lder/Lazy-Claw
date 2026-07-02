@@ -734,10 +734,18 @@ CREATE TABLE IF NOT EXISTS pdf_files (
     tags        TEXT DEFAULT '[]',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    deleted_at  TEXT  -- soft-delete tombstone for offline sync; NULL = live
+    deleted_at  TEXT,  -- soft-delete tombstone for offline sync; NULL = live
+    version_of  TEXT   -- NULL = a normal file; set = archived pre-edit snapshot
+                       -- of the parent pdf id. In-editor ✨ edits replace the
+                       -- live file in place and stash the prior bytes here so
+                       -- the sidebar stays clean but the original is recoverable.
 );
 CREATE INDEX IF NOT EXISTS idx_pdf_files_user
 ON pdf_files(user_id, updated_at);
+-- NOTE: the idx_pdf_files_version_of index is created in connection.py AFTER the
+-- `version_of` column migration runs. Creating it here would fail on an existing
+-- DB whose pdf_files predates the column (CREATE TABLE IF NOT EXISTS is a no-op,
+-- so the column isn't added until the migration step that runs after this file).
 
 -- ────────────────────────────────────────────────────────────────────────
 -- LazyBrain: graph node positions (Phase 19.1)

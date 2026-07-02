@@ -468,6 +468,88 @@ class TaskDao {
     return (rows.first['c'] as int?) ?? 0;
   }
 
+  /// Self-heal a stranded offline create. A task create that failed definitively
+  /// (drained by an older build, or during an outage that returned a 4xx)
+  /// survives as a `dirty` cache row that NEVER reaches the server: visible
+  /// on-device, invisible to web + the agent, forever. Such a row is uniquely
+  /// identified as `dirty=1 AND deleted=0 AND last_synced_at IS NULL` (never
+  /// successfully pushed — an existing-server row whose UPDATE drained keeps its
+  /// `last_synced_at`) with NO pending outbox op and NO `create_rejected`
+  /// conflict already on file (so a genuinely-rejected create can't loop). For
+  /// each match, re-enqueue a fresh `create` so the next push replays it.
+  ///
+  /// Mirrors `BudgetsDao.reenqueueOrphanedCreates`. Idempotent: once a heal
+  /// enqueues an op the row is no longer op-less, so a repeat call (even while
+  /// offline) won't double-enqueue. Returns the count.
+  Future<int> reenqueueOrphanedCreates() async {
+    final pending = await readOutbox();
+    final pendingIds = {for (final o in pending) o.entityId};
+    final rejected = await _createRejectedIds();
+
+    final orphanRows = await _db.query(
+      'task_cache',
+      where: 'dirty = 1 AND deleted = 0 AND last_synced_at IS NULL',
+    );
+
+    var healed = 0;
+    await _db.transaction((txn) async {
+      final now = _now();
+      for (final row in orphanRows) {
+        final id = row['id'] as String? ?? '';
+        if (id.isEmpty || pendingIds.contains(id) || rejected.contains(id)) {
+          continue;
+        }
+        final task = _taskFromRow(row);
+        // Same create payload shape applyLocalCreate enqueues, so the sync
+        // engine replays it identically to a fresh create.
+        final payload = <String, dynamic>{
+          'id': task.id,
+          'title': task.title,
+          if (task.description != null) 'description': task.description,
+          if (task.category != null) 'category': task.category,
+          'priority': task.priority,
+          if (task.dueDate != null) 'due_date': task.dueDate,
+          if (task.reminderAt != null) 'reminder_at': task.reminderAt,
+          if (task.recurring != null) 'recurring': task.recurring,
+          if (task.steps != null) 'steps': task.steps,
+        };
+        await _enqueueTxn(txn, OutboxOp.create, id, payload, now);
+        healed++;
+      }
+    });
+    return healed;
+  }
+
+  /// Drop every `create_rejected` conflict so a previously-rejected orphan is no
+  /// longer excluded by [reenqueueOrphanedCreates] and gets a fresh push on the
+  /// next drain. Used ONLY by an explicit user "Sync now" (force-retry) — routine
+  /// foreground/background syncs keep these markers so a genuinely-broken create
+  /// doesn't retry every cycle. If the retried create fails again the classifier
+  /// re-logs the marker, so this converges. Returns how many were cleared.
+  Future<int> clearCreateRejectedConflicts() async {
+    return _db.delete(
+      'conflicts',
+      where: 'field = ?',
+      whereArgs: ['create_rejected'],
+    );
+  }
+
+  /// Ids that already carry a definitive `create_rejected` conflict — excluded
+  /// from [reenqueueOrphanedCreates] so a genuinely-unresolvable create can't be
+  /// re-queued every sync.
+  Future<Set<String>> _createRejectedIds() async {
+    final rows = await _db.query(
+      'conflicts',
+      columns: ['id'],
+      where: 'field = ?',
+      whereArgs: ['create_rejected'],
+    );
+    return {
+      for (final r in rows)
+        if (r['id'] != null) r['id'] as String,
+    };
+  }
+
   // ── Cursor ───────────────────────────────────────────────────────────────
 
   Future<String?> getCursor({String entity = kTaskEntity}) async {

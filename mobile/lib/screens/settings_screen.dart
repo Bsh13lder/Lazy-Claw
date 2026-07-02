@@ -70,10 +70,14 @@ class _SyncAllNotifier extends StateNotifier<_SyncState> {
       late final SyncResult taskRes;
       late final NoteSyncResult noteRes;
       late final BudgetsSyncResult budgetRes;
+      // "Sync now" is an explicit user action → force-retry: clear stale
+      // create_rejected markers so items stranded by a past outage (e.g. the
+      // reserva) re-queue and push, instead of staying excluded forever. Routine
+      // foreground/background syncs call sync() with no arg (retryRejected=false).
       await Future.wait([
-        tasks.sync().then((r) => taskRes = r),
+        tasks.sync(retryRejected: true).then((r) => taskRes = r),
         notes.sync().then((r) => noteRes = r),
-        budgets.sync().then((r) => budgetRes = r),
+        budgets.sync(retryRejected: true).then((r) => budgetRes = r),
       ]);
 
       final pushed = taskRes.pushed + noteRes.pushed + budgetRes.pushed;

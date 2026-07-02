@@ -62,10 +62,22 @@ class TaskSync {
 
   /// push() then pull(). A second call while one is in flight is a no-op and
   /// returns an empty result.
-  Future<SyncResult> sync() async {
+  Future<SyncResult> sync({bool retryRejected = false}) async {
     if (_running) return const SyncResult();
     _running = true;
     try {
+      // Explicit user-triggered force-retry ("Sync now"): drop stale
+      // create_rejected markers so an orphan rejected transiently (e.g. during an
+      // outage) is no longer excluded from the self-heal below. Routine syncs pass
+      // false, keeping the markers so a genuinely-broken create can't loop.
+      if (retryRejected) {
+        await _dao.clearCreateRejectedConflicts();
+      }
+      // Self-heal any stranded offline creates (ops dead-lettered or silently
+      // drained by an older build) BEFORE draining, so a dirty cache row with no
+      // outbox op re-pushes this run instead of living on-device forever,
+      // invisible to the server. Mirrors BudgetsSync's reserva-1000 recovery.
+      await _dao.reenqueueOrphanedCreates();
       final pushResult = await push();
       final pullResult = await pull();
       return SyncResult(

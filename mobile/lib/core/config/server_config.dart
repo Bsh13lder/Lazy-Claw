@@ -122,14 +122,20 @@ class ServerConfig {
   /// Resolves the gateway to use.
   ///
   /// 1. If a manual OVERRIDE is set, it is tried FIRST. When reachable it's
-  ///    returned; when set-but-unreachable it is STILL returned — the user's
-  ///    explicit choice is never silently discarded (they can diagnose it via
-  ///    [probeAll]).
-  /// 2. Otherwise the [_candidates] are probed in order and the FIRST that
+  ///    returned — the user's explicit choice wins.
+  /// 2. If the override is set but UNREACHABLE, we do NOT blindly return it:
+  ///    we fall through to the [_candidates] and return the first that answers.
+  ///    A dead override (e.g. pinned to a since-vanished LAN IP) must never
+  ///    brick the app — the login screen has no server-URL field to escape it,
+  ///    so an unreachable pin used to be a hard lockout. The explicit choice is
+  ///    only set aside when a DIFFERENT host actually answers.
+  /// 3. Otherwise the [_candidates] are probed in order and the FIRST that
   ///    answers `/api/health` is returned, so the app self-heals whether it's on
   ///    cellular (public front door) or home WiFi (LAN host).
-  /// 3. If nothing answers — server asleep / no network — it falls back to
-  ///    [kDefaultBaseUrl] so behavior matches the pre-probe build.
+  /// 4. If nothing answers at all: with an override set we return it (the
+  ///    explicit choice is preserved as a last resort, diagnosable via
+  ///    [probeAll]); otherwise we fall back to [kDefaultBaseUrl] so behavior
+  ///    matches the pre-probe build.
   static Future<String> resolveBaseUrl({HealthProbe? probe}) async {
     final check = probe ?? _defaultProbe;
 
@@ -138,8 +144,19 @@ class ServerConfig {
       try {
         if (await check(override)) return override;
       } catch (_) {
-        // Probe threw — fall through, but still prefer the explicit choice.
+        // Probe threw — treat as unreachable and fall through to candidates.
       }
+      // Override unreachable: prefer any auto candidate that actually answers
+      // over a dead pin (anti-brick). Skip re-probing the override itself.
+      for (final url in _candidates) {
+        if (url == override) continue;
+        try {
+          if (await check(url)) return url;
+        } catch (_) {
+          // Probe threw unexpectedly — treat as unreachable, try the next.
+        }
+      }
+      // Nothing else reachable either — keep the user's explicit choice.
       return override;
     }
 

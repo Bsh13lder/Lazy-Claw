@@ -809,6 +809,20 @@ class BudgetsDao {
     return healed;
   }
 
+  /// Drop every `create_rejected` conflict so a previously-rejected orphan is no
+  /// longer excluded by [reenqueueOrphanedCreates] and gets a fresh push on the
+  /// next drain. Used ONLY by an explicit user "Sync now" (force-retry) — routine
+  /// syncs keep these markers so a genuinely-broken create doesn't retry every
+  /// cycle. If the retried create fails again the classifier re-logs the marker,
+  /// so this converges. Returns how many were cleared.
+  Future<int> clearCreateRejectedConflicts() async {
+    return _db.delete(
+      'conflicts',
+      where: 'field = ?',
+      whereArgs: ['create_rejected'],
+    );
+  }
+
   /// Ids that already carry a definitive `create_rejected` conflict — excluded
   /// from [reenqueueOrphanedCreates] so a genuinely-unresolvable create can't be
   /// re-queued every sync.

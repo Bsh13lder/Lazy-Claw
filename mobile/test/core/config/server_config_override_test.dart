@@ -65,7 +65,31 @@ void main() {
       expect(probed, ['http://box.lan:9000']);
     });
 
-    test('unreachable override is STILL returned (never silently discarded)',
+    test(
+        'unreachable override falls back to a reachable auto candidate '
+        '(a dead override must never brick the app)', () async {
+      // Regression: a manual override pinned to a since-vanished LAN IP (e.g.
+      // an ephemeral dock/ethernet address that lost its DHCP lease) used to be
+      // returned UNCONDITIONALLY — which bricks the login screen, since that
+      // screen has no server-URL field to escape it. Now a dead override yields
+      // to any auto candidate that actually answers, so the app self-heals to a
+      // reachable LAN host.
+      ServerConfig.overrideStore =
+          InMemoryBaseUrlOverrideStore('http://192.168.0.18:18789');
+      final probed = <String>[];
+      final url = await ServerConfig.resolveBaseUrl(probe: (b) async {
+        probed.add(b);
+        return b == kLanFallbackIpBaseUrl; // only the Mac's LAN IP answers
+      });
+      expect(url, kLanFallbackIpBaseUrl);
+      // The dead override is probed FIRST, then we fall through to candidates.
+      expect(probed.first, 'http://192.168.0.18:18789');
+      expect(probed.contains(kLanFallbackIpBaseUrl), isTrue);
+    });
+
+    test(
+        'unreachable override with NOTHING else reachable is STILL returned '
+        '(explicit choice preserved as a last resort, diagnosable via probeAll)',
         () async {
       ServerConfig.overrideStore =
           InMemoryBaseUrlOverrideStore('http://box.lan:9000');

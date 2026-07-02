@@ -32,6 +32,11 @@ _NAME_MAX = 160
 _TAGS_MAX = 32
 _TAG_LEN_MAX = 40
 
+# How many pre-edit snapshots to keep per PDF. In-editor ✨ edits replace the
+# live file in place and archive the prior bytes as a hidden ``version_of`` row;
+# older snapshots past this cap are pruned so history can't grow unbounded.
+MAX_PDF_VERSIONS = 10
+
 
 def _pdf_aad(user_id: str) -> bytes:
     return user_aad(user_id, "pdf:payload")
@@ -91,11 +96,14 @@ async def list_pdfs(config: Config, user_id: str) -> list[dict[str, Any]]:
 
     Soft-deleted rows (``deleted_at`` not NULL) are filtered out — they only
     surface through :func:`get_pdf_changes` so offline clients learn of deletes.
+    Hidden pre-edit snapshots (``version_of`` not NULL) are also excluded so the
+    sidebar shows only live files; they surface via :func:`list_pdf_versions`.
     """
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name, pages, tags, created_at, updated_at FROM pdf_files "
-            "WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
+            "WHERE user_id = ? AND deleted_at IS NULL AND version_of IS NULL "
+            "ORDER BY updated_at DESC",
             (user_id,),
         )
         data = await rows.fetchall()
@@ -122,7 +130,7 @@ async def get_pdf(
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, name, payload, pages, tags, created_at, updated_at "
+            "SELECT id, name, payload, pages, tags, created_at, updated_at, version_of "
             "FROM pdf_files WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (pdf_id, user_id),
         )
@@ -148,6 +156,7 @@ async def get_pdf(
         "tags": _parse_tags(row[4]),
         "created_at": row[5],
         "updated_at": row[6],
+        "version_of": row[7],
     }
 
 
@@ -376,6 +385,147 @@ async def delete_pdf(config: Config, user_id: str, pdf_id: str) -> bool:
         return cur.rowcount > 0
 
 
+async def _insert_version_row(
+    config: Config, user_id: str, parent_id: str, name: str, data: bytes
+) -> str:
+    """Insert a hidden pre-edit snapshot row (``version_of = parent_id``).
+
+    Holds the encrypted bytes exactly like a normal PDF, but is filtered out of
+    :func:`list_pdfs` / :func:`get_pdf_changes`. Returns the new version id.
+    """
+    dek = await get_user_dek(config, user_id)
+    enc = encrypt_field(_encode(data), dek, _pdf_aad(user_id))
+    try:
+        pages = ops.page_count(data)
+    except ops.PdfError:
+        pages = None
+    version_id = str(uuid4())
+    now = _now()
+    async with db_session(config) as db:
+        await db.execute(
+            "INSERT INTO pdf_files (id, user_id, name, payload, pages, tags, "
+            "created_at, updated_at, version_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (version_id, user_id, _clean_name(name), enc, pages, "[]", now, now, parent_id),
+        )
+        await db.commit()
+    return version_id
+
+
+async def _prune_versions(config: Config, user_id: str, parent_id: str) -> None:
+    """Keep only the newest :data:`MAX_PDF_VERSIONS` snapshots for ``parent_id``.
+
+    Snapshots are internal recovery rows (never synced), so pruning hard-deletes
+    the oldest overflow instead of tombstoning.
+    """
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT id FROM pdf_files WHERE user_id = ? AND version_of = ? "
+            "ORDER BY created_at DESC, id DESC",
+            (user_id, parent_id),
+        )
+        ids = [r[0] for r in await cur.fetchall()]
+        stale = ids[MAX_PDF_VERSIONS:]
+        for sid in stale:
+            await db.execute(
+                "DELETE FROM pdf_files WHERE id = ? AND user_id = ?",
+                (sid, user_id),
+            )
+        if stale:
+            await db.commit()
+
+
+async def archive_and_replace(
+    config: Config,
+    user_id: str,
+    pdf_id: str,
+    data: bytes,
+    *,
+    name: str | None = None,
+) -> dict[str, Any]:
+    """Replace a live PDF's bytes in place, stashing the prior bytes as a version.
+
+    The in-editor ✨ specialist calls this so an edit updates the SAME file (same
+    id, same name — the viewer just reloads) instead of forking a suffix-renamed
+    duplicate. The pre-edit bytes are archived as a hidden ``version_of`` row so
+    the original stays recoverable via :func:`list_pdf_versions` /
+    :func:`restore_pdf_version`. History is capped at :data:`MAX_PDF_VERSIONS`.
+
+    Raises ``LookupError`` when ``pdf_id`` is not a live PDF for this user.
+    """
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise ValueError("Cannot save an empty PDF.")
+    current = await get_pdf(config, user_id, pdf_id)
+    if current is None:
+        raise LookupError("pdf not found")
+
+    # 1) Snapshot the current (pre-edit) bytes into a hidden version row.
+    await _insert_version_row(config, user_id, pdf_id, current["name"], current["bytes"])
+    # 2) Overwrite the live row in place (same id; keep name unless renamed).
+    updated = await save_pdf(
+        config, user_id, name or current["name"], bytes(data), pdf_id=pdf_id
+    )
+    # 3) Cap retained history.
+    await _prune_versions(config, user_id, pdf_id)
+    return updated
+
+
+async def list_pdf_versions(
+    config: Config, user_id: str, pdf_id: str
+) -> list[dict[str, Any]]:
+    """List a PDF's hidden pre-edit snapshots, newest first (metadata, no bytes).
+
+    Each entry's ``id`` fetches bytes via the normal raw route and restores via
+    :func:`restore_pdf_version`. Scoped by ``user_id``.
+    """
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT id, name, pages, created_at, updated_at FROM pdf_files "
+            "WHERE user_id = ? AND version_of = ? AND deleted_at IS NULL "
+            "ORDER BY created_at DESC, id DESC",
+            (user_id, pdf_id),
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "name": r[1],
+            "pages": r[2],
+            "created_at": r[3],
+            "updated_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+async def restore_pdf_version(
+    config: Config,
+    user_id: str,
+    version_id: str,
+    *,
+    expected_parent: str | None = None,
+) -> dict[str, Any] | None:
+    """Restore an archived snapshot back into its live parent (undoable).
+
+    Loads the version bytes and replaces the parent's live bytes in place via
+    :func:`archive_and_replace` — so the just-replaced bytes are themselves
+    archived and restore can be undone. Returns the refreshed parent metadata,
+    or ``None`` when the version id is unknown/foreign/not-a-version, its parent
+    is gone, or ``expected_parent`` is given and doesn't match — checked BEFORE
+    any mutation so a mismatched request never touches another file.
+    """
+    version = await get_pdf(config, user_id, version_id)
+    if version is None or not version.get("version_of"):
+        return None
+    parent_id = version["version_of"]
+    if expected_parent is not None and parent_id != expected_parent:
+        return None
+    if await get_pdf(config, user_id, parent_id) is None:
+        return None
+    return await archive_and_replace(
+        config, user_id, parent_id, version["bytes"], name=None
+    )
+
+
 async def get_pdf_changes(
     config: Config, user_id: str, since: str | None
 ) -> dict[str, Any]:
@@ -395,18 +545,21 @@ async def get_pdf_changes(
         }
     """
     now_iso = _now()
+    # Hidden pre-edit snapshots (``version_of`` not NULL) are a web-only recovery
+    # surface — they never sync to offline clients, so the feed excludes them.
     async with db_session(config) as db:
         if since:
             cur = await db.execute(
                 "SELECT id, name, pages, tags, created_at, updated_at, deleted_at "
                 "FROM pdf_files WHERE user_id = ? AND updated_at > ? "
-                "ORDER BY updated_at ASC",
+                "AND version_of IS NULL ORDER BY updated_at ASC",
                 (user_id, since),
             )
         else:
             cur = await db.execute(
                 "SELECT id, name, pages, tags, created_at, updated_at, deleted_at "
-                "FROM pdf_files WHERE user_id = ? ORDER BY updated_at ASC",
+                "FROM pdf_files WHERE user_id = ? AND version_of IS NULL "
+                "ORDER BY updated_at ASC",
                 (user_id,),
             )
         rows = await cur.fetchall()

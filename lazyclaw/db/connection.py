@@ -267,6 +267,18 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("tasks.updated_at backfill skipped", exc_info=True)
 
+        # PDF version index — created HERE (post-migration) not in schema.sql,
+        # because on an existing DB the `version_of` column only exists after the
+        # ALTER migration above runs; a CREATE INDEX on it inside the schema
+        # executescript (which runs first) would crash with "no such column".
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pdf_files_version_of "
+                "ON pdf_files(user_id, version_of)"
+            )
+        except Exception:
+            logger.debug("pdf_files.version_of index skipped", exc_info=True)
+
         # ── Progress templates — bundled function + learned skill ─────────
         # Schema cloned from browser_templates: name + playbook are encrypted,
         # category match + cron + auto-save metrics are plaintext for the

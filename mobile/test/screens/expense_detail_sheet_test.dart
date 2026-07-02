@@ -42,7 +42,7 @@ class _OfflineTransport implements BudgetsTransport {
 class _NoopSync extends BudgetsSync {
   _NoopSync(super.dao, super.repo);
   @override
-  Future<BudgetsSyncResult> sync() async => const BudgetsSyncResult();
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async => const BudgetsSyncResult();
 }
 
 /// Records the editor's writes without touching the DAO/network. Seeds two

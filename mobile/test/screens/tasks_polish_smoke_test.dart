@@ -79,13 +79,15 @@ class _OfflineBudgetsTransport implements BudgetsTransport {
 class _NoopSync extends TaskSync {
   _NoopSync(super.dao, super.repo);
   @override
-  Future<SyncResult> sync() async => const SyncResult();
+  Future<SyncResult> sync({bool retryRejected = false}) async =>
+      const SyncResult();
 }
 
 class _NoopBudgetsSync extends BudgetsSync {
   _NoopBudgetsSync(super.dao, super.repo);
   @override
-  Future<BudgetsSyncResult> sync() async => const BudgetsSyncResult();
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async =>
+      const BudgetsSyncResult();
 }
 
 /// Seeds the screen with a fixed task list and neutralises every method that

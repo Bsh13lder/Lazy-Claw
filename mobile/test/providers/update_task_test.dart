@@ -53,7 +53,7 @@ class _OfflineTransport implements TasksTransport {
 class _NoopSync extends TaskSync {
   _NoopSync(super.dao, super.repo);
   @override
-  Future<SyncResult> sync() async => const SyncResult();
+  Future<SyncResult> sync({bool retryRejected = false}) async => const SyncResult();
 }
 
 /// TaskDao that records applyLocalUpdate calls and serves canned reads, never

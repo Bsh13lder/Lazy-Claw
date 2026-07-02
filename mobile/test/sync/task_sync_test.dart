@@ -955,6 +955,33 @@ void main() {
       expect(await dao.dirtyIds(), isNot(contains('orphan-1')));
       expect(await dao.outboxCount(), 0);
     });
+
+    test('sync(retryRejected: true) recovers a create_rejected orphan', () async {
+      final dao = await _freshDao();
+      // Stranded orphan flagged create_rejected (e.g. dropped during an outage).
+      await dao.applyLocalCreate('reserva-like', id: 'rej-1');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      await dao.logConflict(
+          id: 'rej-1', field: 'create_rejected', local: 'HTTP 401', server: null);
+
+      final transport = _FakeTransport();
+      final sync = TaskSync(dao, TasksRepository(transport));
+
+      // Routine sync leaves it excluded → no POST.
+      await sync.sync();
+      expect(
+          transport.calls.where((c) => c.method == 'POST').toList(), isEmpty);
+
+      // Force-retry sync clears the marker → the orphan re-queues + pushes.
+      await sync.sync(retryRejected: true);
+      final posts =
+          transport.calls.where((c) => c.method == 'POST').toList();
+      expect(posts, hasLength(1));
+      expect(posts.single.body?['id'], 'rej-1');
+      expect(await dao.dirtyIds(), isNot(contains('rej-1')));
+    });
   });
 }
 

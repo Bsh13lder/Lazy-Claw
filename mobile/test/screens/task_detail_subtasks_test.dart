@@ -50,7 +50,8 @@ class _OfflineTransport implements TasksTransport {
 class _NoopSync extends TaskSync {
   _NoopSync(super.dao, super.repo);
   @override
-  Future<SyncResult> sync() async => const SyncResult();
+  Future<SyncResult> sync({bool retryRejected = false}) async =>
+      const SyncResult();
 }
 
 class _StubTasksNotifier extends TasksNotifier {

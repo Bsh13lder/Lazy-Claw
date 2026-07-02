@@ -14,6 +14,7 @@ from lazyclaw.crypto.encryption import decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.gateway.auth import User, get_current_user
+from lazyclaw.runtime.consolidation_guidance import is_consolidation_turn
 from lazyclaw.runtime.session_resolver import (
     get_primary_session_id,
     invalidate_primary_session,
@@ -263,6 +264,17 @@ async def get_session_messages(
         messages = []
         for r in reversed(list(await rows.fetchall())):
             content = decrypt_field(r[2], key) or ""
+
+            # Hide the synthetic brain fan-out CONSOLIDATION prompt from the
+            # chat UI. task_runner._consolidate enqueues a user-role turn whose
+            # content is the internal "[Background fan-out complete — N tasks
+            # finished] … Write ONE consolidated summary …" instruction; it is
+            # machinery, not something the user typed, and leaked into the
+            # mobile/web chat as a green user bubble (2026-07-01). The brain's
+            # ASSISTANT summary reply is a normal row and stays visible.
+            if r[1] == "user" and is_consolidation_turn(content):
+                continue
+
             metadata_raw = decrypt_field(r[4], key) if r[4] else None
 
             tool_calls = _extract_tool_calls(metadata_raw)

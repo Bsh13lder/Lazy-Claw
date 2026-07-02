@@ -121,6 +121,34 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # TODO(cloudflare-tunnel): VPN-proof remote access — PENDING USER'S DOMAIN.
+  #
+  # WHY: DuckDNS + the router port-forward (Caddy above) only work when the
+  # home connection presents a real, forwardable public IP. With ProtonVPN up
+  # on the Mac (which the user wants ON), the public IP becomes the VPN exit and
+  # inbound is impossible — cellular can't reach the server (diagnosed 2026-07-02).
+  #
+  # FIX: cloudflared dials OUTBOUND to Cloudflare's edge (no inbound port, works
+  # through the VPN / CGNAT / any IP change) and serves the app on the user's own
+  # domain. Uncomment + fill the two placeholders once the user provides:
+  #   1. their domain (e.g. app.<their-domain>) added to Cloudflare (free plan)
+  #   2. a tunnel token from `cloudflared tunnel create` (store in .env as
+  #      CLOUDFLARE_TUNNEL_TOKEN — NEVER hardcode it here)
+  # Then map the hostname → http://lazyclaw-web:80 (or lazyclaw:18789 for the API)
+  # in the Cloudflare dashboard / config.yml, and point the Flutter app's
+  # kDefaultBaseUrl at https://app.<their-domain> (keep the LAN .12 fallback).
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: lazyclaw-cloudflared
+  #   restart: unless-stopped
+  #   mem_limit: 128m
+  #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - lazyclaw-web
+  # ─────────────────────────────────────────────────────────────────────────
+
   n8n:
     build:
       context: ./n8n-custom

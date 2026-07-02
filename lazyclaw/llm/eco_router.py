@@ -62,6 +62,20 @@ _MODE_ALIASES = {
 # Old eco/local modes are disabled (require 32GB+ RAM)
 _DISABLED_MODES = frozenset({"local", "eco", "eco_on", "on"})
 
+# MiniMax-M3 as a ROLE pin is junk: off the Token-Plan 5h quota (covers
+# M2.7 / m2.7-highspeed only) + regressed tool-calling (narrates JSON
+# plans instead of tool_use — 2026-07-02 Upwork bail). Stored pins
+# silently defeated the 2026-07-01 M3→M2.7 default revert, so scrub at
+# parse time like _CLAUDE_JUNK_MODEL_NAMES. M3 stays in the catalog for
+# explicit non-role use (vision experiments); it just can't be a
+# brain/worker/fallback pin.
+_MINIMAX_JUNK_PIN = "MiniMax-M3"
+_MINIMAX_PIN_REPLACEMENT = "MiniMax-M2.7"
+
+# Safe fallback model: when a self-referential fallback is detected
+# (fallback == brain), use this as a last-resort escape hatch.
+_SAFE_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+
 DISABLED_MODE_MESSAGE = (
     "ECO mode (local-only) requires 32GB+ RAM and is coming in a future update. "
     "Use HYBRID for the best balance of cost and quality."
@@ -281,21 +295,31 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
             return None
         return value or None
 
+    def _clean_minimax_pin(value: object) -> str | None:
+        if value == _MINIMAX_JUNK_PIN:
+            logger.warning(
+                "Stored model pin '%s' coerced to '%s' "
+                "(off Token-Plan quota; regressed tool-calling)",
+                _MINIMAX_JUNK_PIN, _MINIMAX_PIN_REPLACEMENT,
+            )
+            return _MINIMAX_PIN_REPLACEMENT
+        return value if isinstance(value, str) and value else None
+
     return EcoSettings(
         mode=mode,
         show_badges=eco.get("show_badges", True),
         monthly_paid_budget=float(eco.get("monthly_paid_budget", 0)),
         auto_fallback=eco.get("auto_fallback", True),
         max_workers=int(eco.get("max_workers", 10)),
-        brain_model=eco.get("brain_model"),
-        worker_model=eco.get("worker_model") or eco.get("specialist_model"),
-        fallback_model=eco.get("fallback_model"),
-        hybrid_brain_model=eco.get("hybrid_brain_model"),
-        hybrid_worker_model=eco.get("hybrid_worker_model"),
-        hybrid_fallback_model=eco.get("hybrid_fallback_model"),
-        full_brain_model=eco.get("full_brain_model"),
-        full_worker_model=eco.get("full_worker_model"),
-        full_fallback_model=eco.get("full_fallback_model"),
+        brain_model=_clean_minimax_pin(eco.get("brain_model")),
+        worker_model=_clean_minimax_pin(eco.get("worker_model") or eco.get("specialist_model")),
+        fallback_model=_clean_minimax_pin(eco.get("fallback_model")),
+        hybrid_brain_model=_clean_minimax_pin(eco.get("hybrid_brain_model")),
+        hybrid_worker_model=_clean_minimax_pin(eco.get("hybrid_worker_model")),
+        hybrid_fallback_model=_clean_minimax_pin(eco.get("hybrid_fallback_model")),
+        full_brain_model=_clean_minimax_pin(eco.get("full_brain_model")),
+        full_worker_model=_clean_minimax_pin(eco.get("full_worker_model")),
+        full_fallback_model=_clean_minimax_pin(eco.get("full_fallback_model")),
         claude_brain_model=_clean_claude_model(eco.get("claude_brain_model")),
         claude_worker_model=_clean_claude_model(eco.get("claude_worker_model")),
         claude_fallback_model=_clean_claude_model(eco.get("claude_fallback_model")),
@@ -304,9 +328,9 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
             if eco.get("claude_transport") in ("sdk", "cli")
             else "sdk"
         ),
-        minimax_brain_model=eco.get("minimax_brain_model"),
-        minimax_worker_model=eco.get("minimax_worker_model"),
-        minimax_fallback_model=eco.get("minimax_fallback_model"),
+        minimax_brain_model=_clean_minimax_pin(eco.get("minimax_brain_model")),
+        minimax_worker_model=_clean_minimax_pin(eco.get("minimax_worker_model")),
+        minimax_fallback_model=_clean_minimax_pin(eco.get("minimax_fallback_model")),
         locked_provider=eco.get("locked_provider"),
         allowed_providers=allowed,
         free_providers=free_providers,
@@ -629,11 +653,25 @@ class EcoRouter:
         mode_brain = getattr(settings, f"{mode}_brain_model", None)
         mode_worker = getattr(settings, f"{mode}_worker_model", None)
         mode_fallback = getattr(settings, f"{mode}_fallback_model", None)
-        return {
+        resolved = {
             "brain": mode_brain or settings.brain_model or defaults["brain"],
             "worker": mode_worker or settings.worker_model or defaults["worker"],
             "fallback": mode_fallback or settings.fallback_model or defaults["fallback"],
         }
+        if resolved["fallback"] == resolved["brain"]:
+            # A fallback equal to the brain is a no-op safety net — the
+            # 2026-07-02 Upwork bail ran brain=fallback=MiniMax-M3 so no
+            # rescue was ever possible. Prefer the mode default; if the
+            # brain IS the mode default fallback, use the safe constant.
+            alt = defaults["fallback"]
+            if alt == resolved["brain"]:
+                alt = _SAFE_FALLBACK_MODEL
+            logger.warning(
+                "fallback_model == brain_model (%s) — self-fallback is a "
+                "no-op; using %s instead", resolved["brain"], alt,
+            )
+            resolved = {**resolved, "fallback": alt}
+        return resolved
 
     def _is_auto_fallback(self, settings: EcoSettings) -> bool:
         """Both HYBRID and FULL always auto-fallback."""

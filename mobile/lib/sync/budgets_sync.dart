@@ -68,6 +68,11 @@ class BudgetsSync {
     if (_running) return const BudgetsSyncResult();
     _running = true;
     try {
+      // Self-heal any stranded offline creates (ops that were dead-lettered or
+      // silently drained by an older build) BEFORE draining, so the reserva-1000
+      // class of orphan — a dirty cache row with no outbox op — re-pushes this
+      // run instead of living on-device forever, invisible to the server.
+      await _dao.reenqueueOrphanedCreates();
       final pushResult = await push();
       final pullResult = await pull();
       return BudgetsSyncResult(

@@ -729,6 +729,102 @@ class BudgetsDao {
     await _db.delete('outbox', where: 'seq = ?', whereArgs: [seq]);
   }
 
+  /// Self-heal stranded creates — the reserva-1000 data-loss recovery.
+  ///
+  /// A row that was created offline and whose `create` op was later DROPPED
+  /// (dead-lettered after [BudgetsSync.kMaxPushAttempts], or silently drained by
+  /// an older build) survives as a `dirty` cache row that NEVER reaches the
+  /// server: visible on-device, invisible to web + the agent, forever. Such a
+  /// row is uniquely identified as `dirty=1 AND deleted=0 AND
+  /// last_synced_at IS NULL` (never successfully pushed — an existing-server row
+  /// whose UPDATE drained keeps its `last_synced_at`) with NO pending outbox op
+  /// and NO `create_rejected` conflict already on file (so a genuinely-rejected
+  /// create can't loop). For each match, re-enqueue a fresh `create` so the next
+  /// push replays it — projects FIRST so a re-created parent gets a lower seq
+  /// than its child expenses and lands before their `POST /projects/{id}/…`.
+  ///
+  /// Idempotent: once a heal enqueues an op the row is no longer op-less, so a
+  /// repeat call (even while offline) won't double-enqueue. Returns the count.
+  Future<int> reenqueueOrphanedCreates() async {
+    final pending = await readBudgetsOutbox();
+    final pendingProjectIds = <String>{
+      for (final o in pending)
+        if (o.isProject) o.entityId,
+    };
+    final pendingExpenseIds = <String>{
+      for (final o in pending)
+        if (o.isExpense) o.entityId,
+    };
+    final rejected = await _createRejectedIds();
+
+    const orphanWhere = 'dirty = 1 AND deleted = 0 AND last_synced_at IS NULL';
+    final projRows = await _db.query('project_cache', where: orphanWhere);
+    final expRows = await _db.query('expense_cache', where: orphanWhere);
+
+    var healed = 0;
+    await _db.transaction((txn) async {
+      final now = _now();
+      // Projects first — a re-created parent must precede its child expenses.
+      for (final row in projRows) {
+        final id = row['id'] as String? ?? '';
+        if (id.isEmpty ||
+            pendingProjectIds.contains(id) ||
+            rejected.contains(id)) {
+          continue;
+        }
+        final p = _projectFromRow(row);
+        final payload = <String, dynamic>{
+          'id': p.id,
+          'name': p.name,
+          'budget': p.budget,
+          if (p.description != null) 'description': p.description,
+          if (p.color != null) 'color': p.color,
+        };
+        await _enqueueTxn(
+            txn, BudgetsOutboxOp.create, kProjectEntity, id, payload, now);
+        healed++;
+      }
+      for (final row in expRows) {
+        final id = row['id'] as String? ?? '';
+        if (id.isEmpty ||
+            pendingExpenseIds.contains(id) ||
+            rejected.contains(id)) {
+          continue;
+        }
+        final e = _expenseFromRow(row);
+        final payload = <String, dynamic>{
+          'id': e.id,
+          'project_id': e.projectId,
+          'amount': e.amount,
+          'description': e.description ?? '',
+          'currency': e.currency,
+          if (e.spentAt != null) 'spent_at': e.spentAt,
+          if (e.vendor != null) 'vendor': e.vendor,
+        };
+        await _enqueueTxn(
+            txn, BudgetsOutboxOp.create, kExpenseEntity, id, payload, now);
+        healed++;
+      }
+    });
+    return healed;
+  }
+
+  /// Ids that already carry a definitive `create_rejected` conflict — excluded
+  /// from [reenqueueOrphanedCreates] so a genuinely-unresolvable create can't be
+  /// re-queued every sync.
+  Future<Set<String>> _createRejectedIds() async {
+    final rows = await _db.query(
+      'conflicts',
+      columns: ['id'],
+      where: 'field = ?',
+      whereArgs: ['create_rejected'],
+    );
+    return {
+      for (final r in rows)
+        if (r['id'] != null) r['id'] as String,
+    };
+  }
+
   /// Atomically retire a pushed item: delete its outbox row AND clear the local
   /// dirty flag (or hard-remove a pushed tombstone) in ONE transaction. Either
   /// both land or neither does. Idempotent on replay.

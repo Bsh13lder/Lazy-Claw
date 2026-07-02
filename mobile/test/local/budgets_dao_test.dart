@@ -55,6 +55,98 @@ Expense _serverExpense({
 void main() {
   setUpAll(() => sqfliteFfiInit());
 
+  // ── Self-heal stranded creates (reserva-1000 data-loss recovery) ────────────
+
+  group('reenqueueOrphanedCreates', () {
+    test('re-enqueues a stranded expense create (dropped op, never synced)',
+        () async {
+      final dao = await _freshDao();
+      // An offline-created expense: dirty=1, last_synced_at=null, create queued.
+      await dao.applyLocalExpenseCreate('p1', 1000.0, 'reserva',
+          id: 'exp-reserva', currency: 'EUR');
+      // Simulate the create op being dropped (dead-lettered / old silent drain).
+      final before = await dao.readBudgetsOutbox();
+      for (final o in before) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 1);
+      final outbox = await dao.readBudgetsOutbox();
+      expect(outbox.length, 1);
+      final op = outbox.single;
+      expect(op.op, BudgetsOutboxOp.create);
+      expect(op.isExpense, isTrue);
+      expect(op.entityId, 'exp-reserva');
+      expect(op.payload['project_id'], 'p1');
+      expect((op.payload['amount'] as num).toDouble(), 1000.0);
+      expect(op.payload['description'], 'reserva');
+      expect(op.payload['currency'], 'EUR');
+    });
+
+    test('does NOT duplicate when a pending op already exists', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('p1', 12.0, 'coffee', id: 'e1');
+      // Op is still queued → not an orphan.
+      final healed = await dao.reenqueueOrphanedCreates();
+      expect(healed, 0);
+      expect((await dao.readBudgetsOutbox()).length, 1);
+    });
+
+    test('skips a row already flagged create_rejected (no infinite loop)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('gone', 5.0, 'bad', id: 'e-bad');
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      await dao.logConflict(
+          id: 'e-bad', field: 'create_rejected', local: 'HTTP 400', server: null);
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 0);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('skips a synced row whose UPDATE op was drained (last_synced_at set)',
+        () async {
+      final dao = await _freshDao();
+      // Pulled from server → last_synced_at set, dirty=0.
+      await dao.upsertExpenseFromServer(_serverExpense(id: 'e-synced'));
+      // A local edit → dirty=1 but last_synced_at stays (it DID reach server once).
+      await dao.applyLocalExpenseUpdate('e-synced', amount: 99.0);
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      // Not a stranded CREATE — it exists server-side; the next pull reconciles it.
+      expect(healed, 0);
+    });
+
+    test('re-enqueues a stranded PROJECT before its stranded expense', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Orphan proj', id: 'proj-x');
+      await dao.applyLocalExpenseCreate('proj-x', 7.0, 'thing', id: 'exp-x');
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 2);
+      final outbox = await dao.readBudgetsOutbox();
+      // Parent project must drain first (lower seq) so the child's POST finds it.
+      expect(outbox.first.isProject, isTrue);
+      expect(outbox.first.entityId, 'proj-x');
+      expect(outbox[1].isExpense, isTrue);
+    });
+  });
+
   // ── Projects ───────────────────────────────────────────────────────────────
 
   group('BudgetsDao local project create', () {

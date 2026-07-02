@@ -180,6 +180,35 @@ void main() {
 
   // ── PUSH ──────────────────────────────────────────────────────────────────
 
+  group('BudgetsSync.sync self-heal', () {
+    test('re-pushes a stranded orphan create (reserva-1000 recovery)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('p1', 1000.0, 'reserva',
+          id: 'exp-reserva', currency: 'EUR');
+      // Simulate the create op being dropped (dead-lettered / old silent drain)
+      // — the expense is now a dirty orphan: on-device but never on the server.
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      expect(await dao.dirtyExpenseIds(), contains('exp-reserva'));
+
+      final transport = _FakeTransport();
+      final result = await BudgetsSync(dao, BudgetsRepository(transport)).sync();
+
+      // sync() healed the orphan and pushed it to the server.
+      final posts = transport.calls
+          .where((c) => c.method == 'POST' && c.path.contains('/expenses'))
+          .toList();
+      expect(posts.length, 1);
+      expect(posts.first.body?['id'], 'exp-reserva');
+      expect((posts.first.body?['amount'] as num).toDouble(), 1000.0);
+      expect(result.pushed, 1);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      expect(await dao.dirtyExpenseIds(), isNot(contains('exp-reserva')));
+    });
+  });
+
   group('BudgetsSync.push', () {
     test('drains both entities in seq order and clears the outbox', () async {
       final dao = await _freshDao();

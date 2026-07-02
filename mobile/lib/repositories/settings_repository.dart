@@ -1,4 +1,5 @@
 import '../core/api/api_client.dart';
+import '../core/reminder_offset.dart';
 
 // ── Models ─────────────────────────────────────────────────────────────────
 
@@ -66,11 +67,18 @@ class GeneralSettings {
   final bool assistantConfirmCloudRequests;
   final bool assistantAlwaysListening;
 
+  /// The server's default reminder OFFSET set (normalised wire strings), or
+  /// `null` when the backend didn't include `reminder_offsets` (not migrated /
+  /// never set). `null` is DISTINCT from an empty list (server stores none):
+  /// callers must not clobber a local selection when this is `null`.
+  final List<String>? reminderOffsets;
+
   const GeneralSettings({
     required this.agentMode,
     this.assistantProcessDataOnDevice = false,
     this.assistantConfirmCloudRequests = true,
     this.assistantAlwaysListening = false,
+    this.reminderOffsets,
   });
 
   factory GeneralSettings.fromJson(Map<String, dynamic> json) => GeneralSettings(
@@ -78,6 +86,7 @@ class GeneralSettings {
         assistantProcessDataOnDevice: json['process_data_on_device'] == true,
         assistantConfirmCloudRequests: json['confirm_cloud_requests'] != false,
         assistantAlwaysListening: json['assistant_always_listening'] == true,
+        reminderOffsets: parseServerReminderOffsets(json['reminder_offsets']),
       );
 
   GeneralSettings copyWith({
@@ -85,6 +94,7 @@ class GeneralSettings {
     bool? assistantProcessDataOnDevice,
     bool? assistantConfirmCloudRequests,
     bool? assistantAlwaysListening,
+    List<String>? reminderOffsets,
   }) =>
       GeneralSettings(
         agentMode: agentMode ?? this.agentMode,
@@ -94,6 +104,7 @@ class GeneralSettings {
             assistantConfirmCloudRequests ?? this.assistantConfirmCloudRequests,
         assistantAlwaysListening:
             assistantAlwaysListening ?? this.assistantAlwaysListening,
+        reminderOffsets: reminderOffsets ?? this.reminderOffsets,
       );
 
   /// Normalizes any input to a known mode value, falling back to the default.
@@ -102,6 +113,15 @@ class GeneralSettings {
     return (s != null && kAgentModeLabels.containsKey(s))
         ? s
         : kDefaultAgentMode;
+  }
+
+  /// Parse the server's `reminder_offsets` value → a normalised list, or `null`
+  /// when the key is absent / not a list. An empty list stays an empty list.
+  static List<String>? parseServerReminderOffsets(dynamic v) {
+    if (v is List) {
+      return normalizeReminderOffsets(v.map((e) => e.toString()));
+    }
+    return null;
   }
 }
 
@@ -273,6 +293,23 @@ class SettingsRepository {
     _assertSuccess(json);
     return GeneralSettings.fromJson(
         Map<String, dynamic>.from(json['data'] as Map));
+  }
+
+  /// PATCHes the default reminder OFFSET set via `PATCH /api/settings/general`
+  /// with `{ reminder_offsets: [...] }` and returns the updated settings. The
+  /// list is normalised before sending. If the backend doesn't echo
+  /// `reminder_offsets` yet, falls back to the sent list so the UI reflects the
+  /// user's choice (mirrors [setAgentMode]).
+  Future<GeneralSettings> setReminderOffsets(List<String> offsets) async {
+    final normalised = normalizeReminderOffsets(offsets);
+    final json = await _t.patchJson(
+      '/api/settings/general',
+      {'reminder_offsets': normalised},
+    );
+    _assertSuccess(json);
+    final data = Map<String, dynamic>.from(json['data'] as Map);
+    data.putIfAbsent('reminder_offsets', () => normalised);
+    return GeneralSettings.fromJson(data);
   }
 
   // ── Permissions ───────────────────────────────────────────────────────────

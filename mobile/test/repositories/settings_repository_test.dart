@@ -259,6 +259,69 @@ void main() {
     });
   });
 
+  // ── reminder offsets (general.reminder_offsets) ───────────────────────────
+  group('SettingsRepository reminder offsets', () {
+    test('getGeneral parses + normalises reminder_offsets', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {
+          'agent_mode': 'ask',
+          'reminder_offsets': ['-30m', '-1d', 'junk', '-30m'],
+        },
+      });
+      final general = await SettingsRepository(t).getGeneral();
+      expect(general.reminderOffsets, ['-1d', '-30m']);
+    });
+
+    test('getGeneral yields null reminderOffsets when the key is absent',
+        () async {
+      final t = _FakeTransport({'success': true, 'data': {'agent_mode': 'ask'}});
+      final general = await SettingsRepository(t).getGeneral();
+      expect(general.reminderOffsets, isNull);
+    });
+
+    test('getGeneral yields an empty list when the server stores none', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'agent_mode': 'ask', 'reminder_offsets': <String>[]},
+      });
+      final general = await SettingsRepository(t).getGeneral();
+      expect(general.reminderOffsets, isEmpty);
+    });
+
+    test('setReminderOffsets PATCHes the normalised list', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'reminder_offsets': ['-1d', '0m']},
+      });
+      final general = await SettingsRepository(t).setReminderOffsets(
+        ['0m', '-1d', '0m'],
+      );
+      expect(t.lastMethod, 'PATCH');
+      expect(t.lastPath, '/api/settings/general');
+      expect(t.lastBody, {
+        'reminder_offsets': ['-1d', '0m'],
+      });
+      expect(general.reminderOffsets, ['-1d', '0m']);
+    });
+
+    test('setReminderOffsets falls back to the sent list when server omits it',
+        () async {
+      final t = _FakeTransport({'success': true, 'data': {}});
+      final general =
+          await SettingsRepository(t).setReminderOffsets(['-1h', '0m']);
+      expect(general.reminderOffsets, ['-1h', '0m']);
+    });
+
+    test('setReminderOffsets throws on success:false', () async {
+      final t = _FakeTransport({'success': false, 'error': 'nope'});
+      expect(
+        () => SettingsRepository(t).setReminderOffsets(['0m']),
+        throwsA(isA<SettingsException>()),
+      );
+    });
+  });
+
   // ── getPermissions ────────────────────────────────────────────────────────
   group('SettingsRepository.getPermissions', () {
     test('GETs /api/permissions/settings and parses PermissionsSettings',

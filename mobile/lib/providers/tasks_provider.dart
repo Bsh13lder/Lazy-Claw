@@ -5,6 +5,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../core/home_widget_tasks.dart';
 import '../core/notifications/task_reminder_service.dart';
+import '../core/reminder_offset.dart';
 import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
 import '../models/subtask.dart';
@@ -59,11 +60,11 @@ final taskSyncProvider = Provider<TaskSync>((ref) {
 /// date-only task ALWAYS gets a future reminder, even before the pref resolves
 /// (the service defaults to [kDefaultReminderMinutes] = 09:00 internally).
 final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
+  final prefs = ref.read(settingsPrefsProvider).valueOrNull;
   final service = TaskReminderService(
-    LocalNotifications.plugin,
-    defaultReminderMinutes:
-        ref.read(settingsPrefsProvider).valueOrNull?.defaultReminderMinutes ??
-        kDefaultReminderMinutes,
+    FlutterLocalNotificationsSink(LocalNotifications.plugin),
+    defaultReminderMinutes: prefs?.defaultReminderMinutes ?? kDefaultReminderMinutes,
+    offsets: prefs?.reminderOffsets ?? kDefaultReminderOffsets,
   );
   // Keep the date-only fallback time-of-day in sync with the user's pref.
   ref.listen<int>(
@@ -71,6 +72,13 @@ final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
       (s) => s.valueOrNull?.defaultReminderMinutes ?? kDefaultReminderMinutes,
     ),
     (_, next) => service.defaultReminderMinutes = next,
+  );
+  // Keep the default reminder OFFSET set in sync with the user's multi-select.
+  ref.listen<List<String>>(
+    settingsPrefsProvider.select(
+      (s) => s.valueOrNull?.reminderOffsets ?? kDefaultReminderOffsets,
+    ),
+    (_, next) => service.offsets = next,
   );
   return service;
 });

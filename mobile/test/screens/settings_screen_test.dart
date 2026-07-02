@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
+import 'package:lazyclaw_mobile/core/reminder_offset.dart';
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
 
 void main() {
@@ -122,6 +123,56 @@ void main() {
       expect(reminderLeadFromStored(null), kDefaultReminderLead);
       expect(reminderLeadFromStored('xyz'), kDefaultReminderLead);
       expect(reminderLeadFromStored('-5'), kDefaultReminderLead);
+    });
+  });
+
+  // ── Reminder-OFFSETS (multi-select) serialisation ───────────────────────────
+
+  group('reminderOffsetsToStored / reminderOffsetsFromStored', () {
+    test('round-trips a multi-offset selection (normalised)', () {
+      final stored = reminderOffsetsToStored(['0m', '-30m', '-1d']);
+      expect(reminderOffsetsFromStored(stored), ['-1d', '-30m', '0m']);
+    });
+
+    test('normalises + dedupes + drops junk on store', () {
+      final stored = reminderOffsetsToStored(['-60m', '-1h', 'junk', '0m']);
+      expect(reminderOffsetsFromStored(stored), ['-1h', '0m']);
+    });
+
+    test('an explicitly-empty selection round-trips as empty (single fallback)',
+        () {
+      final stored = reminderOffsetsToStored(const []);
+      expect(reminderOffsetsFromStored(stored), isEmpty);
+    });
+
+    test('absent (null) → the default offset set', () {
+      expect(reminderOffsetsFromStored(null), kDefaultReminderOffsets);
+    });
+
+    test('garbage → the default offset set', () {
+      expect(reminderOffsetsFromStored('not json'), kDefaultReminderOffsets);
+      expect(reminderOffsetsFromStored('{"a":1}'), kDefaultReminderOffsets);
+    });
+  });
+
+  group('SettingsPrefsData reminderOffsets', () {
+    const base = SettingsPrefsData(
+      syncInterval: SyncInterval.min30,
+      wipeOnLogout: false,
+      notifyChatReply: true,
+      notifyTaskDone: true,
+      notifyApprovals: true,
+    );
+
+    test('defaults reminderOffsets to the built-in default', () {
+      expect(base.reminderOffsets, kDefaultReminderOffsets);
+    });
+
+    test('copyWith updates reminderOffsets in isolation', () {
+      final updated = base.copyWith(reminderOffsets: const ['0m', '-1h']);
+      expect(updated.reminderOffsets, ['0m', '-1h']);
+      expect(updated.reminderLeadDefault, base.reminderLeadDefault);
+      expect(updated.defaultReminderMinutes, base.defaultReminderMinutes);
     });
   });
 }

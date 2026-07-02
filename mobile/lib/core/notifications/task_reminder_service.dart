@@ -4,6 +4,7 @@ import 'package:timezone/timezone.dart' as tz;
 import '../../models/task.dart';
 import '../../notifications/notification_actions.dart';
 import '../due_date.dart';
+import '../reminder_offset.dart';
 
 /// Abstract seam the tasks provider depends on, so scheduling can be wired in
 /// production yet left null/faked in tests without a hard plugin dependency.
@@ -82,6 +83,31 @@ DateTime? _parseDueDateOnlyAt(String? due, int h, int m) {
   return DateTime(date.year, date.month, date.day, h, m);
 }
 
+/// The EVENT instant that the user's reminder OFFSETS are measured from, or null
+/// when there's nothing to anchor to.
+///
+/// Precedence (DUE-first — an offset is a lead BEFORE the event, so the event is
+/// the due time, NOT the legacy single [Task.reminderAt] lead):
+///   1. A timed due (`…THH:mm:ss`) → that instant.
+///   2. A date-only due (`yyyy-MM-dd`) → that date at the default time-of-day.
+///   3. No due at all → the explicit [Task.reminderAt] instant (offsets then key
+///      off that, so a reminder-only task still fires).
+///
+/// Unlike [reminderFireTime], this does NOT past-filter — that's done at
+/// schedule time by [computeOffsetFireTimes]. Pure.
+DateTime? reminderBaseTime(
+  Task task, {
+  int defaultReminderHour = 9,
+  int defaultReminderMinute = 0,
+}) {
+  final timed = _parseDueWithTime(task.dueDate);
+  if (timed != null) return timed;
+  final dateOnly =
+      _parseDueDateOnlyAt(task.dueDate, defaultReminderHour, defaultReminderMinute);
+  if (dateOnly != null) return dateOnly;
+  return _parseReminderAt(task.reminderAt);
+}
+
 /// Derive a stable, positive 31-bit notification id from a task id.
 ///
 /// Uses FNV-1a (32-bit) so the mapping is deterministic across runs, isolates
@@ -96,6 +122,20 @@ int notificationIdForTask(String taskId) {
   }
   return hash & 0x7FFFFFFF; // positive 31-bit
 }
+
+/// The maximum number of distinct offset reminders a single task can schedule.
+/// Caps the notification-id range reserved (and swept on cancel/reconcile) per
+/// task, so a runaway offset list can't exhaust ids or slow cancellation.
+const int kMaxOffsetReminders = 16;
+
+/// The notification id for the [index]-th offset reminder of [taskId].
+///
+/// Index 0 deliberately COINCIDES with [notificationIdForTask] so the
+/// single-reminder fallback (empty offsets) and any legacy single-id schedule
+/// share one id — no orphaned alarm when a user switches between the two. Higher
+/// indices derive a distinct stable FNV id from a per-index key.
+int notificationIdForOffset(String taskId, int index) =>
+    index == 0 ? notificationIdForTask(taskId) : notificationIdForTask('$taskId#$index');
 
 /// The notification BODY text — it describes WHEN THE TASK IS DUE, never the
 /// instant the reminder pops. A reminder may fire ahead of the due time (an
@@ -155,37 +195,42 @@ const List<String> _kMonthAbbrev = [
 String _monthAbbrev(int month) =>
     (month >= 1 && month <= 12) ? _kMonthAbbrev[month - 1] : '';
 
-// ── Production implementation ────────────────────────────────────────────────
+// ── Scheduling seam (testable) ───────────────────────────────────────────────
 
-/// Schedules task reminders via the shared [FlutterLocalNotificationsPlugin].
+/// Minimal notification-scheduling seam so [TaskReminderService] can be unit-
+/// tested without a real plugin / platform channel. Production wires the
+/// [FlutterLocalNotificationsSink] adapter; tests inject a recording fake.
 ///
-/// Reuses the app's single plugin instance (pass `LocalNotifications.plugin`).
-/// Every method is best-effort and never throws — a denied permission, an
-/// uninitialised timezone db, or a missing plugin simply means no reminder.
-class TaskReminderService implements TaskReminderScheduler {
-  TaskReminderService(this._plugin, {int defaultReminderMinutes = 540})
-      : _defaultReminderMinutes = _clampMinutes(defaultReminderMinutes);
+/// Every method is best-effort and MUST NOT throw — the service treats a failed
+/// schedule/cancel as "no reminder" rather than letting it break a task write.
+abstract class ReminderSink {
+  /// Cancel the scheduled notification with [id].
+  Future<void> cancel(int id);
+
+  /// Schedule a notification with [id] to fire at the local wall-clock [fire]
+  /// instant, carrying [title] / [body] / [payload].
+  Future<void> schedule({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime fire,
+    required String payload,
+  });
+
+  /// The ids of all currently-pending scheduled notifications.
+  Future<List<int>> pendingIds();
+}
+
+/// Production [ReminderSink] backed by the shared [FlutterLocalNotificationsPlugin].
+///
+/// Owns the notification channel + presentation details + the DST-correct tz
+/// conversion + the exact→inexact alarm fallback, so [TaskReminderService] stays
+/// pure scheduling logic. Every method swallows its own errors (denied
+/// permission, uninitialised tz db, missing plugin) → a silent no-op.
+class FlutterLocalNotificationsSink implements ReminderSink {
+  FlutterLocalNotificationsSink(this._plugin);
 
   final FlutterLocalNotificationsPlugin _plugin;
-
-  /// Minutes-from-midnight time-of-day used when a task is DATE-ONLY (no
-  /// `THH:mm`). Defaults to 540 (09:00). Settable so the user's "Default
-  /// reminder time" pref flows in live via [taskReminderServiceProvider]; a
-  /// change takes effect on the next (re)schedule / [syncAll].
-  int _defaultReminderMinutes;
-
-  set defaultReminderMinutes(int minutes) =>
-      _defaultReminderMinutes = _clampMinutes(minutes);
-
-  int get defaultReminderMinutes => _defaultReminderMinutes;
-
-  int get _defaultHour => _defaultReminderMinutes ~/ 60;
-  int get _defaultMinute => _defaultReminderMinutes % 60;
-
-  /// Keep the configured time-of-day inside a valid day (0..1439). An absurd
-  /// value can't push the fallback onto another calendar day.
-  static int _clampMinutes(int minutes) =>
-      minutes < 0 ? 0 : (minutes > 1439 ? 1439 : minutes);
 
   /// Dedicated channel so task reminders are distinct from the background-task
   /// / approval notifications that go through `lazyclaw_tasks`.
@@ -233,20 +278,33 @@ class TaskReminderService implements TaskReminderScheduler {
   );
 
   @override
-  Future<void> scheduleForTask(Task task) async {
-    final id = notificationIdForTask(task.id);
+  Future<void> cancel(int id) async {
     try {
-      // Always clear any prior schedule first, so an edit that moves OR removes
-      // the time can't leave a stale alarm behind.
       await _plugin.cancel(id);
-      if (task.isDone) return;
-      final fire = reminderFireTime(
-        task,
-        defaultReminderHour: _defaultHour,
-        defaultReminderMinute: _defaultMinute,
-      );
-      if (fire == null) return;
+    } catch (_) {
+      // Best-effort.
+    }
+  }
 
+  @override
+  Future<List<int>> pendingIds() async {
+    try {
+      final pending = await _plugin.pendingNotificationRequests();
+      return [for (final p in pending) p.id];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  @override
+  Future<void> schedule({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime fire,
+    required String payload,
+  }) async {
+    try {
       // Build the instant from the fire time's wall-clock COMPONENTS in the
       // local zone, so the zone's DST rules for THAT calendar date apply.
       // tz.TZDateTime.from(naiveLocal) converts via the CURRENT utc offset, so a
@@ -261,8 +319,6 @@ class TaskReminderService implements TaskReminderScheduler {
         fire.minute,
         fire.second,
       );
-      final title = task.title.isEmpty ? 'Task reminder' : task.title;
-      final body = bodyForReminder(task, now: DateTime.now());
       try {
         await _plugin.zonedSchedule(
           id,
@@ -273,7 +329,7 @@ class TaskReminderService implements TaskReminderScheduler {
           androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
-          payload: 'task:${task.id}',
+          payload: payload,
         );
       } on Exception {
         // Exact alarms blocked (Android 12+ without "Alarms & reminders") → fall
@@ -288,7 +344,133 @@ class TaskReminderService implements TaskReminderScheduler {
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
-          payload: 'task:${task.id}',
+          payload: payload,
+        );
+      }
+    } catch (_) {
+      // Best-effort: never let a scheduling failure break the task write.
+    }
+  }
+}
+
+// ── Production implementation ────────────────────────────────────────────────
+
+/// Schedules task reminders through a [ReminderSink].
+///
+/// "Unlimited reminders" (Proton-Calendar style): each task with a due time
+/// schedules ONE notification per configured [offsets] entry — e.g. offsets
+/// `['-1d', '-30m', '0m']` fire three reminders. When [offsets] is empty the
+/// service falls back to the single legacy reminder at [reminderFireTime] so
+/// nothing regresses. Every method is best-effort and never throws.
+class TaskReminderService implements TaskReminderScheduler {
+  TaskReminderService(
+    this._sink, {
+    int defaultReminderMinutes = 540,
+    List<String>? offsets,
+  })  : _defaultReminderMinutes = _clampMinutes(defaultReminderMinutes),
+        _offsets = normalizeReminderOffsets(offsets ?? kDefaultReminderOffsets);
+
+  final ReminderSink _sink;
+
+  /// Minutes-from-midnight time-of-day used when a task is DATE-ONLY (no
+  /// `THH:mm`). Defaults to 540 (09:00). Settable so the user's "Default
+  /// reminder time" pref flows in live via [taskReminderServiceProvider]; a
+  /// change takes effect on the next (re)schedule / [syncAll].
+  int _defaultReminderMinutes;
+
+  set defaultReminderMinutes(int minutes) =>
+      _defaultReminderMinutes = _clampMinutes(minutes);
+
+  int get defaultReminderMinutes => _defaultReminderMinutes;
+
+  int get _defaultHour => _defaultReminderMinutes ~/ 60;
+  int get _defaultMinute => _defaultReminderMinutes % 60;
+
+  /// The user's default reminder OFFSET set (wire strings). Empty → the legacy
+  /// single-reminder fallback. Settable so the Settings multi-select flows in
+  /// live via [taskReminderServiceProvider]; a change takes effect on the next
+  /// (re)schedule / [syncAll]. Always stored normalised (canonical, de-duped,
+  /// earliest-fire-first).
+  List<String> _offsets;
+
+  set offsets(List<String> value) => _offsets = normalizeReminderOffsets(value);
+
+  List<String> get offsets => List.unmodifiable(_offsets);
+
+  /// Keep the configured time-of-day inside a valid day (0..1439). An absurd
+  /// value can't push the fallback onto another calendar day.
+  static int _clampMinutes(int minutes) =>
+      minutes < 0 ? 0 : (minutes > 1439 ? 1439 : minutes);
+
+  /// The (notificationId, fireInstant) pairs to schedule for [task] given the
+  /// current [offsets]. Empty when nothing should fire (done task, no anchor, or
+  /// every fire already elapsed). Capped at [kMaxOffsetReminders].
+  List<({int id, DateTime fire})> _plannedFor(Task task) {
+    if (task.isDone) return const [];
+    final List<DateTime> fires;
+    if (_offsets.isEmpty) {
+      // Legacy single reminder (respects a pre-baked reminderAt lead).
+      final f = reminderFireTime(
+        task,
+        defaultReminderHour: _defaultHour,
+        defaultReminderMinute: _defaultMinute,
+      );
+      fires = f == null ? const [] : <DateTime>[f];
+    } else {
+      final base = reminderBaseTime(
+        task,
+        defaultReminderHour: _defaultHour,
+        defaultReminderMinute: _defaultMinute,
+      );
+      if (base == null) {
+        final f = reminderFireTime(
+          task,
+          defaultReminderHour: _defaultHour,
+          defaultReminderMinute: _defaultMinute,
+        );
+        fires = f == null ? const [] : <DateTime>[f];
+      } else {
+        fires = computeOffsetFireTimes(base: base, offsets: _offsets);
+      }
+    }
+    final planned = <({int id, DateTime fire})>[];
+    for (var i = 0; i < fires.length && i < kMaxOffsetReminders; i++) {
+      planned.add((id: notificationIdForOffset(task.id, i), fire: fires[i]));
+    }
+    return planned;
+  }
+
+  /// Every notification id this service could ever have used for [taskId] — the
+  /// full reserved slot range. Cancelling the whole range on (re)schedule /
+  /// cancel guarantees no stale alarm survives an offset-set change.
+  Iterable<int> _reservedIds(String taskId) sync* {
+    for (var i = 0; i < kMaxOffsetReminders; i++) {
+      yield notificationIdForOffset(taskId, i);
+    }
+  }
+
+  @override
+  Future<void> scheduleForTask(Task task) async {
+    try {
+      // Clear the WHOLE reserved range first, so an edit that moves/removes the
+      // time or shrinks the offset set can't leave a stale alarm behind.
+      for (final id in _reservedIds(task.id)) {
+        await _sink.cancel(id);
+      }
+      if (task.isDone) return;
+      final planned = _plannedFor(task);
+      if (planned.isEmpty) return;
+
+      final title = task.title.isEmpty ? 'Task reminder' : task.title;
+      final body = bodyForReminder(task, now: DateTime.now());
+      final payload = 'task:${task.id}';
+      for (final p in planned) {
+        await _sink.schedule(
+          id: p.id,
+          title: title,
+          body: body,
+          fire: p.fire,
+          payload: payload,
         );
       }
     } catch (_) {
@@ -299,7 +481,9 @@ class TaskReminderService implements TaskReminderScheduler {
   @override
   Future<void> cancelForTask(String taskId) async {
     try {
-      await _plugin.cancel(notificationIdForTask(taskId));
+      for (final id in _reservedIds(taskId)) {
+        await _sink.cancel(id);
+      }
     } catch (_) {
       // Best-effort.
     }
@@ -308,40 +492,33 @@ class TaskReminderService implements TaskReminderScheduler {
   @override
   Future<void> syncAll(List<Task> tasks) async {
     try {
-      final desired = <int, Task>{};
+      // The set of ids that SHOULD remain scheduled across all live tasks.
+      final desired = <int>{};
+      final toSchedule = <Task>[];
       for (final t in tasks) {
-        if (t.isDone) continue;
-        if (reminderFireTime(
-              t,
-              defaultReminderHour: _defaultHour,
-              defaultReminderMinute: _defaultMinute,
-            ) ==
-            null) {
-          continue;
+        final planned = _plannedFor(t);
+        if (planned.isEmpty) continue;
+        for (final p in planned) {
+          desired.add(p.id);
         }
-        desired[notificationIdForTask(t.id)] = t;
+        toSchedule.add(t);
       }
 
-      // Cancel ONLY stale TASK reminders — ids that are the FNV id of a task in
-      // [tasks] but are no longer wanted (completed / time removed). We must NOT
-      // blanket-cancel "every pending id not in desired": that would also nuke
-      // the Settings "Schedule test reminder" (a zonedSchedule with a non-task
-      // id) and any reminder a concurrent addTask just scheduled for a task not
-      // yet present in this (possibly stale) list.
-      final knownTaskIds = {for (final t in tasks) notificationIdForTask(t.id)};
-      List<PendingNotificationRequest> pending;
-      try {
-        pending = await _plugin.pendingNotificationRequests();
-      } catch (_) {
-        pending = const [];
-      }
-      for (final req in pending) {
-        if (knownTaskIds.contains(req.id) && !desired.containsKey(req.id)) {
-          await _plugin.cancel(req.id);
+      // Cancel ONLY stale reminders — a pending id inside SOME live task's
+      // reserved range that's no longer wanted (completed / offsets shrunk /
+      // time removed). We must NOT blanket-cancel "every pending id not in
+      // desired": that would also nuke the Settings "Schedule test reminder" (a
+      // non-task id) and any reminder a concurrent addTask just scheduled for a
+      // task not yet present in this (possibly stale) list.
+      final known = <int>{for (final t in tasks) ..._reservedIds(t.id)};
+      final pending = await _sink.pendingIds();
+      for (final id in pending) {
+        if (known.contains(id) && !desired.contains(id)) {
+          await _sink.cancel(id);
         }
       }
 
-      for (final t in desired.values) {
+      for (final t in toSchedule) {
         await scheduleForTask(t);
       }
     } catch (_) {

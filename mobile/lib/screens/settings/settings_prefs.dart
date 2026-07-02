@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/reminder_lead.dart';
+import '../../core/reminder_offset.dart';
 
 // ── Secure-storage keys ────────────────────────────────────────────────────
 
@@ -12,6 +15,7 @@ const String _kNotifyTaskDone = 'settings.notify_task_done';
 const String _kNotifyApprovals = 'settings.notify_approvals';
 const String _kReminderLeadDefault = 'settings.reminder_lead_default';
 const String _kDefaultReminderMinutes = 'settings.default_reminder_minutes';
+const String _kReminderOffsets = 'settings.reminder_offsets';
 
 // Server-notification feed cursor + dedup ring + cached delivery channel.
 const String _kNotificationsSince = 'notifications.since';
@@ -128,6 +132,22 @@ class SettingsPrefs {
         value: clampReminderMinutes(minutes).toString(),
       );
 
+  // ── Default reminder OFFSET set (multi-select) ────────────────────────────
+
+  /// The user's default reminder OFFSET set (wire strings, e.g.
+  /// `['-30m', '0m']`). Absent → [kDefaultReminderOffsets]; an explicitly stored
+  /// empty list stays empty (single-reminder fallback).
+  static Future<List<String>> loadReminderOffsets() async {
+    final raw = await _storage.read(key: _kReminderOffsets);
+    return reminderOffsetsFromStored(raw);
+  }
+
+  static Future<void> saveReminderOffsets(List<String> offsets) =>
+      _storage.write(
+        key: _kReminderOffsets,
+        value: reminderOffsetsToStored(offsets),
+      );
+
   // ── Server-notification feed cursor ──────────────────────────────────────
 
   /// The last server `now` we caught up to (ISO timestamp). Null = never
@@ -186,6 +206,27 @@ int defaultReminderMinutesFromStored(String? raw) {
   return clampReminderMinutes(mins);
 }
 
+/// Serialise a reminder-offset selection to a JSON array of NORMALISED wire
+/// strings. An explicitly-empty selection stores as `[]` (distinct from absent).
+String reminderOffsetsToStored(List<String> offsets) =>
+    jsonEncode(normalizeReminderOffsets(offsets));
+
+/// Parse a stored reminder-offset pref. `null`/empty (never set) → the default
+/// set; a valid JSON array → its normalised offsets (an empty array stays
+/// empty); anything unparseable → the default set.
+List<String> reminderOffsetsFromStored(String? raw) {
+  if (raw == null || raw.isEmpty) return List.of(kDefaultReminderOffsets);
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is List) {
+      return normalizeReminderOffsets(decoded.map((e) => e.toString()));
+    }
+  } catch (_) {
+    // Fall through to the default on malformed JSON.
+  }
+  return List.of(kDefaultReminderOffsets);
+}
+
 // ── Riverpod providers ───────────────────────────────────────────────────────
 
 /// Async provider for all Settings prefs loaded from secure storage.
@@ -210,6 +251,11 @@ class SettingsPrefsData {
   /// Defaults to [kDefaultReminderMinutes] (09:00).
   final int defaultReminderMinutes;
 
+  /// The user's default reminder OFFSET set (Proton-Calendar style multi-select).
+  /// Each task with a due time schedules one local notification per offset.
+  /// Empty = single-reminder fallback. Defaults to [kDefaultReminderOffsets].
+  final List<String> reminderOffsets;
+
   const SettingsPrefsData({
     required this.syncInterval,
     required this.wipeOnLogout,
@@ -218,6 +264,7 @@ class SettingsPrefsData {
     required this.notifyApprovals,
     this.reminderLeadDefault = kDefaultReminderLead,
     this.defaultReminderMinutes = kDefaultReminderMinutes,
+    this.reminderOffsets = kDefaultReminderOffsets,
   });
 
   SettingsPrefsData copyWith({
@@ -228,6 +275,7 @@ class SettingsPrefsData {
     bool? notifyApprovals,
     ReminderLead? reminderLeadDefault,
     int? defaultReminderMinutes,
+    List<String>? reminderOffsets,
   }) =>
       SettingsPrefsData(
         syncInterval: syncInterval ?? this.syncInterval,
@@ -238,6 +286,7 @@ class SettingsPrefsData {
         reminderLeadDefault: reminderLeadDefault ?? this.reminderLeadDefault,
         defaultReminderMinutes:
             defaultReminderMinutes ?? this.defaultReminderMinutes,
+        reminderOffsets: reminderOffsets ?? this.reminderOffsets,
       );
 }
 
@@ -254,6 +303,7 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
       SettingsPrefs.loadNotifyApprovals(),
       SettingsPrefs.loadReminderLeadDefault(),
       SettingsPrefs.loadDefaultReminderMinutes(),
+      SettingsPrefs.loadReminderOffsets(),
     ]);
     return SettingsPrefsData(
       syncInterval: results[0] as SyncInterval,
@@ -263,6 +313,7 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
       notifyApprovals: results[4] as bool,
       reminderLeadDefault: results[5] as ReminderLead,
       defaultReminderMinutes: results[6] as int,
+      reminderOffsets: results[7] as List<String>,
     );
   }
 
@@ -314,6 +365,15 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
     state = AsyncData(
       (state.valueOrNull ?? await _load())
           .copyWith(defaultReminderMinutes: clamped),
+    );
+  }
+
+  Future<void> setReminderOffsets(List<String> offsets) async {
+    final normalised = normalizeReminderOffsets(offsets);
+    await SettingsPrefs.saveReminderOffsets(normalised);
+    state = AsyncData(
+      (state.valueOrNull ?? await _load())
+          .copyWith(reminderOffsets: normalised),
     );
   }
 }

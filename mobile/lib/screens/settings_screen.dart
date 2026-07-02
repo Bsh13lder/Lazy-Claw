@@ -14,7 +14,7 @@ import '../wake/native_wake_service.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
 import '../core/due_date.dart';
-import '../core/reminder_lead.dart';
+import '../core/reminder_offset.dart';
 import '../core/self_update.dart';
 import '../notifications/local_notifications.dart';
 import 'settings/keyboard_install.dart';
@@ -785,6 +785,86 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// The default-reminders MULTI-select. Each selected offset fires its own
+  /// local notification for every task with a due time (Proton-Calendar style).
+  Widget _buildReminderOffsetsTile(SettingsPrefsData prefs) {
+    final selected = prefs.reminderOffsets.toSet();
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.notifications_active_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Default reminders', style: AppText.body),
+                    Text(
+                      'Fire a reminder at each selected time before a task is '
+                      'due — pick as many as you like',
+                      style: AppText.caption,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Wrap(
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.sm,
+            children: [
+              for (final opt in kReminderOffsetOptions)
+                LzChip(
+                  label: opt.label,
+                  selected: selected.contains(opt.value),
+                  color: AppColors.accent,
+                  dense: true,
+                  onTap: () => _toggleReminderOffset(
+                    opt.value,
+                    nowSelected: !selected.contains(opt.value),
+                    current: prefs.reminderOffsets,
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Add/remove [value] from the offset selection, persist it locally + to the
+  /// server, then reschedule every open task so the change takes effect at once.
+  Future<void> _toggleReminderOffset(
+    String value, {
+    required bool nowSelected,
+    required List<String> current,
+  }) async {
+    final next = nowSelected
+        ? <String>[...current, value]
+        : current.where((o) => o != value).toList();
+    // Local prefs first (offline cache; drives the scheduler live via ref.listen
+    // in taskReminderServiceProvider). Normalisation happens inside the setter.
+    await ref.read(settingsPrefsProvider.notifier).setReminderOffsets(next);
+    // Persist to the server so Telegram-side reminders share the same set. Fail
+    // soft — the local pref is already the source of truth for on-device alarms.
+    try {
+      await ref.read(settingsRepositoryProvider).setReminderOffsets(next);
+    } catch (_) {
+      // Offline / backend not migrated — local scheduling still works.
+    }
+    if (!mounted) return;
+    // Reschedule existing tasks against the new offset set (service already has
+    // the new value pushed in via ref.listen; syncAll re-derives every fire).
+    final tasks = ref.read(tasksProvider).tasks;
+    await ref.read(taskReminderServiceProvider).syncAll(tasks);
+  }
+
   /// Pick the time-of-day at which DATE-ONLY tasks remind. Persists the pref
   /// then reschedules every open task so the change takes effect immediately
   /// (the reminder service reads the updated default on each (re)schedule).
@@ -978,53 +1058,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const Divider(height: 1, color: AppColors.borderSubtle),
 
-            // Default reminder lead-time: applied automatically when a task
-            // gains a due time without an explicit reminder.
-            Padding(
-              padding: const EdgeInsets.all(AppSpacing.lg),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.notifications_active_outlined,
-                          size: 20, color: AppColors.textSecondary),
-                      const SizedBox(width: AppSpacing.md),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('Default reminder', style: AppText.body),
-                            Text(
-                              'Applied when a task with a due time has no '
-                              'reminder set',
-                              style: AppText.caption,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Wrap(
-                    spacing: AppSpacing.sm,
-                    runSpacing: AppSpacing.sm,
-                    children: [
-                      for (final lead in _kLeadDefaultOptions)
-                        LzChip(
-                          label: lead.label,
-                          selected: prefs.reminderLeadDefault == lead,
-                          color: AppColors.accent,
-                          dense: true,
-                          onTap: () => ref
-                              .read(settingsPrefsProvider.notifier)
-                              .setReminderLeadDefault(lead),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+            // Default reminders (multi-select, Proton-Calendar style): every task
+            // with a due time schedules ONE local notification per selected
+            // offset. Persisted locally AND to the server so Telegram-side
+            // reminders fire the same set.
+            _buildReminderOffsetsTile(prefs),
             const Divider(height: 1, color: AppColors.borderSubtle),
 
             // Default reminder TIME-OF-DAY: when a task has a due DATE but no
@@ -2035,16 +2073,6 @@ class _HelpStep extends StatelessWidget {
 // ── Permissions helper widget ─────────────────────────────────────────────────
 
 const _kPermLevels = ['allow', 'ask', 'deny'];
-
-/// The default-reminder-lead options offered in Settings → Notifications.
-const _kLeadDefaultOptions = <ReminderLead>[
-  ReminderLead.none,
-  ReminderLead.atTime,
-  ReminderLead.min10,
-  ReminderLead.min30,
-  ReminderLead.hour1,
-  ReminderLead.day1,
-];
 
 /// One permissions category row: label on the left, allow/ask/deny chips on the
 /// right. While [saving] is true the chips are disabled and a micro spinner

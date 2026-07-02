@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lazyclaw_mobile/models/budget_entry.dart';
 import 'package:lazyclaw_mobile/models/expense.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/screens/expenses/budget_math.dart';
@@ -38,6 +39,48 @@ Project _fav(String id, {double budget = 0, String currency = 'USD'}) =>
       'budget': budget,
       'currency': currency,
       'is_favorite': true,
+    });
+
+/// An expense carrying a description (so its ledger label is assertable).
+Expense _exp(
+  String id,
+  double amount, {
+  String? desc,
+  String projectId = 'p1',
+  String currency = 'USD',
+  String status = 'posted',
+  String? spentAt,
+  String? createdAt,
+}) =>
+    Expense.fromJson({
+      'id': id,
+      'project_id': projectId,
+      'amount': amount,
+      'currency': currency,
+      'description': desc,
+      'status': status,
+      'spent_at': spentAt,
+      'created_at': createdAt,
+    });
+
+/// A budget ledger entry (top-up credit by default).
+BudgetEntry _be(
+  String id, {
+  double amount = 100,
+  String projectId = 'p1',
+  String currency = 'USD',
+  String? source,
+  String kind = 'credit',
+  String? createdAt,
+}) =>
+    BudgetEntry.fromJson({
+      'id': id,
+      'project_id': projectId,
+      'amount': amount,
+      'currency': currency,
+      'source': source,
+      'kind': kind,
+      'created_at': createdAt,
     });
 
 void main() {
@@ -528,6 +571,219 @@ void main() {
       expect(starredExpenseTotal(expenses, currency: 'EUR'), closeTo(20, 0.001));
       // No currency filter → sums every starred row regardless of currency.
       expect(starredExpenseTotal(expenses), closeTo(35, 0.001));
+    });
+  });
+
+  group('mergeLedger (unified debits + credit top-ups)', () {
+    test('interleaves credits and debits, newest first, with signed amounts',
+        () {
+      final expenses = [
+        _exp('groceries', 120, desc: 'Groceries', spentAt: '2026-06-02'),
+        _exp('dinner', 80, desc: 'Dinner', spentAt: '2026-06-05'),
+      ];
+      final entries = [
+        _be('be1',
+            amount: 2800, source: 'ClubBay', createdAt: '2026-06-01T09:00:00Z'),
+        _be('be2', amount: 500, createdAt: '2026-06-04T09:00:00Z'),
+      ];
+      final items = mergeLedger(expenses, entries, currency: 'USD');
+
+      // Newest → oldest: Dinner(6-05), credit(6-04), Groceries(6-02), credit(6-01).
+      expect(items.map((i) => i.label).toList(),
+          ['Dinner', 'Budget added', 'Groceries', 'Budget added']);
+      // Debits are negative, credits positive.
+      expect(items[0].amount, -80);
+      expect(items[0].isCredit, isFalse);
+      expect(items[0].expense, isNotNull);
+      expect(items[1].amount, 500);
+      expect(items[1].isCredit, isTrue);
+      expect(items[1].source, isNull);
+      expect(items[1].entry, isNotNull);
+      // The oldest credit carries its source note.
+      expect(items[3].amount, 2800);
+      expect(items[3].isCredit, isTrue);
+      expect(items[3].source, 'ClubBay');
+    });
+
+    test('excludes void expenses', () {
+      final items = mergeLedger(
+        [
+          _exp('a', 10, desc: 'Live', spentAt: '2026-06-02'),
+          _exp('b', 99, desc: 'Void', spentAt: '2026-06-03', status: 'void'),
+        ],
+        const [],
+        currency: 'USD',
+      );
+      expect(items.map((i) => i.label), ['Live']);
+    });
+
+    test('excludes edit-audit entries (only sourced top-ups become credits)',
+        () {
+      final items = mergeLedger(
+        const [],
+        [
+          _be('c', amount: 200, createdAt: '2026-06-02T09:00:00Z'),
+          _be('e', amount: -50, kind: 'edit', createdAt: '2026-06-03T09:00:00Z'),
+        ],
+        currency: 'USD',
+      );
+      expect(items.length, 1);
+      expect(items.single.amount, 200);
+      expect(items.single.isCredit, isTrue);
+    });
+
+    test('scopes to a single currency when one is given', () {
+      final items = mergeLedger(
+        [
+          _exp('a', 10, desc: 'USD spend', currency: 'USD', spentAt: '2026-06-02'),
+          _exp('b', 20, desc: 'EUR spend', currency: 'EUR', spentAt: '2026-06-03'),
+        ],
+        [
+          _be('c', amount: 100, currency: 'USD', createdAt: '2026-06-01T09:00:00Z'),
+          _be('d', amount: 200, currency: 'EUR', createdAt: '2026-06-04T09:00:00Z'),
+        ],
+        currency: 'USD',
+      );
+      expect(items.map((i) => i.currency).toSet(), {'USD'});
+      expect(items.length, 2); // one USD debit + one USD credit
+    });
+
+    test('null currency keeps every row regardless of currency', () {
+      final items = mergeLedger(
+        [
+          _exp('a', 10, desc: 'USD', currency: 'USD', spentAt: '2026-06-02'),
+          _exp('b', 20, desc: 'EUR', currency: 'EUR', spentAt: '2026-06-03'),
+        ],
+        [
+          _be('c', amount: 200, currency: 'GBP', createdAt: '2026-06-04T09:00:00Z'),
+        ],
+        currency: null,
+      );
+      expect(items.length, 3);
+      expect(items.map((i) => i.currency).toSet(), {'USD', 'EUR', 'GBP'});
+    });
+
+    test('drops undated rows (no spent_at/created_at, no entry created_at)', () {
+      final items = mergeLedger(
+        [_exp('a', 10, desc: 'Undated')], // no spent_at, no created_at
+        [_be('c', amount: 100)], // no created_at
+        currency: 'USD',
+      );
+      expect(items, isEmpty);
+    });
+
+    test('falls back to created_at when an expense has no spent_at', () {
+      final items = mergeLedger(
+        [_exp('a', 10, desc: 'Fallback', createdAt: '2026-06-02T09:00:00Z')],
+        const [],
+        currency: 'USD',
+      );
+      expect(items.single.label, 'Fallback');
+      expect(items.single.amount, -10);
+    });
+
+    test('empty inputs yield an empty list', () {
+      expect(mergeLedger(const [], const [], currency: 'USD'), isEmpty);
+    });
+  });
+
+  group('ledgerBalance (added / spent / balance)', () {
+    test('added = credits, spent = debits, balance = added − spent', () {
+      final items = mergeLedger(
+        [
+          _exp('g', 120, desc: 'Groceries', spentAt: '2026-06-02'),
+          _exp('f', 45, desc: 'Fuel', spentAt: '2026-06-03'),
+          _exp('d', 80, desc: 'Dinner', spentAt: '2026-06-05'),
+        ],
+        [
+          _be('be1', amount: 2800, createdAt: '2026-06-01T09:00:00Z'),
+          _be('be2', amount: 500, createdAt: '2026-06-04T09:00:00Z'),
+        ],
+        currency: 'USD',
+      );
+      final b = ledgerBalance(items);
+      expect(b.added, closeTo(3300, 0.001));
+      expect(b.spent, closeTo(245, 0.001));
+      expect(b.balance, closeTo(3055, 0.001));
+    });
+
+    test('empty items → all zero', () {
+      final b = ledgerBalance(const []);
+      expect(b.added, 0);
+      expect(b.spent, 0);
+      expect(b.balance, 0);
+    });
+
+    test('debits only → added 0, balance negative', () {
+      final items = mergeLedger(
+        [_exp('a', 30, desc: 'Only spend', spentAt: '2026-06-02')],
+        const [],
+        currency: 'USD',
+      );
+      final b = ledgerBalance(items);
+      expect(b.added, 0);
+      expect(b.spent, 30);
+      expect(b.balance, -30);
+    });
+
+    test('credits only → spent 0, balance = added', () {
+      final items = mergeLedger(
+        const [],
+        [_be('c', amount: 500, createdAt: '2026-06-02T09:00:00Z')],
+        currency: 'USD',
+      );
+      final b = ledgerBalance(items);
+      expect(b.added, 500);
+      expect(b.spent, 0);
+      expect(b.balance, 500);
+    });
+  });
+
+  group('filterEntriesByRange (credits obey the same date window)', () {
+    final now = DateTime(2026, 6, 15);
+
+    test('month keeps only entries created in the calendar month', () {
+      final entries = [
+        _be('a', createdAt: '2026-06-01T10:00:00Z'),
+        _be('b', createdAt: '2026-05-20T10:00:00Z'), // previous month
+        _be('c', createdAt: '2026-07-02T10:00:00Z'), // next month
+        _be('d', createdAt: null), // undated → dropped
+      ];
+      final out = filterEntriesByRange(entries, ExpenseRange.month, now: now);
+      expect(out.map((e) => e.id), ['a']);
+    });
+
+    test('all keeps every dated entry and drops undated', () {
+      final entries = [
+        _be('a', createdAt: '2020-01-01T10:00:00Z'),
+        _be('b', createdAt: '2026-06-10T10:00:00Z'),
+        _be('c', createdAt: null),
+      ];
+      final out = filterEntriesByRange(entries, ExpenseRange.all, now: now);
+      expect(out.map((e) => e.id), containsAll(['a', 'b']));
+      expect(out.map((e) => e.id), isNot(contains('c')));
+      expect(out.length, 2);
+    });
+
+    test('custom window is inclusive on both ends', () {
+      final entries = [
+        _be('a', createdAt: '2026-05-31T10:00:00Z'),
+        _be('b', createdAt: '2026-06-01T10:00:00Z'),
+        _be('c', createdAt: '2026-06-02T10:00:00Z'),
+      ];
+      final out = filterEntriesByRange(
+        entries,
+        ExpenseRange.custom,
+        customStart: DateTime(2026, 5, 31),
+        customEnd: DateTime(2026, 6, 1),
+      );
+      expect(out.map((e) => e.id), containsAll(['a', 'b']));
+      expect(out.length, 2);
+    });
+
+    test('empty input yields empty output', () {
+      expect(filterEntriesByRange(const [], ExpenseRange.month, now: now),
+          isEmpty);
     });
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/actions/app_actions.dart';
+import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../providers/budgets_provider.dart';
@@ -12,6 +13,7 @@ import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_log_sheet.dart';
 import 'expenses/budget_math.dart';
 import 'expenses/budget_summary_card.dart';
+import 'expenses/credit_row.dart';
 import 'expenses/edit_project_sheet.dart';
 import 'expenses/expense_detail_sheet.dart';
 import 'expenses/expense_row.dart';
@@ -537,7 +539,7 @@ class _SectionLabel extends StatelessWidget {
 
 // ── Ledger Tab ────────────────────────────────────────────────────────────────
 
-class _LedgerTab extends StatefulWidget {
+class _LedgerTab extends ConsumerStatefulWidget {
   const _LedgerTab({
     required this.state,
     required this.onDeleteExpense,
@@ -553,13 +555,28 @@ class _LedgerTab extends StatefulWidget {
   final Future<void> Function() onRefresh;
 
   @override
-  State<_LedgerTab> createState() => _LedgerTabState();
+  ConsumerState<_LedgerTab> createState() => _LedgerTabState();
 }
 
-class _LedgerTabState extends State<_LedgerTab> {
+class _LedgerTabState extends ConsumerState<_LedgerTab> {
   /// null = all projects; a project id; or [_kUncategorizedFilter].
   String? _projectFilter;
   _LedgerSort _sort = _LedgerSort.newest;
+
+  /// Budget top-ups (credits) fetched from the ONLINE-only budget ledger, keyed
+  /// nowhere — a flat list across the live projects. `null` means "not loaded"
+  /// (offline / never fetched / failed): the ledger then shows expenses ONLY, no
+  /// credit rows and no (misleading) balance. A non-null list (even empty) means
+  /// the fetch succeeded, so credits + the balance summary are safe to show.
+  List<BudgetEntry>? _entries;
+
+  /// True while a budget-entries fetch is in flight (suppresses the offline
+  /// hint from flashing during the initial online load).
+  bool _entriesLoading = false;
+
+  /// Monotonic token so a slow fetch that resolves after a newer one can't
+  /// clobber the fresher result.
+  int _loadGen = 0;
 
   /// Time window the ledger is scoped to. Defaults to the current month.
   ExpenseRange _range = ExpenseRange.month;
@@ -575,6 +592,75 @@ class _LedgerTabState extends State<_LedgerTab> {
   /// Whether any visible expense no longer maps to a live project.
   bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
       visible.any((e) => !liveIds.contains(e.projectId));
+
+  @override
+  void initState() {
+    super.initState();
+    // Post-frame so the first setState lands after mount (never during
+    // initState/build). Fetch is best-effort; failure just leaves credits off.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadEntries());
+  }
+
+  /// Fetch the budget top-up ledger for every live project in parallel and
+  /// combine into [_entries]. ONLINE-only (budget entries aren't part of the
+  /// offline cache): if we're offline OR any fetch throws we keep [_entries]
+  /// null so the ledger stays expenses-only and never shows a misleading
+  /// balance. The expense list itself never blocks on this.
+  Future<void> _loadEntries() async {
+    // Don't even attempt a network round-trip while offline.
+    if (!ref.read(reachableProvider)) {
+      if (mounted && _entriesLoading) setState(() => _entriesLoading = false);
+      return;
+    }
+    final projects =
+        widget.state.projects.where((p) => p.id.isNotEmpty).toList();
+    final gen = ++_loadGen;
+    if (mounted) setState(() => _entriesLoading = true);
+    try {
+      final repo = ref.read(budgetsRepositoryProvider);
+      final lists = await Future.wait(
+        projects.map((p) => repo.listBudgetEntries(p.id)),
+      );
+      if (!mounted || gen != _loadGen) return;
+      setState(() {
+        _entries = [for (final l in lists) ...l];
+        _entriesLoading = false;
+      });
+    } catch (_) {
+      // Offline / server unreachable → keep expenses-only view + the connect
+      // hint. Never surface a partial/misleading balance.
+      if (!mounted || gen != _loadGen) return;
+      setState(() {
+        _entries = null;
+        _entriesLoading = false;
+      });
+    }
+  }
+
+  /// Pull-to-refresh: run the parent's sync-refresh, then re-fetch the credits.
+  Future<void> _handleRefresh() async {
+    await widget.onRefresh();
+    await _loadEntries();
+  }
+
+  /// Apply the active project filter to the (already range-filtered) budget
+  /// [entries], mirroring [_applyFilter] for expenses so credits obey the exact
+  /// same project scoping.
+  List<BudgetEntry> _applyEntryFilter(
+    List<BudgetEntry> entries,
+    Set<String> liveIds,
+    Set<String> favoriteIds,
+  ) {
+    final filter = _projectFilter;
+    if (filter == null) return entries;
+    if (filter == _kUncategorizedFilter) {
+      return entries.where((e) => !liveIds.contains(e.projectId)).toList();
+    }
+    if (filter == _kFavoritesFilter) {
+      return entries.where((e) => favoriteIds.contains(e.projectId)).toList();
+    }
+    return entries.where((e) => e.projectId == filter).toList();
+  }
 
   /// Switch the active time range. Today/Week/Month/All apply immediately;
   /// Custom opens a date-range picker and only switches once a range is chosen
@@ -639,6 +725,15 @@ class _LedgerTabState extends State<_LedgerTab> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
+
+    // When the backend returns, (re)fetch the ONLINE credit ledger so top-ups +
+    // the balance appear without a manual pull-to-refresh.
+    ref.listen<bool>(reachableProvider, (prev, next) {
+      if (next == true && prev != true && _entries == null) {
+        _loadEntries();
+      }
+    });
+
     final visible = state.expenses.where((e) => !e.isVoid).toList();
 
     if (visible.isEmpty) {
@@ -680,6 +775,33 @@ class _LedgerTabState extends State<_LedgerTab> {
     final currency = filtered.isNotEmpty
         ? filtered.first.currency
         : (visible.isNotEmpty ? visible.first.currency : 'USD');
+
+    // Fold the ONLINE budget top-ups (credits) into the ledger once loaded.
+    // Offline / not-yet-loaded → currency: null keeps EVERY expense row (no
+    // debit ever vanishes); loaded → scope to the display currency so the
+    // running balance never mixes currencies. Credits obey the same project +
+    // range filters as the debits.
+    final entriesLoaded = _entries != null;
+    final filteredEntries = entriesLoaded
+        ? _applyEntryFilter(
+            filterEntriesByRange(
+              _entries!,
+              _range,
+              monthOffset: _monthOffset,
+              customStart: _customRange?.start,
+              customEnd: _customRange?.end,
+            ),
+            liveIds,
+            favoriteIds,
+          )
+        : const <BudgetEntry>[];
+    final items = mergeLedger(
+      filtered,
+      filteredEntries,
+      currency: entriesLoaded ? currency : null,
+    );
+    final balance = entriesLoaded ? ledgerBalance(items) : null;
+
     final controls = _LedgerControls(
       projects: state.projects,
       favoriteIds: favoriteIds,
@@ -703,11 +825,11 @@ class _LedgerTabState extends State<_LedgerTab> {
     );
 
     return LzRefresh(
-      onRefresh: widget.onRefresh,
+      onRefresh: _handleRefresh,
       child: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(child: controls),
-          if (filtered.isEmpty)
+          if (items.isEmpty)
             SliverFillRemaining(
               hasScrollBody: false,
               child: LzEmptyState(
@@ -716,91 +838,116 @@ class _LedgerTabState extends State<_LedgerTab> {
                 hint: 'Try a different project or time range.',
               ),
             )
-          else if (_sort == _LedgerSort.amount)
-            _amountSliver(filtered)
-          else
-            _dateGroupedSliver(filtered, newestFirst: _sort == _LedgerSort.newest),
+          else ...[
+            if (_sort == _LedgerSort.amount)
+              _amountSliver(items)
+            else
+              _dateGroupedSliver(items, newestFirst: _sort == _LedgerSort.newest),
+            // Footer: the running balance (once credits loaded) and/or the
+            // offline hint. Always present so it also carries the bottom scroll
+            // room (the content slivers no longer pad the bottom).
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg,
+                  AppSpacing.md,
+                  AppSpacing.lg,
+                  AppSpacing.xxxl,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (balance != null)
+                      _LedgerBalanceBar(balance: balance, currency: currency),
+                    if (!entriesLoaded && !_entriesLoading)
+                      const _LedgerConnectHint(),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  /// A flat, single-card list sorted by amount (largest first).
-  Widget _amountSliver(List<Expense> expenses) {
-    final sorted = [...expenses]..sort((a, b) => b.amount.compareTo(a.amount));
-    final total = sorted.fold<double>(0, (s, e) => s + e.amount);
+  /// A flat, single-card list sorted by magnitude (largest first), credits +
+  /// debits interleaved. The section total is the money SPENT (debits) in view.
+  Widget _amountSliver(List<LedgerItem> items) {
+    final sorted = [...items]
+      ..sort((a, b) => b.magnitude.compareTo(a.magnitude));
+    final spent = sorted
+        .where((i) => !i.isCredit)
+        .fold<double>(0, (s, i) => s + i.magnitude);
     final currency = sorted.isNotEmpty ? sorted.first.currency : 'USD';
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(
         AppSpacing.lg,
         AppSpacing.lg,
         AppSpacing.lg,
-        AppSpacing.xxxl,
+        0,
       ),
       sliver: SliverToBoxAdapter(
         child: LzSection(
           title: 'By amount',
-          action: _SectionTotal(text: fmtMoney(currency, total)),
-          child: _expenseCard(sorted),
+          action: _SectionTotal(text: fmtMoney(currency, spent)),
+          child: _ledgerCard(sorted),
         ),
       ),
     );
   }
 
-  /// Date-grouped sections, ordered [newestFirst] (or oldest-first).
-  Widget _dateGroupedSliver(List<Expense> expenses, {required bool newestFirst}) {
-    final byDate = groupBy<Expense, String>(expenses, (e) => dateLabel(e.spentAt));
+  /// Date-grouped sections, ordered [newestFirst] (or oldest-first), with credit
+  /// top-ups interleaved among the expenses of each day. The section total is
+  /// the day's SPEND (debits) — the balance footer rolls credits up.
+  Widget _dateGroupedSliver(List<LedgerItem> items,
+      {required bool newestFirst}) {
+    final ordered = newestFirst ? items : items.reversed.toList();
+    final byDate =
+        groupBy<LedgerItem, String>(ordered, (i) => _ledgerDayKey(i.date));
     final sortedDates = byDate.keys.toList()
       ..sort((a, b) => newestFirst ? b.compareTo(a) : a.compareTo(b));
 
-    return SliverPadding(
-      padding: const EdgeInsets.only(bottom: AppSpacing.xxxl),
-      sliver: SliverList(
-        delegate: SliverChildBuilderDelegate(
-          (context, i) {
-            final date = sortedDates[i];
-            final dayExpenses = byDate[date]!;
-            final dayTotal = dayExpenses.fold<double>(0, (s, e) => s + e.amount);
-            final currency =
-                dayExpenses.isNotEmpty ? dayExpenses.first.currency : 'USD';
+    return SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, i) {
+          final date = sortedDates[i];
+          final dayItems = byDate[date]!;
+          final daySpent = dayItems
+              .where((it) => !it.isCredit)
+              .fold<double>(0, (s, it) => s + it.magnitude);
+          final currency =
+              dayItems.isNotEmpty ? dayItems.first.currency : 'USD';
 
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.lg,
-                AppSpacing.lg,
-                AppSpacing.lg,
-                0,
-              ),
-              child: LzSection(
-                title: friendlyDate(date),
-                action: _SectionTotal(text: fmtMoney(currency, dayTotal)),
-                child: _expenseCard(dayExpenses),
-              ),
-            );
-          },
-          childCount: sortedDates.length,
-        ),
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.lg,
+              AppSpacing.lg,
+              0,
+            ),
+            child: LzSection(
+              title: friendlyDate(date),
+              action: _SectionTotal(text: fmtMoney(currency, daySpent)),
+              child: _ledgerCard(dayItems),
+            ),
+          );
+        },
+        childCount: sortedDates.length,
       ),
     );
   }
 
-  Widget _expenseCard(List<Expense> expenses) {
+  /// A single card of ledger rows — expense (debit) rows via [ExpenseRow] and
+  /// budget top-up (credit) rows via [CreditRow], separated by hairlines.
+  Widget _ledgerCard(List<LedgerItem> items) {
     return LzCard(
       padding: EdgeInsets.zero,
       child: Column(
         children: [
-          for (int j = 0; j < expenses.length; j++) ...[
-            ExpenseRow(
-              expense: expenses[j],
-              projects: widget.state.projects,
-              pendingSync: widget.state.dirtyExpenseIds.contains(expenses[j].id),
-              onDelete: () => widget.onDeleteExpense(expenses[j].id),
-              onTap: () => widget.onTapExpense(expenses[j]),
-              onToggleFavorite: () =>
-                  widget.onToggleExpenseFavorite(expenses[j].id),
-              showProject: true,
-            ),
-            if (j < expenses.length - 1)
+          for (int j = 0; j < items.length; j++) ...[
+            _ledgerRow(items[j]),
+            if (j < items.length - 1)
               Divider(
                 height: 0.5,
                 thickness: 0.5,
@@ -808,6 +955,135 @@ class _LedgerTabState extends State<_LedgerTab> {
                 indent: AppSpacing.lg + 40 + AppSpacing.md,
               ),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _ledgerRow(LedgerItem item) {
+    if (item.isCredit) {
+      return CreditRow(item: item);
+    }
+    final e = item.expense!;
+    return ExpenseRow(
+      expense: e,
+      projects: widget.state.projects,
+      pendingSync: widget.state.dirtyExpenseIds.contains(e.id),
+      onDelete: () => widget.onDeleteExpense(e.id),
+      onTap: () => widget.onTapExpense(e),
+      onToggleFavorite: () => widget.onToggleExpenseFavorite(e.id),
+      showProject: true,
+    );
+  }
+}
+
+/// The `YYYY-MM-DD` key a ledger item is grouped under (its calendar day).
+String _ledgerDayKey(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-'
+    '${d.month.toString().padLeft(2, '0')}-'
+    '${d.day.toString().padLeft(2, '0')}';
+
+/// The ledger's running-balance summary: Added (credits) · Spent (debits) ·
+/// Balance (net). Only shown once the ONLINE budget top-ups have loaded, so the
+/// ledger never presents a misleading balance while offline.
+class _LedgerBalanceBar extends StatelessWidget {
+  const _LedgerBalanceBar({required this.balance, required this.currency});
+
+  final LedgerBalance balance;
+  final String currency;
+
+  @override
+  Widget build(BuildContext context) {
+    final balStr = balance.balance < 0
+        ? '− ${fmtMoney(currency, balance.balance.abs())}'
+        : fmtMoney(currency, balance.balance);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: AppSpacing.md,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        borderRadius: AppRadii.rMd,
+        border: Border.all(color: AppColors.borderSubtle),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _figure(
+              'Added',
+              fmtMoney(currency, balance.added),
+              AppColors.success,
+            ),
+          ),
+          _dot(),
+          Expanded(
+            child: _figure(
+              'Spent',
+              fmtMoney(currency, balance.spent),
+              AppColors.textSecondary,
+            ),
+          ),
+          _dot(),
+          Expanded(
+            child: _figure(
+              'Balance',
+              balStr,
+              balance.balance < 0 ? AppColors.error : AppColors.textPrimary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _figure(String label, String value, Color color) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              letterSpacing: 0.6,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: AppText.body.copyWith(color: color, fontWeight: FontWeight.w800),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      );
+
+  Widget _dot() => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+        child: Text('·', style: AppText.body.copyWith(color: AppColors.textMuted)),
+      );
+}
+
+/// A slim muted hint shown when the ONLINE budget top-ups couldn't be loaded
+/// (offline). The expense ledger still renders normally; only the credits + the
+/// balance are withheld until reconnect.
+class _LedgerConnectHint extends StatelessWidget {
+  const _LedgerConnectHint();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.sm),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.cloud_off_outlined,
+              size: 13, color: AppColors.textMuted),
+          const SizedBox(width: AppSpacing.xs),
+          Text(
+            'Connect to see budget entries',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
         ],
       ),
     );

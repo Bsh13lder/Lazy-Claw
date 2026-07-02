@@ -3,6 +3,7 @@
 /// absent) server rollup. Kept dependency-free so it is trivially unit-testable.
 library;
 
+import '../../models/budget_entry.dart';
 import '../../models/expense.dart';
 import '../../models/project.dart';
 
@@ -156,6 +157,176 @@ double starredExpenseTotal(Iterable<Expense> expenses, {String? currency}) {
     total += e.amount;
   }
   return total;
+}
+
+// ── Unified ledger (expenses as debits + budget top-ups as credits) ──────────
+
+/// A single row in the unified Money ledger: either a budget top-up (a credit —
+/// money IN) or an expense (a debit — money OUT). [amount] is SIGNED — positive
+/// for a credit, negative for a debit — so summing a list yields the running
+/// balance. Immutable.
+class LedgerItem {
+  /// Timestamp the row is anchored to — an expense's `spent_at` (falling back to
+  /// its `created_at`), or a budget entry's `created_at`. Drives date sort +
+  /// day grouping.
+  final DateTime date;
+
+  /// Signed amount: positive for a credit (top-up), negative for a debit
+  /// (expense).
+  final double amount;
+
+  /// Display label — "Budget added" for a credit, the expense description for a
+  /// debit.
+  final String label;
+
+  /// True for a budget top-up (money in); false for an expense (money out).
+  final bool isCredit;
+
+  /// Currency the amount is denominated in.
+  final String currency;
+
+  /// For a credit: the optional "where from" source note. Always null on a
+  /// debit.
+  final String? source;
+
+  /// The underlying expense — set on debit rows only, so the widget layer can
+  /// reuse the full ExpenseRow (swipe-delete / star / project chip). Null on a
+  /// credit.
+  final Expense? expense;
+
+  /// The underlying budget entry — set on credit rows only. Null on a debit.
+  final BudgetEntry? entry;
+
+  const LedgerItem({
+    required this.date,
+    required this.amount,
+    required this.label,
+    required this.isCredit,
+    required this.currency,
+    this.source,
+    this.expense,
+    this.entry,
+  });
+
+  /// Unsigned magnitude of this row's amount.
+  double get magnitude => amount.abs();
+}
+
+/// The rolled-up figures for a ledger view: money [added] (sum of credits), money
+/// [spent] (sum of debits) and the net [balance] (`added − spent`). Immutable.
+class LedgerBalance {
+  final double added;
+  final double spent;
+  final double balance;
+
+  const LedgerBalance({
+    required this.added,
+    required this.spent,
+    required this.balance,
+  });
+
+  static const empty = LedgerBalance(added: 0, spent: 0, balance: 0);
+}
+
+/// Build a unified, date-sorted (newest first) ledger from [expenses] (mapped to
+/// debits — negative) and budget [entries] (sourced top-ups mapped to credits —
+/// positive). Void expenses and non-top-up (edit-audit) entries are excluded, as
+/// are undated rows (an expense with no `spent_at`/`created_at`, or an entry with
+/// no `created_at`) — they can't be placed on the timeline.
+///
+/// When [currency] is non-null the ledger is scoped to it (mixed currencies are
+/// never interleaved into one running balance); when null every row is kept
+/// regardless of currency. Pure + trivially unit-testable.
+List<LedgerItem> mergeLedger(
+  Iterable<Expense> expenses,
+  Iterable<BudgetEntry> entries, {
+  String? currency,
+}) {
+  final items = <LedgerItem>[];
+  for (final e in expenses) {
+    if (e.isVoid) continue;
+    if (currency != null && e.currency != currency) continue;
+    final d = _ledgerDateTime(e.spentAt) ?? _ledgerDateTime(e.createdAt);
+    if (d == null) continue;
+    items.add(LedgerItem(
+      date: d,
+      amount: -e.amount, // money out
+      label: e.displayDescription,
+      isCredit: false,
+      currency: e.currency,
+      expense: e,
+    ));
+  }
+  for (final entry in entries) {
+    if (entry.isEdit) continue; // only sourced top-ups are credits in the ledger
+    if (currency != null && entry.currency != currency) continue;
+    final d = _ledgerDateTime(entry.createdAt);
+    if (d == null) continue;
+    items.add(LedgerItem(
+      date: d,
+      amount: entry.amount.abs(), // money in
+      label: 'Budget added',
+      isCredit: true,
+      currency: entry.currency,
+      source: entry.source,
+      entry: entry,
+    ));
+  }
+  items.sort((a, b) => b.date.compareTo(a.date)); // newest first
+  return items;
+}
+
+/// Roll [items] up into {added, spent, balance}. [added] sums the credits,
+/// [spent] sums the (unsigned) debits, and [balance] = added − spent.
+LedgerBalance ledgerBalance(Iterable<LedgerItem> items) {
+  var added = 0.0;
+  var spent = 0.0;
+  for (final i in items) {
+    if (i.isCredit) {
+      added += i.magnitude;
+    } else {
+      spent += i.magnitude;
+    }
+  }
+  return LedgerBalance(added: added, spent: spent, balance: added - spent);
+}
+
+/// The subset of [entries] whose `created_at` calendar date falls inside [range]
+/// (inclusive on both ends). Mirrors [filterByRange] for expenses, but reads
+/// `created_at` (budget entries have no `spent_at`). Undated entries are dropped.
+///
+/// [now] / [monthOffset] / [customStart] / [customEnd] are forwarded to
+/// [expenseRangeBounds] so credits obey the exact same window as the debits.
+List<BudgetEntry> filterEntriesByRange(
+  Iterable<BudgetEntry> entries,
+  ExpenseRange range, {
+  DateTime? now,
+  int monthOffset = 0,
+  DateTime? customStart,
+  DateTime? customEnd,
+}) {
+  final bounds = expenseRangeBounds(
+    range,
+    now: now,
+    monthOffset: monthOffset,
+    customStart: customStart,
+    customEnd: customEnd,
+  );
+  final out = <BudgetEntry>[];
+  for (final e in entries) {
+    final d = _expenseDate(e.createdAt);
+    if (d == null) continue;
+    if (d.isBefore(bounds.start) || d.isAfter(bounds.end)) continue;
+    out.add(e);
+  }
+  return out;
+}
+
+/// The full parsed timestamp of an ISO-8601 string (retaining time-of-day for
+/// stable intra-day sorting), or null when absent / unparseable.
+DateTime? _ledgerDateTime(String? iso) {
+  if (iso == null || iso.length < 7) return null;
+  return DateTime.tryParse(iso);
 }
 
 /// Headline totals for the Overview hero ("TOTAL SPENT"). When ANY project is

@@ -52,7 +52,11 @@ void backgroundSyncDispatcher() {
 /// does not abort the others. The DB is opened once and shared across all three.
 Future<void> runHeadlessSync() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final baseUrl = await ServerConfig.load();
+  // Resolve a REACHABLE gateway (honoring any manual override) instead of the
+  // hardwired remote URL — the DuckDNS front door can't be reached on home WiFi
+  // (no NAT hairpin), so the old `ServerConfig.load()` meant background sync
+  // could NEVER run there. probing self-heals to the LAN host in that case.
+  final baseUrl = await ServerConfig.resolveBaseUrl();
   final client = ApiClient(baseUrl: baseUrl);
   // DEDICATED connection (singleInstance: false): with sqflite's default
   // singleInstance: true, native handles are keyed by PATH — this background

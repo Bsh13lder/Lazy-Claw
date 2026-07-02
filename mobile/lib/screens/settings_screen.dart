@@ -11,6 +11,7 @@ import '../assistant/assistant_backend_mode.dart';
 import '../assistant/assistant_settings_providers.dart';
 import '../wake/miui_permissions.dart';
 import '../wake/native_wake_service.dart';
+import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
 import '../core/due_date.dart';
@@ -22,6 +23,7 @@ import 'local_ai/local_models_screen.dart';
 import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
+import '../providers/gateway_provider.dart';
 import '../providers/notes_provider.dart';
 import '../providers/notifications_channel_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -130,6 +132,20 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _checkingUpdate = false;
 
+  // ── Connection (server URL) state ──────────────────────────────────────────
+  /// Editable custom-URL field, prefilled with the active gateway on open.
+  final TextEditingController _serverUrlController = TextEditingController();
+
+  /// True while a `probeAll` diagnostic run is in flight.
+  bool _testingConnection = false;
+
+  /// True while a save-and-reconnect / reset-to-automatic switch is in flight.
+  bool _reconnecting = false;
+
+  /// Last diagnostic result (per-candidate reachability), or null before the
+  /// user has run "Test connection".
+  List<GatewayStatus>? _probeResults;
+
   // Real installed version, read at runtime from the platform package so the
   // About row can never drift from the actual APK. The kApp* constants are only
   // a compile-time fallback (they go stale when pubspec is bumped without
@@ -150,6 +166,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // Seed the "Hey Lazy" privacy mirrors from the server's general settings
     // (mirrors how agent_mode is seeded). Fails soft — defaults are used.
     Future.microtask(_seedAssistantFlags);
+    // Prefill the custom-server field with the CURRENT active gateway so the
+    // user edits from where they are, not a blank box.
+    _serverUrlController.text = ref.read(baseUrlProvider);
   }
 
   /// Reads the true installed version from `package_info_plus` so the About row
@@ -193,6 +212,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   void dispose() {
+    _serverUrlController.dispose();
     super.dispose();
   }
 
@@ -430,6 +450,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final username = authState.user?.username ?? '—';
     final displayName = authState.user?.displayName;
     final isReachable = ref.watch(reachableProvider);
+    final activeUrl = ref.watch(baseUrlProvider);
     final syncState = ref.watch(_syncAllProvider);
     final prefsAsync = ref.watch(settingsPrefsProvider);
 
@@ -455,8 +476,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _buildAccountSection(username: username, displayName: displayName),
           AppSpacing.vGap(AppSpacing.xl),
 
-          // 2. Server
-          _buildServerSection(isReachable: isReachable),
+          // 2. Connection (active gateway + manual override + diagnostics)
+          _buildConnectionSection(
+            isReachable: isReachable,
+            activeUrl: activeUrl,
+          ),
           AppSpacing.vGap(AppSpacing.xl),
 
           // 3. Sync
@@ -559,21 +583,89 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  Widget _buildServerSection({required bool isReachable}) {
+  // ── Connection actions ────────────────────────────────────────────────────
+
+  /// Run the `probeAll` diagnostic so the user can SEE which gateways the phone
+  /// can actually reach (turns the silent-failure into something diagnosable).
+  Future<void> _testConnection() async {
+    if (_testingConnection) return;
+    setState(() => _testingConnection = true);
+    try {
+      final results = await ServerConfig.probeAll();
+      if (!mounted) return;
+      setState(() => _probeResults = results);
+    } finally {
+      if (mounted) setState(() => _testingConnection = false);
+    }
+  }
+
+  /// Persist the typed URL as a manual override and switch to it immediately.
+  /// Switching hosts changes the session-cookie scope, so we re-check the
+  /// session against the new host afterward (the on401 path surfaces login if
+  /// the cookie didn't carry — acceptable).
+  Future<void> _saveAndReconnect() async {
+    final raw = _serverUrlController.text.trim();
+    if (raw.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a server URL first.')),
+      );
+      return;
+    }
+    final normalized = ServerConfig.normalizeBaseUrl(raw);
+    setState(() => _reconnecting = true);
+    try {
+      await ref.read(activeBaseUrlProvider.notifier).setManual(normalized);
+      if (!mounted) return;
+      // Reflect the normalized value back into the field.
+      _serverUrlController.text = normalized;
+      // Re-validate against the new host (rebuilt ApiClient + auth graph).
+      await ref.read(authProvider.notifier).checkSession();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Reconnecting to $normalized')),
+      );
+    } finally {
+      if (mounted) setState(() => _reconnecting = false);
+    }
+  }
+
+  /// Drop the manual override and fall back to automatic resolution.
+  Future<void> _resetToAutomatic() async {
+    setState(() => _reconnecting = true);
+    try {
+      await ref.read(activeBaseUrlProvider.notifier).clearManual();
+      if (!mounted) return;
+      final active = ref.read(baseUrlProvider);
+      _serverUrlController.text = active;
+      await ref.read(authProvider.notifier).checkSession();
+      if (!mounted) return;
+      setState(() => _probeResults = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Reverted to automatic — using $active')),
+      );
+    } finally {
+      if (mounted) setState(() => _reconnecting = false);
+    }
+  }
+
+  Widget _buildConnectionSection({
+    required bool isReachable,
+    required String activeUrl,
+  }) {
     final dot = isReachable
         ? const LzStatusDot.success(glow: true)
         : const LzStatusDot.error();
+    final results = _probeResults;
 
-    // Locked build: the gateway is pinned to the secure remote-access tunnel
-    // (see kDefaultBaseUrl). Shown read-only — it cannot be changed from inside
-    // the app, so the phone only ever talks to this one address.
     return LzSection(
-      title: 'Server',
+      title: 'Connection',
       child: LzCard(
         padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Live status + the ACTIVE gateway (may be the remote front door, a
+            // LAN host, or a saved custom URL — whichever we resolved to).
             Row(
               children: [
                 dot,
@@ -585,20 +677,70 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const Spacer(),
-                const Icon(Icons.lock_outline,
-                    size: 16, color: AppColors.textSecondary),
               ],
             ),
             const SizedBox(height: AppSpacing.md),
-            Text('Gateway', style: AppText.caption),
+            Text('Active gateway', style: AppText.caption),
             const SizedBox(height: AppSpacing.xs),
-            SelectableText(kDefaultBaseUrl, style: AppText.body),
+            SelectableText(activeUrl, style: AppText.body),
+            const SizedBox(height: AppSpacing.lg),
+
+            // Custom URL entry.
+            LzTextField(
+              controller: _serverUrlController,
+              label: 'Server URL',
+              hint: 'http://192.168.0.12:18789',
+              prefixIcon: Icons.dns_outlined,
+              keyboardType: TextInputType.url,
+              enabled: !_reconnecting,
+              onSubmitted: (_) => _reconnecting ? null : _saveAndReconnect(),
+            ),
             const SizedBox(height: AppSpacing.sm),
             Text(
-              'Locked to the secure remote-access tunnel for this build.',
+              'On home WiFi use the Mac\'s LAN IP or .local name — the remote '
+              'DuckDNS URL can\'t be reached from inside your own network.',
               style: AppText.caption.copyWith(color: AppColors.textSecondary),
             ),
+            const SizedBox(height: AppSpacing.md),
+
+            LzButton.primary(
+              label: _reconnecting ? 'Reconnecting…' : 'Save & reconnect',
+              icon: Icons.link,
+              onPressed: _reconnecting ? null : _saveAndReconnect,
+              loading: _reconnecting,
+              expand: true,
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                Expanded(
+                  child: LzButton.secondary(
+                    label: _testingConnection ? 'Testing…' : 'Test connection',
+                    icon: Icons.network_check,
+                    onPressed: _testingConnection ? null : _testConnection,
+                    loading: _testingConnection,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: LzButton.secondary(
+                    label: 'Reset to automatic',
+                    icon: Icons.restart_alt,
+                    onPressed: _reconnecting ? null : _resetToAutomatic,
+                  ),
+                ),
+              ],
+            ),
+
+            // Diagnostic results: which candidates the phone can actually reach.
+            if (results != null) ...[
+              const SizedBox(height: AppSpacing.lg),
+              const Divider(height: 1, color: AppColors.borderSubtle),
+              const SizedBox(height: AppSpacing.md),
+              Text('Diagnostics', style: AppText.caption),
+              const SizedBox(height: AppSpacing.sm),
+              for (final s in results) _ProbeRow(status: s),
+            ],
           ],
         ),
       ),
@@ -2066,6 +2208,55 @@ class _HelpStep extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ── Connection diagnostics helper widget ──────────────────────────────────────
+
+/// One gateway probe result: label + URL on the left, a reachable/unreachable
+/// glyph on the right. Lets the user SEE whether the phone can reach each host.
+class _ProbeRow extends StatelessWidget {
+  const _ProbeRow({required this.status});
+
+  final GatewayStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final ok = status.reachable;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+      child: Row(
+        children: [
+          Icon(
+            ok ? Icons.check_circle : Icons.cancel,
+            size: 18,
+            color: ok ? AppColors.success : AppColors.error,
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(status.label, style: AppText.body),
+                Text(
+                  status.url,
+                  style:
+                      AppText.caption.copyWith(color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Text(
+            ok ? 'Reachable' : 'Unreachable',
+            style: AppText.caption.copyWith(
+              color: ok ? AppColors.success : AppColors.error,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../constants/app_constants.dart';
+import 'base_url_override_store.dart';
 
 /// Probes a gateway for reachability. Returns `true` when the host answered the
 /// health check with a 2xx, `false` on timeout / network error / non-2xx.
@@ -9,6 +10,21 @@ import '../constants/app_constants.dart';
 /// Injectable so [ServerConfig.resolveBaseUrl] can be unit-tested without real
 /// network I/O.
 typedef HealthProbe = Future<bool> Function(String baseUrl);
+
+/// One candidate gateway with its human label and last-probed reachability.
+/// Immutable — produced by [ServerConfig.probeAll] for the diagnostics UI so
+/// the user can SEE which hosts the phone can actually reach.
+class GatewayStatus {
+  final String url;
+  final String label;
+  final bool reachable;
+
+  const GatewayStatus({
+    required this.url,
+    required this.label,
+    required this.reachable,
+  });
+}
 
 class ServerConfig {
   /// Short timeout for the startup reachability probe. Startup is never blocked
@@ -33,17 +49,40 @@ class ServerConfig {
     return '$ws/ws/chat';
   }
 
-  // Locked build: the server URL is baked into [kDefaultBaseUrl] (the
-  // self-hosted DuckDNS + Caddy front door) and cannot be changed from inside
-  // the app. The app talks to exactly
-  // ONE host so the session cookie + auth cache stay consistent on WiFi and
-  // mobile data alike — no URL flipping, no per-host re-login. load()/save()
-  // return that single URL.
-  static Future<String> load() async => kDefaultBaseUrl;
+  // ── Manual override persistence ─────────────────────────────────────────
 
-  static Future<void> save(String baseUrl) async {
-    // no-op: server URL is locked in this build
+  /// Pluggable override store. Defaults to secure storage; tests swap in an
+  /// [InMemoryBaseUrlOverrideStore]. A user-set URL takes precedence over the
+  /// auto candidates (see [resolveBaseUrl]) so the app is never permanently
+  /// pinned to a host it can't reach.
+  static BaseUrlOverrideStore overrideStore = const SecureBaseUrlOverrideStore();
+
+  /// The user's saved override, or `null` when unset. Never throws — a failing
+  /// store resolves to `null` so resolution always makes progress.
+  static Future<String?> loadOverride() async {
+    try {
+      final v = await overrideStore.load();
+      if (v == null) return null;
+      final t = v.trim();
+      return t.isEmpty ? null : t;
+    } catch (_) {
+      return null;
+    }
   }
+
+  /// Persist [url] as the manual override, normalizing it first.
+  static Future<void> saveOverride(String url) =>
+      overrideStore.save(normalizeBaseUrl(url));
+
+  /// Remove the manual override (revert to automatic resolution).
+  static Future<void> clearOverride() => overrideStore.clear();
+
+  /// Back-compat: the effective saved URL (override if set, else the primary).
+  static Future<String> load() async =>
+      (await loadOverride()) ?? kDefaultBaseUrl;
+
+  /// Back-compat alias for [saveOverride].
+  static Future<void> save(String baseUrl) => saveOverride(baseUrl);
 
   /// GETs `/api/health` on [baseUrl] with a short timeout. Reachable = a 2xx
   /// status. Any failure (timeout, DNS/socket error, non-2xx) returns `false`.
@@ -80,14 +119,30 @@ class ServerConfig {
     kLanFallbackIpBaseUrl,
   ];
 
-  /// Resolves the gateway used at startup by probing [_candidates] in order and
-  /// returning the FIRST that actually answers `/api/health`. Every candidate is
-  /// verified (we never hand back an unreachable URL we merely assumed), so the
-  /// app self-heals whether it's on cellular (public front door) or home WiFi
-  /// (LAN host). If nothing answers — server asleep / no network — it falls back
-  /// to [kDefaultBaseUrl] so behavior matches the pre-probe build.
+  /// Resolves the gateway to use.
+  ///
+  /// 1. If a manual OVERRIDE is set, it is tried FIRST. When reachable it's
+  ///    returned; when set-but-unreachable it is STILL returned — the user's
+  ///    explicit choice is never silently discarded (they can diagnose it via
+  ///    [probeAll]).
+  /// 2. Otherwise the [_candidates] are probed in order and the FIRST that
+  ///    answers `/api/health` is returned, so the app self-heals whether it's on
+  ///    cellular (public front door) or home WiFi (LAN host).
+  /// 3. If nothing answers — server asleep / no network — it falls back to
+  ///    [kDefaultBaseUrl] so behavior matches the pre-probe build.
   static Future<String> resolveBaseUrl({HealthProbe? probe}) async {
     final check = probe ?? _defaultProbe;
+
+    final override = await loadOverride();
+    if (override != null) {
+      try {
+        if (await check(override)) return override;
+      } catch (_) {
+        // Probe threw — fall through, but still prefer the explicit choice.
+      }
+      return override;
+    }
+
     for (final url in _candidates) {
       try {
         if (await check(url)) return url;
@@ -96,5 +151,41 @@ class ServerConfig {
       }
     }
     return kDefaultBaseUrl;
+  }
+
+  /// Probes EVERY known gateway (the override, if set, then the auto
+  /// candidates) and returns each with its reachability. Used by the Settings
+  /// "Test connection" diagnostics so a silent-failure ("phone can't reach
+  /// 192.168.0.12") becomes visible. Duplicates (an override equal to a
+  /// candidate) are collapsed to a single entry.
+  static Future<List<GatewayStatus>> probeAll({HealthProbe? probe}) async {
+    final check = probe ?? _defaultProbe;
+    final override = await loadOverride();
+
+    final planned = <({String url, String label})>[
+      if (override != null) (url: override, label: 'Custom (saved)'),
+      (url: kDefaultBaseUrl, label: 'Remote (DuckDNS)'),
+      (url: kLanFallbackBaseUrl, label: 'LAN (mDNS)'),
+      (url: kLanFallbackIpBaseUrl, label: 'LAN (IP)'),
+    ];
+
+    final seen = <String>{};
+    final results = <GatewayStatus>[];
+    for (final entry in planned) {
+      final norm = normalizeBaseUrl(entry.url);
+      if (!seen.add(norm)) continue; // dedup override-equals-candidate
+      bool reachable;
+      try {
+        reachable = await check(entry.url);
+      } catch (_) {
+        reachable = false;
+      }
+      results.add(GatewayStatus(
+        url: entry.url,
+        label: entry.label,
+        reachable: reachable,
+      ));
+    }
+    return results;
   }
 }

@@ -17,6 +17,7 @@ import 'notifications/notifications_service.dart';
 import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
 import 'providers/budgets_provider.dart';
+import 'providers/gateway_provider.dart';
 import 'providers/documents_provider.dart';
 import 'providers/notes_provider.dart';
 import 'providers/tasks_provider.dart';
@@ -64,8 +65,11 @@ Future<void> main() async {
     );
   };
 
-  // The app is locked to a single gateway (the DuckDNS + Caddy front door) so
-  // the session cookie + auth cache stay consistent on WiFi and cellular alike.
+  // Resolve the startup gateway: a saved manual override first, else the first
+  // reachable of [DuckDNS front door → LAN mDNS → LAN IP]. This only SEEDS the
+  // runtime-switchable GatewayController — the app can re-resolve later (on
+  // resume / manual reconnect) so a network change doesn't strand it on a dead
+  // URL.
   final baseUrl = await ServerConfig.resolveBaseUrl();
 
   // Open the encrypted offline DB up front so the Tasks tab is instant and
@@ -85,7 +89,8 @@ Future<void> main() async {
 
   runApp(ProviderScope(
     overrides: [
-      baseUrlProvider.overrideWith((ref) => baseUrl),
+      // Seed the runtime-switchable gateway with the startup-resolved URL.
+      bootstrapBaseUrlProvider.overrideWithValue(baseUrl),
       appDatabaseProvider.overrideWithValue(result.db),
       dbHealthProvider.overrideWith((ref) => result.health),
     ],
@@ -99,13 +104,20 @@ class LazyClawApp extends ConsumerStatefulWidget {
   ConsumerState<LazyClawApp> createState() => _LazyClawAppState();
 }
 
-class _LazyClawAppState extends ConsumerState<LazyClawApp> {
+class _LazyClawAppState extends ConsumerState<LazyClawApp>
+    with WidgetsBindingObserver {
   ForegroundSyncScheduler? _fgSync;
   DeepLinkService? _deepLinks;
 
   @override
   void initState() {
     super.initState();
+    // Self-heal the active gateway on app-resume: if the phone changed networks
+    // (or the first pick went dead), re-resolve so we switch to whatever host is
+    // now reachable. Cheap — it only flips the active URL when a DIFFERENT
+    // candidate wins, and honors any manual override. NOT run per-request.
+    WidgetsBinding.instance.addObserver(this);
+
     Future.microtask(() => ref.read(authProvider.notifier).checkSession());
 
     // (Re)schedule local reminders for every cached task at app start, so
@@ -183,7 +195,18 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Fire-and-forget: re-probe candidates and switch only if a different
+      // host is now first-reachable. Failures are swallowed inside the resolver.
+      ref.read(activeBaseUrlProvider.notifier).reresolve();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _fgSync?.dispose();
     _deepLinks?.dispose();
     super.dispose();

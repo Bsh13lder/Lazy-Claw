@@ -8,6 +8,7 @@ import '../core/auth/auth_cache.dart';
 import '../core/home_widget_tasks.dart';
 import '../models/user.dart';
 import '../repositories/auth_repository.dart';
+import 'gateway_provider.dart';
 
 /// [authenticatedOffline] = the server could not be reached but a previously
 /// confirmed identity exists in the local [AuthUserCache]: the user enters the
@@ -33,7 +34,13 @@ class AuthState {
       status == AuthStatus.authenticatedOffline;
 }
 
-final baseUrlProvider = StateProvider<String>((ref) => 'http://127.0.0.1:18789');
+/// The CURRENT base URL, derived from the runtime-switchable
+/// [activeBaseUrlProvider]. Kept as a `Provider<String>` (was a one-shot
+/// `StateProvider`) so every existing reader keeps working AND every reader —
+/// including `apiClientProvider` — rebuilds when the active gateway changes at
+/// runtime (resume self-heal / manual reconnect).
+final baseUrlProvider =
+    Provider<String>((ref) => ref.watch(activeBaseUrlProvider));
 
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(baseUrl: ref.watch(baseUrlProvider));

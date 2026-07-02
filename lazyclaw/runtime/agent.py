@@ -34,6 +34,7 @@ from lazyclaw.browser.action_planner import (
 )
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.skills.tool_namespace import bare_tool_name
 from lazyclaw.channels.telegram_view import render_error as _render_error
 from lazyclaw.runtime.consolidation_guidance import is_consolidation_turn
 
@@ -1876,17 +1877,36 @@ def _build_hallucination_correction(
         # Surface the short form (strip the uuid prefix) so the LLM sees
         # familiar names.
         siblings_bare = [n[len(prefix):] for n in sibling_names][:40]
-        available_display = ", ".join(siblings_bare) if siblings_bare else "(none)"
-        return (
-            f"[SYSTEM: The tool '{bad_name}' does NOT exist. "
-            f"You called a non-existent operation on MCP server "
-            f"{server_id[:8]}…. Tools ACTUALLY available on that server: "
-            f"{available_display}. "
-            f"If '{bare}' is what you need and it's not in that list, "
-            f"the MCP server does not support it — try a native skill "
-            f"(e.g. google_run_task for Drive/Sheets delete or trash ops) "
-            f"or tell the user the operation is unsupported.]"
-        )
+        if siblings_bare:
+            return (
+                f"[SYSTEM: The tool '{bad_name}' does NOT exist. "
+                f"You called a non-existent operation on MCP server "
+                f"{server_id[:8]}…. Tools ACTUALLY available on that server: "
+                f"{', '.join(siblings_bare)}. "
+                f"If '{bare}' is what you need and it's not in that list, "
+                f"the MCP server does not support it — try a native skill "
+                f"(e.g. google_run_task for Drive/Sheets delete or trash ops) "
+                f"or tell the user the operation is unsupported.]"
+            )
+        # No siblings found on THAT server (it may be a stale/dead uuid) —
+        # fall through to the registered-but-not-attached check below,
+        # which searches every connected MCP server by bare name.
+
+    # Registered-but-not-attached: the tool EXISTS on a connected MCP
+    # server but was not sent this turn (thin-router narrowing, channel
+    # suppression). search_tools discovery can't make it callable — the
+    # ONLY productive move is delegate. Without this steer the model
+    # retried the same inline call to the hallucination cap (2026-07-02).
+    if registry is not None:
+        bad_bare = bare_tool_name(bad_name)
+        mcp_names = registry.list_names_by_prefix("mcp_")
+        if any(bare_tool_name(n) == bad_bare for n in mcp_names):
+            return (
+                f"[SYSTEM: The tool '{bad_bare}' exists but is NOT active in "
+                f"your current toolset this turn. Do NOT call it inline "
+                f"again. Call delegate(...) so a specialist executes it, or "
+                f"run_background(...) for long work.]"
+            )
 
     # Plain hallucination — use the last name segment as a search hint
     # instead of splitting at the first '_' (old bug: 'mcp_x'.split('_')[0] = 'mcp').
@@ -1899,6 +1919,37 @@ def _build_hallucination_correction(
         f"Your current tools: {', '.join(_avail)}. "
         f"Try search_tools FIRST, then use what you find, or respond with text if nothing fits.]"
     )
+
+
+def _suffix_rescue_tool_calls(
+    tool_calls: list, valid_names: set[str],
+) -> tuple[list, list[str]]:
+    """Rewrite hallucinated tool names that bare-suffix-match EXACTLY ONE
+    attached tool. The model often remembers a tool's bare name
+    (`upwork_get_job_details`) or a stale `mcp_<old-uuid>_` prefix from
+    history; exact-match-only validity bailed the 2026-07-02 Upwork
+    proposal turn after 3 strikes. Matching is restricted to the tools
+    attached THIS turn, so thin-router / specialist-first suppression is
+    never bypassed. Returns (new_calls, ["old → new", ...]).
+    """
+    bare_to_valid: dict[str, list[str]] = {}
+    for vn in valid_names:
+        bare_to_valid.setdefault(bare_tool_name(vn), []).append(vn)
+    rescued: list[str] = []
+    new_calls = []
+    for tc in tool_calls:
+        if tc.name in valid_names:
+            new_calls.append(tc)
+            continue
+        matches = bare_to_valid.get(bare_tool_name(tc.name), [])
+        if len(matches) == 1:
+            new_calls.append(
+                ToolCall(id=tc.id, name=matches[0], arguments=tc.arguments)
+            )
+            rescued.append(f"{tc.name} → {matches[0]}")
+        else:
+            new_calls.append(tc)
+    return new_calls, rescued
 
 
 def _correction_hint_for_user(bad_name: str, registry) -> str:
@@ -4715,6 +4766,29 @@ class Agent:
                         logger.info(
                             "Refused to resurrect channel-suppressed tools from history: %s",
                             _resurrect_blocked,
+                        )
+
+                    # Suffix-rescue: the LLM sometimes calls a tool's bare
+                    # name or a stale mcp_<old-uuid>_ prefix (leaked from
+                    # another user's history) instead of the exact attached
+                    # name. Rewrite it when EXACTLY ONE attached tool
+                    # bare-matches — matching is restricted to _valid_names
+                    # so thin-router / specialist-first suppression is never
+                    # bypassed (2026-07-02 Upwork incident).
+                    _rescued_calls, _rescue_log = _suffix_rescue_tool_calls(
+                        response.tool_calls, _valid_names,
+                    )
+                    if _rescue_log:
+                        logger.info(
+                            "Suffix-rescued %d hallucinated tool name(s): %s",
+                            len(_rescue_log), _rescue_log,
+                        )
+                        response = _LLMResp(
+                            content=response.content,
+                            model=response.model,
+                            usage=response.usage,
+                            tool_calls=_rescued_calls,
+                            fallback_reason=response.fallback_reason,
                         )
 
                     _valid_calls = [

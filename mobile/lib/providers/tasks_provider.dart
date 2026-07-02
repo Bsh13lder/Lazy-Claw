@@ -327,6 +327,14 @@ class TasksNotifier extends StateNotifier<TasksState> {
   }
 
   Future<void> deleteTask(String id) async {
+    // Optimistically drop the task from state SYNCHRONOUSLY — before any await —
+    // so a row's Dismissible.onDismissed never leaves a dismissed tile in the
+    // tree. That race throws "A dismissed Dismissible widget is still part of
+    // the tree" and blacks out the Tasks screen. The DB delete, reminder cancel,
+    // and sync follow; _refreshFromCache re-reconciles from the source of truth.
+    state = state.copyWith(
+      tasks: state.tasks.where((t) => t.id != id).toList(),
+    );
     try {
       await _dao.applyLocalDelete(id);
       await _refreshFromCache();

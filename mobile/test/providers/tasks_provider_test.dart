@@ -94,6 +94,27 @@ void main() {
       expect(n.state.tasks.map((t) => t.id), isNot(contains(id)));
     });
 
+    test('deleteTask drops the task from state SYNCHRONOUSLY (Dismissible-safe)',
+        () async {
+      final dao = await _freshDao();
+      final sync = TaskSync(dao, TasksRepository(_OfflineTransport()));
+      final n = TasksNotifier(dao, sync);
+
+      await n.addTask('Doomed');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final id = n.state.tasks.first.id;
+
+      // Fire the delete but DON'T await. A row's Dismissible.onDismissed needs
+      // the task gone from state on the very next build, else Flutter throws
+      // "A dismissed Dismissible widget is still part of the tree" → the Tasks
+      // screen blacks out. So the removal must happen BEFORE the first await.
+      final pending = n.deleteTask(id);
+      expect(n.state.tasks.any((t) => t.id == id), isFalse,
+          reason: 'must be removed from state synchronously, before any await');
+      await pending;
+      expect(n.state.tasks, isEmpty);
+    });
+
     test('load reads from cache instantly even with the server down',
         () async {
       final dao = await _freshDao();

@@ -44,18 +44,32 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
   // Mode toggle: false = Send (direct), true = Ask AI.
   bool _aiMode = false;
 
-  // Sending state — kept here so the child _ReplyBar widget gets it via
-  // callbacks + plain values (no ref passed via constructor).
+  // Sending state (AI mode only) — kept here so the child _ReplyBar widget gets
+  // it via callbacks + plain values (no ref passed via constructor).
   bool _sending = false;
+
+  // Optimistic outbox: direct replies appear INSTANTLY as pending bubbles
+  // (sending → sent / failed) instead of waiting on a live re-read that hasn't
+  // seen the outgoing message yet. Session-only (a fresh open shows the real
+  // server transcript), so no dedup is needed. Immutable — status transitions
+  // replace the entry by id.
+  List<_Outgoing> _pending = const [];
+  int _seq = 0;
 
   @override
   void initState() {
     super.initState();
     // Fire-and-forget — errors are silently swallowed (read receipts are
-    // best-effort and must never block the UI).
-    Future.microtask(() {
+    // best-effort and must never block the UI). After marking read, refresh
+    // the thread list so its unread badge clears when the user navigates back
+    // (the FutureProvider is cached and won't refetch on its own).
+    Future.microtask(() async {
       if (!mounted) return;
-      ref.read(inboxRepositoryProvider).markRead(widget.threadId);
+      try {
+        await ref.read(inboxRepositoryProvider).markRead(widget.threadId);
+      } catch (_) {/* best-effort read receipt */}
+      if (!mounted) return;
+      ref.invalidate(inboxThreadsProvider);
     });
   }
 
@@ -69,29 +83,74 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
 
   Future<void> _send() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _sending) return;
+    if (text.isEmpty) return;
+    if (_aiMode) {
+      await _sendAi(text);
+    } else {
+      _sendDirect(text);
+    }
+  }
 
+  /// Direct send — optimistic. The bubble appears immediately (`sending`),
+  /// then settles to `sent` / `failed` when the POST resolves. We do NOT
+  /// re-fetch the live thread afterward: the outgoing message isn't in the
+  /// channel's store yet, so a refetch would just wipe the bubble we optimism.
+  void _sendDirect(String text) {
+    final id = _seq++;
+    setState(() {
+      _pending = [
+        ..._pending,
+        _Outgoing(id: id, text: text, status: _SendStatus.sending),
+      ];
+    });
+    _controller.clear();
+    _deliver(id, text);
+  }
+
+  Future<void> _deliver(int id, String text) async {
+    try {
+      await ref
+          .read(inboxRepositoryProvider)
+          .reply(widget.threadId, text, mode: 'direct');
+      _setStatus(id, _SendStatus.sent);
+    } catch (_) {
+      _setStatus(id, _SendStatus.failed);
+    }
+  }
+
+  void _setStatus(int id, _SendStatus status) {
+    if (!mounted) return;
+    setState(() {
+      _pending = [
+        for (final m in _pending)
+          if (m.id == id) m.withStatus(status) else m,
+      ];
+    });
+  }
+
+  void _retry(_Outgoing m) {
+    _setStatus(m.id, _SendStatus.sending);
+    _deliver(m.id, m.text);
+  }
+
+  /// Ask-AI — hands the thread to the agent (background). Blocks the button
+  /// briefly and confirms via a snackbar; no optimistic bubble (the AI's reply
+  /// arrives later through the normal thread refresh).
+  Future<void> _sendAi(String text) async {
+    if (_sending) return;
     setState(() => _sending = true);
     try {
-      await ref.read(inboxRepositoryProvider).reply(
-            widget.threadId,
-            text,
-            mode: _aiMode ? 'ai' : 'direct',
-          );
+      await ref
+          .read(inboxRepositoryProvider)
+          .reply(widget.threadId, text, mode: 'ai');
       if (!mounted) return;
       _controller.clear();
-      if (!_aiMode) {
-        // Refresh the message list so the sent message appears immediately.
-        ref.invalidate(inboxMessagesProvider(widget.threadId));
-      } else {
-        // AI mode — the agent will run the conversation in the background.
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("On it — I'll run the conversation and report back."),
-            duration: Duration(seconds: 3),
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("On it — I'll run the conversation and report back."),
+          duration: Duration(seconds: 3),
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -188,12 +247,7 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
           // ── Message list ─────────────────────────────────────────────────
           Expanded(
             child: messagesAsync.when(
-              loading: () => const Center(
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: AppColors.accent,
-                ),
-              ),
+              loading: () => LzSkeleton.list(),
               error: (e, _) => LzErrorState(
                 message:
                     'Could not load messages. Check your connection and try again.',
@@ -201,7 +255,7 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
                     ref.invalidate(inboxMessagesProvider(widget.threadId)),
               ),
               data: (messages) {
-                if (messages.isEmpty) {
+                if (messages.isEmpty && _pending.isEmpty) {
                   return const LzEmptyState(
                     icon: Icons.chat_bubble_outline_rounded,
                     title: 'No messages yet',
@@ -209,21 +263,30 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
                   );
                 }
                 // Chat-style ordering: channel reads return NEWEST-FIRST
-                // (whatsapp_read sorts desc), so `reverse: true` puts
-                // messages[0] (the newest) at the BOTTOM and opens the view
-                // already scrolled there — older messages scroll up, like
-                // every messaging app.
+                // (whatsapp_read sorts desc), so `reverse: true` puts index 0
+                // at the BOTTOM. Optimistic pending sends are the newest of
+                // all, so they occupy the first _pending.length slots (newest
+                // pending closest to the bottom); fetched messages follow.
                 return ListView.builder(
                   reverse: true,
                   padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.lg,
                     vertical: AppSpacing.md,
                   ),
-                  itemCount: messages.length,
-                  itemBuilder: (_, i) => _MessageBubble(
-                    message: messages[i],
-                    threadId: widget.threadId,
-                  ),
+                  itemCount: _pending.length + messages.length,
+                  itemBuilder: (_, i) {
+                    if (i < _pending.length) {
+                      final p = _pending[_pending.length - 1 - i];
+                      return _PendingBubble(
+                        outgoing: p,
+                        onRetry: () => _retry(p),
+                      );
+                    }
+                    return _MessageBubble(
+                      message: messages[i - _pending.length],
+                      threadId: widget.threadId,
+                    );
+                  },
                 );
               },
             ),
@@ -332,16 +395,20 @@ class _MessageBubble extends StatelessWidget {
                           : AppColors.textPrimary,
                     ),
                   ),
-                AppSpacing.vGap(AppSpacing.xs),
-                // Timestamp
-                Text(
-                  message.timestamp,
-                  style: AppText.caption.copyWith(
-                    color: isMine
-                        ? AppColors.onAccent.withValues(alpha: 0.6)
-                        : AppColors.textMuted,
+                // Timestamp — only when present (WhatsApp used to hand us an
+                // empty string, which drew a blank line + wasted gap). Rendered
+                // localized/relative instead of the raw "… UTC" machine string.
+                if (message.timestamp.isNotEmpty) ...[
+                  AppSpacing.vGap(AppSpacing.xs),
+                  Text(
+                    formatInboxTimestamp(message.timestamp),
+                    style: AppText.caption.copyWith(
+                      color: isMine
+                          ? AppColors.onAccent.withValues(alpha: 0.6)
+                          : AppColors.textMuted,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -448,5 +515,124 @@ class _ReplyBar extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ── Optimistic outbox ─────────────────────────────────────────────────────────
+
+enum _SendStatus { sending, sent, failed }
+
+/// An immutable optimistic outgoing message. Status transitions produce a new
+/// instance (see [withStatus]) so the pending list stays immutable.
+class _Outgoing {
+  const _Outgoing({
+    required this.id,
+    required this.text,
+    required this.status,
+  });
+
+  final int id;
+  final String text;
+  final _SendStatus status;
+
+  _Outgoing withStatus(_SendStatus next) =>
+      _Outgoing(id: id, text: text, status: next);
+}
+
+/// A right-aligned "You" bubble for a not-yet-confirmed direct send, with a
+/// `sending… / ✓ sent / ⚠ tap to retry` status line. Mirrors the mine-bubble
+/// styling of [_MessageBubble].
+class _PendingBubble extends StatelessWidget {
+  const _PendingBubble({required this.outgoing, required this.onRetry});
+
+  final _Outgoing outgoing;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.78,
+          ),
+          child: Container(
+            padding: AppSpacing.card,
+            decoration: const BoxDecoration(
+              color: AppColors.accent,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(AppRadii.lg),
+                topRight: Radius.circular(AppRadii.lg),
+                bottomLeft: Radius.circular(AppRadii.lg),
+                bottomRight: Radius.circular(AppRadii.sm),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'You',
+                  style: AppText.caption.copyWith(
+                    color: AppColors.onAccent.withValues(alpha: 0.75),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                AppSpacing.vGap(AppSpacing.xs),
+                Text(
+                  outgoing.text,
+                  style: AppText.body.copyWith(color: AppColors.onAccent),
+                ),
+                AppSpacing.vGap(AppSpacing.xs),
+                _status(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _status() {
+    final muted = AppText.caption.copyWith(
+      color: AppColors.onAccent.withValues(alpha: 0.6),
+    );
+    switch (outgoing.status) {
+      case _SendStatus.sending:
+        return Text('sending…', style: muted);
+      case _SendStatus.sent:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_rounded,
+                size: 14, color: AppColors.onAccent.withValues(alpha: 0.7)),
+            const SizedBox(width: 2),
+            Text('sent', style: muted),
+          ],
+        );
+      case _SendStatus.failed:
+        // Tappable retry — bold on-accent (readable on the green bubble).
+        return GestureDetector(
+          onTap: onRetry,
+          behavior: HitTestBehavior.opaque,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.refresh_rounded,
+                  size: 14, color: AppColors.onAccent),
+              const SizedBox(width: 4),
+              Text(
+                'Failed — tap to retry',
+                style: AppText.caption.copyWith(
+                  color: AppColors.onAccent,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        );
+    }
   }
 }

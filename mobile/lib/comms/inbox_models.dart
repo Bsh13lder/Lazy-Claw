@@ -76,6 +76,84 @@ class InboxMedia {
       );
 }
 
+const _kMonths = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// Formats a channel message timestamp for display in the inbox.
+///
+/// The WhatsApp MCP emits `"2026-05-25 20:37:14 UTC"` (mcp-whatsapp
+/// src/index.js:1171); other channels may emit ISO-8601. This parses to the
+/// device-local zone and returns a short human form:
+///   today     → "2:37 PM"
+///   yesterday → "Yesterday 2:37 PM"
+///   this year → "25 May, 2:37 PM"
+///   older     → "25 May 2026"
+///
+/// Unparseable input is returned verbatim (never lose data); empty → empty.
+/// `now` is injectable for deterministic tests.
+String formatInboxTimestamp(String raw, {DateTime? now}) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+
+  var s = trimmed;
+  var isUtc = false;
+  if (s.toUpperCase().endsWith(' UTC')) {
+    s = s.substring(0, s.length - 4).trim();
+    isUtc = true;
+  }
+  // "2026-05-25 20:37:14" → "2026-05-25T20:37:14" so DateTime.parse accepts it.
+  s = s.replaceFirst(' ', 'T');
+  if (isUtc && !s.endsWith('Z')) s = '${s}Z';
+
+  final parsed = DateTime.tryParse(s);
+  if (parsed == null) return trimmed; // unknown shape — show as-is, don't drop.
+
+  final dt = parsed.toLocal();
+  final ref = (now ?? DateTime.now()).toLocal();
+
+  final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final period = dt.hour < 12 ? 'AM' : 'PM';
+  final clock = '$h:${dt.minute.toString().padLeft(2, '0')} $period';
+
+  final today = DateTime(ref.year, ref.month, ref.day);
+  final thatDay = DateTime(dt.year, dt.month, dt.day);
+  final dayDelta = today.difference(thatDay).inDays;
+
+  if (dayDelta == 0) return clock;
+  if (dayDelta == 1) return 'Yesterday $clock';
+  final month = _kMonths[dt.month - 1];
+  if (dt.year == ref.year) return '${dt.day} $month, $clock';
+  return '${dt.day} $month ${dt.year}';
+}
+
+/// Human-friendly fallback label for a thread with no saved contact name.
+///
+/// Strips WhatsApp JID suffixes (`@s.whatsapp.net` / `@lid` / `@g.us`) and a
+/// device suffix, formatting a bare phone as `+NNN`; prefixes an Instagram
+/// username with `@`; leaves emails (and anything else) as-is. Never returns
+/// empty for a non-empty handle — so the inbox never shows a raw
+/// `34600@s.whatsapp.net` as a title.
+String prettyHandle(String channel, String handle) {
+  final h = handle.trim();
+  if (h.isEmpty) return h;
+  switch (channel) {
+    case 'whatsapp':
+      final local = h.split('@').first.split(':').first;
+      // Only a PHONE JID becomes "+digits"; groups (@g.us) and @lid have
+      // all-digit local parts too but aren't phone numbers.
+      if (h.contains('@s.whatsapp.net') && RegExp(r'^\d{6,15}$').hasMatch(local)) {
+        return '+$local';
+      }
+      return local.isNotEmpty ? local : h;
+    case 'instagram':
+      return h.startsWith('@') ? h : '@$h';
+    default:
+      return h; // email + anything else: already readable
+  }
+}
+
 class InboxMessage {
   final String sender;
   final String text;

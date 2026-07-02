@@ -9,6 +9,10 @@ import 'package:lazyclaw_mobile/screens/inbox/inbox_thread_screen.dart';
 // ── Fake transport that records calls ─────────────────────────────────────────
 
 class _FakeTransport implements InboxTransport {
+  _FakeTransport({this.failReply = false});
+
+  /// When true, a `/reply` POST throws (simulates a 502 send failure).
+  final bool failReply;
   final List<String> markedReadIds = [];
   final List<Map<String, dynamic>> replies = [];
 
@@ -35,6 +39,7 @@ class _FakeTransport implements InboxTransport {
       }
     } else if (path.endsWith('/reply')) {
       replies.add({...body, 'path': path});
+      if (failReply) throw Exception('send failed');
     }
     return {'ok': true};
   }
@@ -166,7 +171,8 @@ void main() {
     expect(find.text('Ask'), findsOneWidget);
   });
 
-  testWidgets('direct reply is sent on tap and field is cleared', (tester) async {
+  testWidgets('direct reply shows an optimistic bubble that settles to sent',
+      (tester) async {
     final transport = _FakeTransport();
 
     await tester.pumpWidget(ProviderScope(
@@ -190,8 +196,37 @@ void main() {
     expect(transport.replies.length, 1);
     expect(transport.replies.first['text'], 'Hello there');
     expect(transport.replies.first['mode'], 'direct');
-    // Field is cleared after a successful send.
-    expect(find.text('Hello there'), findsNothing);
+    // The message appears INSTANTLY as an optimistic bubble (exactly once — so
+    // the input field was also cleared, else it would match twice)...
+    expect(find.text('Hello there'), findsOneWidget);
+    // ...and settles to "sent" once the POST resolves.
+    expect(find.text('sent'), findsOneWidget);
+  });
+
+  testWidgets('direct reply that fails shows a tap-to-retry bubble',
+      (tester) async {
+    final transport = _FakeTransport(failReply: true);
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [
+        inboxRepositoryProvider
+            .overrideWith((_) => InboxRepository(transport)),
+        inboxMessagesProvider('t4b').overrideWith((ref) async => []),
+      ],
+      child: const MaterialApp(
+          home: InboxThreadScreen(threadId: 't4b', title: 'Erin')),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'ping');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(InkWell, 'Send').last);
+    await tester.pumpAndSettle();
+
+    // Failed send keeps the bubble with a retry affordance (never silently
+    // drops the message).
+    expect(find.text('ping'), findsOneWidget);
+    expect(find.text('Failed — tap to retry'), findsOneWidget);
   });
 
   testWidgets('ai reply uses mode=ai', (tester) async {

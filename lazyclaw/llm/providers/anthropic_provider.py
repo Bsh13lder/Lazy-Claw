@@ -11,6 +11,27 @@ from lazyclaw.llm.providers.base import BaseLLMProvider, LLMMessage, LLMResponse
 
 _log = logging.getLogger(__name__)
 
+
+def _looks_like_json_plan(text: str) -> bool:
+    """True when a text-only reply is machine-plan narration, not an answer.
+
+    MiniMax M3/M2.7 under pressure emit fenced ```json {goal, steps} plans
+    as prose instead of tool_use (2026-07-02 Upwork bail). A fenced json
+    block or a bare JSON document is never a legitimate user-facing reply.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if t.startswith("```json"):
+        return True
+    if t[0] in "{[":
+        try:
+            json.loads(t)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            return False
+    return False
+
 # ─── MiniMax M2 / M2.7 tool-call recovery ────────────────────────────────────
 #
 # M2 is hardcoded to emit tool calls in its proprietary XML format:
@@ -363,68 +384,112 @@ class AnthropicProvider(BaseLLMProvider):
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
-        response = await self._client.messages.create(**create_kwargs)
+        # Bounded retry loop: at most one extra request, fired only when
+        # MiniMax narrates a fenced/bare JSON plan as prose instead of
+        # emitting tool_use (2026-07-02 incident — see _looks_like_json_plan).
+        # The retry re-issues the same create_kwargs with tool_choice forced
+        # to {"type": "any"}; its response replaces the first unconditionally,
+        # even if still text-only — never loop past one retry.
+        # Usage accumulators: when the retry fires, TWO billed API calls
+        # happen. MiniMax Token Plan is request/token-limited, so cost/rate
+        # telemetry needs BOTH calls' usage, not just the last one. Summed
+        # across every loop iteration below; when no retry fires this is
+        # numerically identical to reading `response.usage` once (today's
+        # behavior).
+        _usage_input_tokens = 0
+        _usage_output_tokens = 0
+        _usage_cache_created = 0
+        _usage_cache_read = 0
+        _any_usage_seen = False
 
-        text_parts: list[str] = []
-        parsed_tool_calls: list[ToolCall] = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                parsed_tool_calls.append(
-                    ToolCall(id=block.id, name=block.name, arguments=block.input)
+        _plan_retry_done = False
+        while True:
+            response = await self._client.messages.create(**create_kwargs)
+
+            if response.usage:
+                _any_usage_seen = True
+                _usage_input_tokens += response.usage.input_tokens
+                _usage_output_tokens += response.usage.output_tokens
+                _usage_cache_created += (
+                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+                )
+                _usage_cache_read += (
+                    getattr(response.usage, "cache_read_input_tokens", 0) or 0
                 )
 
-        # Recover MiniMax-style tool markup if the server returned it as text
-        # instead of native tool_use blocks.
-        joined_text = "\n".join(text_parts)
-        cleaned_text, recovered_calls = _extract_minimax_tool_calls(
-            joined_text, converted_tools,
-        )
-        if recovered_calls:
-            parsed_tool_calls.extend(recovered_calls)
-            joined_text = cleaned_text
+            text_parts: list[str] = []
+            parsed_tool_calls: list[ToolCall] = []
+            for block in response.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
+                elif block.type == "tool_use":
+                    parsed_tool_calls.append(
+                        ToolCall(id=block.id, name=block.name, arguments=block.input)
+                    )
 
-        # Diagnostic: text-only is a DEFECT only when tools were ATTACHED but
-        # no tool_use came back — that's the "M3 narrated instead of calling"
-        # signal. A tools=None request (the plan-gate round-0 plan DRAFT, or a
-        # pure-chat turn) returning text is CORRECT and must NOT warn or inflate
-        # the drift counter — that false positive sent the 2026-06-23 MiniMax
-        # investigation down a wrong path ("M3 won't dispatch" on calls that
-        # were never meant to). `tools_payload` is truthy iff tools were
-        # actually sent this request. The total-turn counter still tracks every
-        # MiniMax call so /status keeps a true denominator.
-        if response.model and "MiniMax" in response.model:
-            self._minimax_total_turns += 1
-            if not parsed_tool_calls and joined_text:
-                if tools_payload:
-                    self._minimax_text_only_turns += 1
-                    _log.warning(
-                        "MiniMax %s returned text-only despite %d tool(s) "
-                        "attached (no tool_use): %r",
-                        response.model, len(tools_payload), joined_text[:400],
-                    )
-                else:
-                    _log.debug(
-                        "MiniMax %s returned text-only (no tools attached — "
-                        "expected for chat/plan-draft): %r",
-                        response.model, joined_text[:200],
-                    )
+            # Recover MiniMax-style tool markup if the server returned it as
+            # text instead of native tool_use blocks.
+            joined_text = "\n".join(text_parts)
+            cleaned_text, recovered_calls = _extract_minimax_tool_calls(
+                joined_text, converted_tools,
+            )
+            if recovered_calls:
+                parsed_tool_calls.extend(recovered_calls)
+                joined_text = cleaned_text
+
+            # Diagnostic: text-only is a DEFECT only when tools were ATTACHED
+            # but no tool_use came back — that's the "M3 narrated instead of
+            # calling" signal. A tools=None request (the plan-gate round-0
+            # plan DRAFT, or a pure-chat turn) returning text is CORRECT and
+            # must NOT warn or inflate the drift counter — that false
+            # positive sent the 2026-06-23 MiniMax investigation down a wrong
+            # path ("M3 won't dispatch" on calls that were never meant to).
+            # `tools_payload` is truthy iff tools were actually sent this
+            # request. The total-turn counter still tracks every MiniMax call
+            # (including the retry) so /status keeps a true denominator.
+            if response.model and "MiniMax" in response.model:
+                self._minimax_total_turns += 1
+                if not parsed_tool_calls and joined_text:
+                    if tools_payload:
+                        self._minimax_text_only_turns += 1
+                        _log.warning(
+                            "MiniMax %s returned text-only despite %d tool(s) "
+                            "attached (no tool_use): %r",
+                            response.model, len(tools_payload), joined_text[:400],
+                        )
+                    else:
+                        _log.debug(
+                            "MiniMax %s returned text-only (no tools attached — "
+                            "expected for chat/plan-draft): %r",
+                            response.model, joined_text[:200],
+                        )
+
+            if (
+                response.model and "MiniMax" in response.model
+                and not parsed_tool_calls and joined_text and tools_payload
+                and not _plan_retry_done
+                and _looks_like_json_plan(joined_text)
+            ):
+                _plan_retry_done = True
+                _log.warning(
+                    "MiniMax %s narrated a JSON plan instead of tool_use — "
+                    "retrying once with tool_choice={'type': 'any'}",
+                    response.model,
+                )
+                create_kwargs["tool_choice"] = {"type": "any"}
+                continue
+            break
 
         usage = None
-        if response.usage:
-            input_t = response.usage.input_tokens
-            output_t = response.usage.output_tokens
-            cache_created = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
-            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        if _any_usage_seen:
             usage = {
-                "prompt_tokens": input_t,
-                "completion_tokens": output_t,
-                "total_tokens": input_t + output_t,
-                "input_tokens": input_t,
-                "output_tokens": output_t,
-                "cache_creation_input_tokens": cache_created,
-                "cache_read_input_tokens": cache_read,
+                "prompt_tokens": _usage_input_tokens,
+                "completion_tokens": _usage_output_tokens,
+                "total_tokens": _usage_input_tokens + _usage_output_tokens,
+                "input_tokens": _usage_input_tokens,
+                "output_tokens": _usage_output_tokens,
+                "cache_creation_input_tokens": _usage_cache_created,
+                "cache_read_input_tokens": _usage_cache_read,
             }
 
         return LLMResponse(

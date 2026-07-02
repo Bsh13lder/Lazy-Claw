@@ -20,6 +20,7 @@ from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.tasks.ai_parse import ai_parse_task
 from lazyclaw.tasks.nl_time import parse_full as regex_parse_full
+from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
 from lazyclaw.tasks.store import (
     complete_task,
     create_task,
@@ -62,6 +63,10 @@ class CreateTaskBody(BaseModel):
     recurring: str | None = None
     tags: list[str] | None = None
     steps: list[StepDraft] | None = None
+    # Advance reminders. Omit (None) to auto-derive from the user's
+    # reminder_offsets when a reminder_at is set. Send [] to opt this task
+    # out, or a list of offsets/ISO datetimes to override.
+    pre_reminders: list[str] | None = None
 
 
 class UpdateTaskBody(BaseModel):
@@ -124,6 +129,15 @@ async def create_task_route(
     steps_payload = (
         [s.model_dump() for s in body.steps] if body.steps else None
     )
+    # Derive advance reminders from the user's reminder_offsets (or honour an
+    # explicit list) so REST/mobile-created timed tasks fire the same
+    # Proton-Calendar-style advance reminders as the chat/Telegram path.
+    pre_reminders = await resolve_pre_reminders(
+        _config,
+        user.id,
+        reminder_at=body.reminder_at,
+        explicit=body.pre_reminders,
+    )
     task = await create_task(
         _config,
         user.id,
@@ -137,6 +151,7 @@ async def create_task_route(
         recurring=body.recurring,
         tags=body.tags,
         steps=steps_payload,
+        pre_reminders=pre_reminders,
         task_id=body.id or None,
     )
     return {"task": task}

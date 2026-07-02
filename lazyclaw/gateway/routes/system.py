@@ -35,6 +35,11 @@ class UpdateGeneralRequest(BaseModel):
     search_provider: str | None = None
     show_cost_badges: bool | None = None
     agent_mode: str | None = None  # ADR-0005: chat | ask | plan | auto
+    # Advance-reminder lead times (e.g. ["-2h", "-1h", "-30m"]). Validated in
+    # update_general_settings via _OFFSET_RE. Drives pre_reminders on every
+    # timed task. Without this field Pydantic silently dropped the client's
+    # value, so the PATCH was a no-op.
+    reminder_offsets: list[str] | None = None
 
 
 @router.get("/api/settings/general")

@@ -108,15 +108,18 @@ class ServerConfig {
   ///
   /// 1. [kDefaultBaseUrl] — the public DuckDNS + Caddy front door. Works on
   ///    cellular and away from home.
-  /// 2. [kLanFallbackBaseUrl] — the Mac's mDNS name. Works on home WiFi, where
-  ///    the router won't hairpin the public IP back inside, so the public URL
-  ///    is unreachable there.
-  /// 3. [kLanFallbackIpBaseUrl] — the Mac's LAN IP directly. Same job as (2)
-  ///    for platforms whose HTTP client can't resolve `.local`.
+  /// 2. [kLanFallbackIpBaseUrl] — the Mac's LAN IP directly. Probed BEFORE the
+  ///    mDNS name because Dart's `HttpClient` frequently can't resolve `.local`
+  ///    (it hangs the full probe timeout, then fails), so the raw IP is the
+  ///    reliable home-WiFi host and must be tried first — otherwise resolution
+  ///    wastes a timeout on `.local` (or mis-lands on a flaky `.local` probe)
+  ///    before reaching the IP that actually answers.
+  /// 3. [kLanFallbackBaseUrl] — the Mac's mDNS name. Kept LAST as a best-effort
+  ///    extra for platforms whose HTTP client *can* resolve `.local`.
   static const List<String> _candidates = [
     kDefaultBaseUrl,
-    kLanFallbackBaseUrl,
     kLanFallbackIpBaseUrl,
+    kLanFallbackBaseUrl,
   ];
 
   /// Resolves the gateway to use.

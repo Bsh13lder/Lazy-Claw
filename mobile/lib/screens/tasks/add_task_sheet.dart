@@ -4,10 +4,12 @@ import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
+import 'package:lazyclaw_mobile/models/subtask.dart';
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
 import 'package:lazyclaw_mobile/screens/tasks/recurrence_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
+import 'package:lazyclaw_mobile/screens/tasks/subtask_editor.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 /// A polished add-task bottom sheet with Todoist-style "smart add": as the user
@@ -38,6 +40,15 @@ class AddTaskSheet extends ConsumerStatefulWidget {
 
 class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   final _titleController = SmartAddController();
+
+  /// Free-form notes → the task's `description`. Mirrors the edit sheet's Notes
+  /// field so the two surfaces feel like one family.
+  final _notesController = TextEditingController();
+
+  /// The sub-tasks (checklist) being authored for the new task. Edited in-sheet
+  /// via [SubtaskEditor] and carried to the caller (serialized to `steps`) so
+  /// the create lands them in ONE round-trip — no post-create edit needed.
+  List<Subtask> _subtasks = const [];
 
   /// Live parse of the current title text. Drives the detected-token chips and
   /// the default selections for priority / due date.
@@ -81,6 +92,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   @override
   void dispose() {
     _titleController.dispose();
+    _notesController.dispose();
     super.dispose();
   }
 
@@ -197,6 +209,11 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       dueAnchor: recurrenceAnchorFromDue(dueDate),
     );
 
+    // Notes → description (null when blank so we don't persist an empty column)
+    // and the checklist → serialized `steps` (null for an empty list).
+    final notes = _notesController.text.trim();
+    final steps = serializeSubtasks(_subtasks);
+
     setState(() => _submitting = true);
     Navigator.of(context).pop(
       _AddTaskResult(
@@ -206,6 +223,8 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
         category: parsed.project,
         reminderAt: reminderAt.isEmpty ? null : reminderAt,
         recurring: recurring,
+        description: notes.isEmpty ? null : notes,
+        steps: steps,
       ),
     );
   }
@@ -322,6 +341,19 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
               ],
             ),
           ],
+
+          const SizedBox(height: AppSpacing.lg),
+
+          // ── Notes ──────────────────────────────────────────────────────
+          LzTextField(
+            controller: _notesController,
+            fieldKey: const Key('add-task-notes'),
+            hint: 'Notes (optional)',
+            prefixIcon: Icons.notes_outlined,
+            minLines: 2,
+            maxLines: 5,
+            keyboardType: TextInputType.multiline,
+          ),
 
           const SizedBox(height: AppSpacing.xl),
 
@@ -515,6 +547,33 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             }),
           ),
 
+          // ── Sub-tasks ──────────────────────────────────────────────────
+          const SizedBox(height: AppSpacing.xl),
+          Row(
+            children: [
+              Text(
+                'SUBTASKS',
+                style: AppText.caption.copyWith(
+                  color: AppColors.textMuted,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              if (subtaskProgressLabel(_subtasks) != null)
+                Text(
+                  subtaskProgressLabel(_subtasks)!,
+                  key: const Key('add-task-subtask-progress'),
+                  style: AppText.caption.copyWith(color: AppColors.accent),
+                ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          SubtaskEditor(
+            subtasks: _subtasks,
+            onChanged: (next) => setState(() => _subtasks = next),
+          ),
+
           const SizedBox(height: AppSpacing.xl),
 
           // ── Submit button ──────────────────────────────────────────────
@@ -616,6 +675,8 @@ class _AddTaskResult {
     this.category,
     this.reminderAt,
     this.recurring,
+    this.description,
+    this.steps,
   });
   final String title;
   final String priority;
@@ -627,6 +688,13 @@ class _AddTaskResult {
 
   /// A standard 5-field cron expression when the task repeats, else null.
   final String? recurring;
+
+  /// Free-form notes → the task's `description`, or null when blank.
+  final String? description;
+
+  /// The serialized `[{id,title,done}]` sub-task checklist JSON, or null for an
+  /// empty list (see [serializeSubtasks]).
+  final String? steps;
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────
@@ -646,6 +714,8 @@ Future<
     String? category,
     String? reminderAt,
     String? recurring,
+    String? description,
+    String? steps,
   })?
 >
 showAddTaskSheet(
@@ -667,5 +737,7 @@ showAddTaskSheet(
     category: result.category,
     reminderAt: result.reminderAt,
     recurring: result.recurring,
+    description: result.description,
+    steps: result.steps,
   );
 }

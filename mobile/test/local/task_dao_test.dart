@@ -88,6 +88,34 @@ void main() {
       expect(outbox.first.payload['due_date'], '2026-06-20');
       expect(outbox.first.payload['category'], 'health');
     });
+
+    test('persists description + steps and queues them in the create payload',
+        () async {
+      final dao = await _freshDao();
+      const stepsJson =
+          '[{"id":"s1","title":"First","done":false},'
+          '{"id":"s2","title":"Second","done":true}]';
+      final task = await dao.applyLocalCreate(
+        'With notes + subtasks',
+        description: 'Some notes',
+        steps: stepsJson,
+      );
+      expect(task.description, 'Some notes');
+      expect(task.steps, stepsJson);
+
+      // Round-trips back out of the cache verbatim, including the parsed list.
+      final stored = await dao.getById(task.id);
+      expect(stored!.description, 'Some notes');
+      expect(stored.steps, stepsJson);
+      expect(stored.subtasks, hasLength(2));
+      expect(stored.subtasks.last.done, isTrue);
+
+      // Both ride the create outbox payload for server replay.
+      final outbox = await dao.readOutbox();
+      expect(outbox.first.op, OutboxOp.create);
+      expect(outbox.first.payload['description'], 'Some notes');
+      expect(outbox.first.payload['steps'], stepsJson);
+    });
   });
 
   group('TaskDao local list excludes deletes', () {

@@ -199,6 +199,8 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
     String? reminderAt,
     String? recurring,
+    String? description,
+    String? steps,
   }) async {
     try {
       // An empty string means "no reminder" on create — normalise to null so
@@ -209,6 +211,12 @@ class TasksNotifier extends StateNotifier<TasksState> {
           : reminderAt;
       // Likewise an empty cron means "does not repeat" — normalise to null.
       final recur = (recurring != null && recurring.isEmpty) ? null : recurring;
+      // Empty notes / an empty serialized checklist mean "none" on create —
+      // normalise to null so we don't persist a blank column or a literal "[]".
+      final desc = (description != null && description.isEmpty)
+          ? null
+          : description;
+      final st = (steps != null && steps.isEmpty) ? null : steps;
       final created = await _dao.applyLocalCreate(
         title,
         priority: priority ?? 'medium',
@@ -216,6 +224,8 @@ class TasksNotifier extends StateNotifier<TasksState> {
         category: category,
         reminderAt: remAt,
         recurring: recur,
+        description: desc,
+        steps: st,
       );
       await _refreshFromCache();
       unawaited(_reminders?.scheduleForTask(created) ?? Future<void>.value());

@@ -63,6 +63,34 @@ void main() {
       expect(n.state.dirtyIds, contains(created.id));
     });
 
+    test('addTask persists notes + subtasks and queues them on create',
+        () async {
+      final dao = await _freshDao();
+      final sync = TaskSync(dao, TasksRepository(_OfflineTransport()));
+      final n = TasksNotifier(dao, sync);
+
+      const stepsJson = '[{"id":"s1","title":"Step one","done":false}]';
+      await n.addTask(
+        'Plan trip',
+        description: 'Book flights and hotel',
+        steps: stepsJson,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final created = n.state.tasks.firstWhere((t) => t.title == 'Plan trip');
+      // Both fields land in the cache (read back via the DAO).
+      final stored = await dao.getById(created.id);
+      expect(stored!.description, 'Book flights and hotel');
+      expect(stored.steps, stepsJson);
+      expect(stored.subtasks, hasLength(1));
+
+      // The create op carries both for later server replay.
+      final outbox = await dao.readOutbox();
+      final createItem = outbox.firstWhere((o) => o.op == OutboxOp.create);
+      expect(createItem.payload['description'], 'Book flights and hotel');
+      expect(createItem.payload['steps'], stepsJson);
+    });
+
     test('completeTask flips status locally + stays dirty offline', () async {
       final dao = await _freshDao();
       final sync = TaskSync(dao, TasksRepository(_OfflineTransport()));

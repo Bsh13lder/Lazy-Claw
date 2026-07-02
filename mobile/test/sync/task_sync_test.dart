@@ -202,6 +202,41 @@ void main() {
       expect(createCall.body!['id'], 'fixed-uuid');
     });
 
+    test('create push body carries description + decoded steps', () async {
+      final dao = await _freshDao();
+      const stepsJson = '[{"id":"s1","title":"First","done":false}]';
+      await dao.applyLocalCreate(
+        'With steps',
+        id: 'cs1',
+        description: 'notes',
+        steps: stepsJson,
+      );
+      final transport = _FakeTransport();
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+      expect(result.pushed, 1);
+
+      final createCall =
+          transport.calls.firstWhere((c) => c.path == '/api/tasks');
+      expect(createCall.body!['description'], 'notes');
+      // steps ride the POST body as the decoded [{id,title,done}] list the
+      // server's CreateTaskBody expects — NOT the raw JSON string.
+      final steps = createCall.body!['steps'] as List;
+      expect(steps, hasLength(1));
+      expect((steps.first as Map)['title'], 'First');
+      expect((steps.first as Map)['done'], false);
+    });
+
+    test('create without steps omits the steps key from the POST body',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('No steps', id: 'ns1');
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+      final createCall =
+          transport.calls.firstWhere((c) => c.path == '/api/tasks');
+      expect(createCall.body!.containsKey('steps'), isFalse);
+    });
+
     test('stops at the first network failure and keeps the rest queued',
         () async {
       final dao = await _freshDao();

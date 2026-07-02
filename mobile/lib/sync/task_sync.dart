@@ -139,6 +139,10 @@ class TaskSync {
     try {
       switch (item.op) {
         case OutboxOp.create:
+          // The initial checklist rides the create POST body (decoded to the
+          // `[{id,title,done}]` list CreateTaskBody expects). Only forward it
+          // when present so a step-less create omits the key entirely.
+          final rawSteps = p['steps'];
           await _repo.createTask(
             (p['title'] ?? '').toString(),
             id: p['id']?.toString() ?? item.entityId,
@@ -148,6 +152,7 @@ class TaskSync {
             dueDate: p['due_date']?.toString(),
             reminderAt: p['reminder_at']?.toString(),
             recurring: p['recurring']?.toString(),
+            steps: rawSteps == null ? null : _decodeSteps(rawSteps),
           );
           break;
         case OutboxOp.update:

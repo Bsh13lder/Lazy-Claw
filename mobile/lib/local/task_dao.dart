@@ -221,6 +221,7 @@ class TaskDao {
     String? dueDate,
     String? reminderAt,
     String? recurring,
+    String? steps,
     String owner = 'user',
     String? userId,
   }) async {
@@ -238,6 +239,7 @@ class TaskDao {
       dueDate: dueDate,
       reminderAt: reminderAt,
       recurring: recurring,
+      steps: steps,
       nagCount: 0,
       createdAt: now,
     );
@@ -253,7 +255,10 @@ class TaskDao {
         row,
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
-      // Server create accepts the client id + the user-facing fields.
+      // Server create accepts the client id + the user-facing fields. `steps`
+      // rides the create payload as a JSON-array STRING (same shape the DAO
+      // stores + an `update` op carries); the sync engine decodes it into the
+      // `[{id,title,done}]` list the server's CreateTaskBody expects.
       final payload = <String, dynamic>{
         'id': taskId,
         'title': title,
@@ -263,6 +268,7 @@ class TaskDao {
         'due_date': ?dueDate,
         'reminder_at': ?reminderAt,
         'recurring': ?recurring,
+        'steps': ?steps,
       };
       await _enqueueTxn(txn, OutboxOp.create, taskId, payload, now);
     });

@@ -256,6 +256,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           category: result.category,
           reminderAt: result.reminderAt,
           recurring: result.recurring,
+          description: result.description,
+          steps: result.steps,
         );
   }
 

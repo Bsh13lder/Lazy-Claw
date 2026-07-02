@@ -158,6 +158,30 @@ double starredExpenseTotal(Iterable<Expense> expenses, {String? currency}) {
   return total;
 }
 
+/// Headline totals for the Overview hero ("TOTAL SPENT"). When ANY project is
+/// starred, the hero reflects ONLY the favorite (non-archived) projects + their
+/// expenses — the user pins the projects the big number should track, so the
+/// headline is their selected favorites, not every project summed. With no
+/// favorites it totals every project (the prior behavior).
+BudgetTotals heroTotals(
+  List<Project> projects,
+  List<Expense> expenses, {
+  DateTime? now,
+}) {
+  final favorites =
+      projects.where((p) => p.isFavorite && !p.isArchived).toList();
+  if (favorites.isEmpty) return BudgetTotals.from(projects, expenses, now: now);
+  final favIds = favorites.map((p) => p.id).toSet();
+  final favExpenses =
+      expenses.where((e) => favIds.contains(e.projectId)).toList();
+  return BudgetTotals.from(favorites, favExpenses, now: now);
+}
+
+/// True when at least one non-archived project is starred — the hero is then
+/// scoped to favorites (drives the summary card's "favorites" label hint).
+bool hasFavoriteProjects(List<Project> projects) =>
+    projects.any((p) => p.isFavorite && !p.isArchived);
+
 /// Human-readable label for [range] (e.g. "Today", "Last 7 days", "June 2026",
 /// "All time", "Jun 1 – Jun 7"). The month label includes the year only when the
 /// shifted month falls outside [now]'s calendar year (so "June" for the current

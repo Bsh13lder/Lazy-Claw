@@ -31,7 +31,63 @@ Expense _expense(
       'is_favorite': isFavorite,
     });
 
+Project _fav(String id, {double budget = 0, String currency = 'USD'}) =>
+    Project.fromJson({
+      'id': id,
+      'name': id,
+      'budget': budget,
+      'currency': currency,
+      'is_favorite': true,
+    });
+
 void main() {
+  group('heroTotals (favorites-scoped headline)', () {
+    test('scopes the hero to favorite projects when any project is starred', () {
+      // Mirrors the reported screenshot: Personal (★) 3360, ClubBay (☆) 2032.
+      final projects = [
+        _fav('personal', budget: 0), // starred, no budget
+        _project('clubbay', budget: 2800), // not starred
+      ];
+      final expenses = [
+        _expense('e1', 'personal', 3360),
+        _expense('e2', 'clubbay', 2032),
+      ];
+      final totals = heroTotals(projects, expenses);
+      // Only the favorite (personal) — NOT the 5392 grand total.
+      expect(totals.totalSpent, 3360);
+      expect(totals.totalBudget, 0); // personal has no budget
+    });
+
+    test('sums MULTIPLE favorites (and only favorites)', () {
+      final projects = [
+        _fav('a', budget: 100),
+        _fav('b', budget: 200),
+        _project('c', budget: 999), // not starred → excluded
+      ];
+      final expenses = [
+        _expense('e1', 'a', 10),
+        _expense('e2', 'b', 20),
+        _expense('e3', 'c', 500), // excluded
+      ];
+      final totals = heroTotals(projects, expenses);
+      expect(totals.totalSpent, 30);
+      expect(totals.totalBudget, 300);
+    });
+
+    test('falls back to ALL projects when nothing is starred', () {
+      final projects = [_project('a', budget: 100), _project('b', budget: 50)];
+      final expenses = [_expense('e1', 'a', 30), _expense('e2', 'b', 20)];
+      final totals = heroTotals(projects, expenses);
+      expect(totals.totalSpent, 50);
+      expect(totals.totalBudget, 150);
+    });
+
+    test('hasFavoriteProjects reflects any non-archived starred project', () {
+      expect(hasFavoriteProjects([_project('a')]), isFalse);
+      expect(hasFavoriteProjects([_fav('a'), _project('b')]), isTrue);
+    });
+  });
+
   group('spentForProject', () {
     test('sums only matching, non-void expenses', () {
       final expenses = [

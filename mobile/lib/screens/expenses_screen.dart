@@ -341,9 +341,12 @@ class _OverviewTabState extends State<_OverviewTab> {
   Widget build(BuildContext context) {
     final state = widget.state;
 
-    // Aggregate totals — derived from the live expense set (not a stale/absent
-    // server rollup) and currency-aware so mixed currencies aren't summed.
-    final totals = BudgetTotals.from(state.projects, state.expenses);
+    // Hero "TOTAL SPENT" reflects the user's STARRED (favorite) projects when
+    // any exist — the headline tracks the projects they pinned, not every
+    // project summed. Falls back to all projects when nothing is starred.
+    // Currency-aware so mixed currencies aren't summed.
+    final totals = heroTotals(state.projects, state.expenses);
+    final heroScopedToFavorites = hasFavoriteProjects(state.projects);
 
     // The "★ Starred only" subtotal — sum of just the pinned expenses, scoped
     // to the same headline currency the hero card uses.
@@ -378,7 +381,10 @@ class _OverviewTabState extends State<_OverviewTab> {
         padding: EdgeInsets.zero,
         children: [
           // Hero summary card.
-          BudgetSummaryCard(totals: totals),
+          BudgetSummaryCard(
+            totals: totals,
+            scopedToFavorites: heroScopedToFavorites,
+          ),
           // Visible starred subtotal + the show-all/starred-only toggle. Only
           // surfaces once at least one expense is starred.
           if (hasStarred)

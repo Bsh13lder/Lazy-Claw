@@ -9,9 +9,18 @@ import 'money_helpers.dart';
 /// and big amount typography. All figures are derived from the live expense set
 /// via [BudgetTotals] — never a stale server rollup.
 class BudgetSummaryCard extends StatelessWidget {
-  const BudgetSummaryCard({super.key, required this.totals});
+  const BudgetSummaryCard({
+    super.key,
+    required this.totals,
+    this.scopedToFavorites = false,
+  });
 
   final BudgetTotals totals;
+
+  /// When true the figures cover only the starred (favorite) projects, so the
+  /// header reads "TOTAL SPENT · FAVORITES" with a star — the user's headline
+  /// tracks what they pinned, not every project.
+  final bool scopedToFavorites;
 
   @override
   Widget build(BuildContext context) {
@@ -34,13 +43,15 @@ class BudgetSummaryCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  Icons.account_balance_wallet_outlined,
+                  scopedToFavorites
+                      ? Icons.star_rounded
+                      : Icons.account_balance_wallet_outlined,
                   color: AppColors.onAccent.withValues(alpha: 0.85),
                   size: 16,
                 ),
                 const SizedBox(width: AppSpacing.sm),
                 Text(
-                  'TOTAL SPENT',
+                  scopedToFavorites ? 'TOTAL SPENT · FAVORITES' : 'TOTAL SPENT',
                   style: AppText.caption.copyWith(
                     color: AppColors.onAccent.withValues(alpha: 0.85),
                     fontWeight: FontWeight.w700,

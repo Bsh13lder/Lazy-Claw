@@ -1864,10 +1864,15 @@ def _build_hallucination_correction(
 ) -> str:
     """Craft a correction message that surfaces the RIGHT alternatives.
 
-    Handles two shapes:
+    Handles three shapes:
       - Plain hallucinated name (`foo_bar`) → search_tools(bar).
       - MCP-shaped name (`mcp_<uuid>_delete_spreadsheet`) → list actual
         sibling tools on the same server so the LLM sees what is real.
+      - Bad name's bare form matches a REGISTERED-but-not-attached MCP
+        tool (exists on a connected server but wasn't sent this turn,
+        e.g. thin-router narrowing or channel suppression) → steer to
+        delegate(...)/run_background(...) instead of retrying inline,
+        since search_tools discovery can't make it callable this turn.
     """
     parsed = _parse_mcp_name(bad_name)
     if parsed is not None and registry is not None:

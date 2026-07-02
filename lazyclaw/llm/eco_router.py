@@ -658,19 +658,29 @@ class EcoRouter:
             "worker": mode_worker or settings.worker_model or defaults["worker"],
             "fallback": mode_fallback or settings.fallback_model or defaults["fallback"],
         }
-        if resolved["fallback"] == resolved["brain"]:
-            # A fallback equal to the brain is a no-op safety net — the
-            # 2026-07-02 Upwork bail ran brain=fallback=MiniMax-M3 so no
-            # rescue was ever possible. Prefer the mode default; if the
-            # brain IS the mode default fallback, use the safe constant.
+        # A fallback equal to the brain is a no-op safety net — the
+        # 2026-07-02 Upwork bail ran brain=fallback=MiniMax-M3 so no
+        # rescue was ever possible. But some modes (e.g. FULL) legitimately
+        # SHIP brain==fallback in MODE_MODELS with zero user pins — that's
+        # a deliberate default, not a config bug. Only intervene when a
+        # user pin actually contributed to the collision.
+        pin_contributed = bool(
+            mode_brain or settings.brain_model or mode_fallback or settings.fallback_model
+        )
+        if pin_contributed and resolved["fallback"] == resolved["brain"]:
+            # Prefer the mode default; if the brain IS the mode default
+            # fallback, use the safe constant.
             alt = defaults["fallback"]
             if alt == resolved["brain"]:
                 alt = _SAFE_FALLBACK_MODEL
-            logger.warning(
-                "fallback_model == brain_model (%s) — self-fallback is a "
-                "no-op; using %s instead", resolved["brain"], alt,
-            )
-            resolved = {**resolved, "fallback": alt}
+            if alt != resolved["brain"]:
+                logger.warning(
+                    "fallback_model == brain_model (%s) — self-fallback is a "
+                    "no-op; using %s instead", resolved["brain"], alt,
+                )
+                resolved = {**resolved, "fallback": alt}
+            # else: no distinct fallback available anywhere — leave
+            # resolved as-is; nothing to rewrite to, so don't warn either.
         return resolved
 
     def _is_auto_fallback(self, settings: EcoSettings) -> bool:

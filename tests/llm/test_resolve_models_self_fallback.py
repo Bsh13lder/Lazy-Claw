@@ -49,3 +49,49 @@ def test_distinct_pins_unchanged() -> None:
     )
     models = _resolve(s)
     assert models["fallback"] == "claude-haiku-4-5-20251001"
+
+
+def test_full_mode_pure_defaults_untouched(caplog) -> None:
+    """FULL mode ships brain == fallback == claude-sonnet-4-6 with zero
+    user pins. That's a deliberate shipped default, not a config bug —
+    the guard must not fire and must not warn."""
+    from lazyclaw.llm.model_registry import get_mode_models
+
+    s = EcoSettings(mode="full")
+    with caplog.at_level("WARNING"):
+        models = _resolve(s)
+
+    assert models == get_mode_models("full")
+    assert not any("self-fallback" in r.message for r in caplog.records)
+
+
+def test_collision_via_brain_pin_alone_still_guarded() -> None:
+    """A user pin still counts as "contributing" to the collision even
+    when it's the ONLY pin set — the guard must still fire and rewrite
+    the fallback to something distinct from the (pinned) brain."""
+    from lazyclaw.llm.model_registry import get_mode_models
+
+    default_fallback = get_mode_models("full")["fallback"]
+    s = EcoSettings(mode="full", full_brain_model=default_fallback)
+    models = _resolve(s)
+
+    assert models["brain"] == default_fallback
+    assert models["fallback"] != default_fallback
+
+
+def test_no_distinct_fallback_available_leaves_as_is(caplog) -> None:
+    """When brain pin == fallback pin == the mode default fallback ==
+    the safe constant (HYBRID ships Haiku as its default fallback, which
+    IS _SAFE_FALLBACK_MODEL), there is no distinct fallback to rewrite
+    to. Leave resolved as-is and don't emit the "using X instead"
+    warning — it would be a lie."""
+    s = EcoSettings(
+        mode="hybrid",
+        hybrid_brain_model="claude-haiku-4-5-20251001",
+        hybrid_fallback_model="claude-haiku-4-5-20251001",
+    )
+    with caplog.at_level("WARNING"):
+        models = _resolve(s)
+
+    assert models["fallback"] == models["brain"] == "claude-haiku-4-5-20251001"
+    assert not any("using" in r.message and "instead" in r.message for r in caplog.records)

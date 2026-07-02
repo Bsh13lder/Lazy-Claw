@@ -12,6 +12,8 @@ const {
   extForMime,
   mimeForPath,
   buildSendPayload,
+  isNonContentMessage,
+  canonicalChatJid,
 } = require("../src/media.js");
 
 // ---------------------------------------------------------------------------
@@ -160,4 +162,75 @@ test("buildSendPayload: document requires fileName + mimetype", () => {
 
 test("buildSendPayload: unknown kind throws", () => {
   assert.throws(() => buildSendPayload("hologram", Buffer.from("x"), {}));
+});
+
+// ---------------------------------------------------------------------------
+// isNonContentMessage — filters "[media]" junk out of reads / previews
+// ---------------------------------------------------------------------------
+
+test("isNonContentMessage: plain text and media are content", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, message: { conversation: "hi" } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "2" }, message: { extendedTextMessage: { text: "yo" } } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "3" }, message: { imageMessage: { mimetype: "image/jpeg" } } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "4" }, message: { audioMessage: { ptt: true } } }), false);
+});
+
+test("isNonContentMessage: system stub (null body) is junk", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, messageStubType: 27, message: null }), true);
+  assert.equal(isNonContentMessage({ key: { id: "2" } }), true);
+  assert.equal(isNonContentMessage(null), true);
+  assert.equal(isNonContentMessage({}), true);
+});
+
+test("isNonContentMessage: reaction / protocol / senderKey / poll-vote are junk", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, message: { reactionMessage: { text: "👍" } } }), true);
+  assert.equal(isNonContentMessage({ key: { id: "2" }, message: { protocolMessage: { type: 0 } } }), true);
+  assert.equal(isNonContentMessage({ key: { id: "3" }, message: { senderKeyDistributionMessage: {} } }), true);
+  assert.equal(isNonContentMessage({ key: { id: "4" }, message: { pollUpdateMessage: {} } }), true);
+  assert.equal(isNonContentMessage({ key: { id: "5" }, message: { messageContextInfo: {} } }), true);
+});
+
+test("isNonContentMessage: housekeeping ALONGSIDE real content is kept", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, message: { senderKeyDistributionMessage: {}, conversation: "hi" } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "2" }, message: { messageContextInfo: {}, extendedTextMessage: { text: "yo" } } }), false);
+});
+
+test("isNonContentMessage: ephemeral / view-once unwrap before the check", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, message: { ephemeralMessage: { message: { conversation: "secret" } } } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "2" }, message: { ephemeralMessage: { message: { reactionMessage: { text: "❤️" } } } } }), true);
+});
+
+test("isNonContentMessage: unknown/future content types are KEPT (denylist, not allowlist)", () => {
+  assert.equal(isNonContentMessage({ key: { id: "1" }, message: { groupInviteMessage: { groupJid: "x@g.us" } } }), false);
+  assert.equal(isNonContentMessage({ key: { id: "2" }, message: { locationMessage: { degreesLatitude: 40 } } }), false);
+});
+
+// ---------------------------------------------------------------------------
+// canonicalChatJid — collapses @lid / device-suffix twins to one thread key
+// ---------------------------------------------------------------------------
+
+test("canonicalChatJid: @lid maps to its phone twin when linked", () => {
+  const map = new Map([["55911@lid", "34600111222@s.whatsapp.net"]]);
+  assert.equal(canonicalChatJid("55911@lid", map), "34600111222@s.whatsapp.net");
+});
+
+test("canonicalChatJid: unlinked @lid passes through", () => {
+  assert.equal(canonicalChatJid("99999@lid", new Map()), "99999@lid");
+  assert.equal(canonicalChatJid("99999@lid"), "99999@lid");
+});
+
+test("canonicalChatJid: strips device suffix on direct JIDs", () => {
+  assert.equal(canonicalChatJid("34600111222:12@s.whatsapp.net", new Map()), "34600111222@s.whatsapp.net");
+});
+
+test("canonicalChatJid: @lid linked to a :NN phone JID is fully normalized", () => {
+  const map = new Map([["55911@lid", "34600111222:5@s.whatsapp.net"]]);
+  assert.equal(canonicalChatJid("55911@lid", map), "34600111222@s.whatsapp.net");
+});
+
+test("canonicalChatJid: groups and plain DMs are unchanged", () => {
+  assert.equal(canonicalChatJid("120363000@g.us", new Map()), "120363000@g.us");
+  assert.equal(canonicalChatJid("34600111222@s.whatsapp.net", new Map()), "34600111222@s.whatsapp.net");
+  assert.equal(canonicalChatJid("", new Map()), "");
+  assert.equal(canonicalChatJid(null, new Map()), null);
 });

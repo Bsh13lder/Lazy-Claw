@@ -80,6 +80,42 @@ const MEDIA_KINDS = [
   ["stickerMessage", "sticker"],
 ];
 
+// Message content that is pure housekeeping — never a real inbox message.
+// A message whose ONLY content keys are these (or that has no body at all — a
+// system stub: group join/leave, subject change, e2e notice, missed call,
+// disappearing-mode toggle) must not surface as a "[media]" row or thread
+// preview. This is a DENYLIST (not an allowlist) so unknown / future content
+// types are KEPT — we only ever drop things we're certain are non-content.
+const NON_CONTENT_ONLY_KEYS = new Set([
+  "reactionMessage",
+  "encReactionMessage",
+  "protocolMessage",
+  "senderKeyDistributionMessage",
+  "pollUpdateMessage",
+  "keepInChatMessage",
+  "messageContextInfo",
+]);
+
+/**
+ * True when a raw Baileys message carries no user-facing content: a system
+ * stub (null body + messageStubType) or a message whose only keys are
+ * housekeeping (reactions, protocol edits/revokes, key distribution, poll
+ * votes, context metadata). Used to filter "[media]" junk out of reads,
+ * previews and the watcher mirror.
+ *
+ * Conservative by design — a message with ANY real content key (even
+ * alongside housekeeping, e.g. {senderKeyDistributionMessage, conversation})
+ * is kept. Ephemeral / view-once wrappers are unwrapped first.
+ */
+function isNonContentMessage(msg) {
+  if (!msg || typeof msg !== "object" || !msg.key) return true;
+  const inner = unwrapMessageContent(msg.message);
+  if (!inner || typeof inner !== "object") return true; // stub / system / empty
+  const keys = Object.keys(inner).filter((k) => inner[k] != null);
+  if (keys.length === 0) return true;
+  return keys.every((k) => NON_CONTENT_ONLY_KEYS.has(k));
+}
+
 /** Coerce Baileys fileLength (number | string | Long) to a plain number. */
 function _toNumber(value) {
   if (value == null) return null;
@@ -161,10 +197,38 @@ function buildSendPayload(kind, buffer, opts) {
   }
 }
 
+/**
+ * Canonicalize a chat JID for use as a STABLE thread key.
+ *
+ * WhatsApp now addresses the same person by both an ``@lid`` JID and their
+ * ``@s.whatsapp.net`` phone JID, and direct JIDs can carry a device suffix
+ * (``:NN``). Keyed raw, one human forks into two or three inbox threads. This
+ * maps an ``@lid`` to its phone twin when the link is known and strips the
+ * device suffix. Groups (``@g.us``) and still-unlinked ``@lid`` JIDs pass
+ * through unchanged. ``lidToPhone`` is the linked-pair Map (any object with
+ * ``.has``/``.get``); absent → only the device-suffix strip applies.
+ */
+function canonicalChatJid(jid, lidToPhone) {
+  if (!jid || typeof jid !== "string") return jid;
+  let out = jid;
+  if (out.endsWith("@lid") && lidToPhone && typeof lidToPhone.has === "function"
+      && lidToPhone.has(out)) {
+    out = lidToPhone.get(out) || out;
+  }
+  // Strip the device suffix on direct JIDs:
+  // "34600111222:12@s.whatsapp.net" → "34600111222@s.whatsapp.net".
+  if (out.includes("@s.whatsapp.net")) {
+    out = out.split("@")[0].split(":")[0] + "@s.whatsapp.net";
+  }
+  return out;
+}
+
 module.exports = {
   describeMedia,
   extForMime,
   mimeForPath,
   buildSendPayload,
   unwrapMessageContent,
+  isNonContentMessage,
+  canonicalChatJid,
 };

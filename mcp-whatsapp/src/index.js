@@ -43,6 +43,8 @@ const {
   extForMime,
   mimeForPath,
   buildSendPayload,
+  isNonContentMessage,
+  canonicalChatJid,
 } = require("./media.js");
 
 const LOG_PATH = path.join(DATA_DIR, "whatsapp-mcp.log");
@@ -1204,8 +1206,10 @@ function _formatMsg(msg) {
     chatName,
     // Stable chat identifier — `from` is a DISPLAY NAME (pushName) and must
     // never be used as a handle: the unified inbox stored it as the thread
-    // contact and later reads/sends failed to resolve it.
-    chat_jid: jid,
+    // contact and later reads/sends failed to resolve it. CANONICALIZED so an
+    // @lid JID and its @s.whatsapp.net phone twin (and any ":NN" device
+    // suffix) collapse to ONE thread instead of forking duplicates.
+    chat_jid: canonicalChatJid(jid, lidToPhone),
     muted: isMuted,
   };
 
@@ -1522,7 +1526,13 @@ async function handleRead(args) {
       let latestBody = "";
       let latestFrom = "";
       let incoming = 0;
+      let contentCount = 0;
       for (const msg of msgs) {
+        // Skip system stubs / reactions / protocol frames — they must not
+        // become the chat's preview or inflate the counts (they render as
+        // "[media]" junk otherwise).
+        if (isNonContentMessage(msg)) continue;
+        contentCount++;
         const ts = Number(msg.messageTimestamp || 0);
         if (!msg.key.fromMe) incoming++;
         if (ts > latestTs) {
@@ -1540,6 +1550,7 @@ async function handleRead(args) {
             "[media]";
         }
       }
+      // No content messages (e.g. a chat with only system events) — omit it.
       if (latestTs === 0) continue;
       chatSummary.push({
         name,
@@ -1548,7 +1559,7 @@ async function handleRead(args) {
         last_from: latestFrom,
         last_message: (latestBody || "").slice(0, 80),
         last_time: new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC",
-        total_messages: msgs.length,
+        total_messages: contentCount,
         incoming_messages: incoming,
         _ts: latestTs,
       });
@@ -1568,6 +1579,9 @@ async function handleRead(args) {
     for (const [jid, msgs] of messageStore) {
       if (jid === "status@broadcast") continue;
       for (const msg of msgs) {
+        // Keep the watcher mirror + cross-chat feed free of system stubs /
+        // reactions / protocol frames that would show as "[media]".
+        if (isNonContentMessage(msg)) continue;
         allRecent.push(msg);
       }
     }
@@ -1617,8 +1631,12 @@ async function handleRead(args) {
     });
   }
 
-  // Sort by timestamp descending, take most recent
-  const sorted = [...stored].sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+  // Drop system stubs / reactions / protocol frames, then sort by timestamp
+  // descending and take most recent — the opened thread shows only real
+  // messages, never "[media]" junk interleaved between them.
+  const sorted = [...stored]
+    .filter((m) => !isNonContentMessage(m))
+    .sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
   const results = sorted.slice(0, limit).map(_formatMsg);
   return ok({ contact: resolved.name, messages: results, connected: isReady });
 }
@@ -1640,10 +1658,14 @@ async function handleListChats(args) {
     const isLid = jid.endsWith("@lid");
     const displayName = c?.name || c?.notify || (isGroup ? `Group ${jid.split("@")[0].slice(-6)}` : null) || extractPhone(jid) || jid.split("@")[0];
 
-    // Find most recent message timestamp
+    // Find most recent CONTENT message timestamp (skip system stubs /
+    // reactions / protocol frames so the preview + count reflect real chat).
     let latestTs = 0;
     let latestPreview = "";
+    let contentCount = 0;
     for (const msg of msgs) {
+      if (isNonContentMessage(msg)) continue;
+      contentCount++;
       const ts = Number(msg.messageTimestamp || 0);
       if (ts > latestTs) {
         latestTs = ts;
@@ -1664,7 +1686,7 @@ async function handleListChats(args) {
       jid,
       type: isGroup ? "group" : isLid ? "lid" : "direct",
       muted: _isChatMuted(jid),
-      messages_cached: msgs.length,
+      messages_cached: contentCount,
       last_message_time: latestTs > 0 ? new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : null,
       last_message_preview: latestPreview,
     });

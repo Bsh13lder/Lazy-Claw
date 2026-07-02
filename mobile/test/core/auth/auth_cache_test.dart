@@ -6,6 +6,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/auth/auth_cache.dart';
+import 'package:lazyclaw_mobile/core/constants/app_constants.dart';
 import 'package:lazyclaw_mobile/models/user.dart';
 
 const _user = User(id: 'u1', username: 'sam', displayName: 'Sam', role: 'user');
@@ -44,6 +45,50 @@ void main() {
             baseUrl: _base),
         isNull,
       );
+    });
+  });
+
+  group('server-alias equivalence (host drift → no false re-login)', () {
+    // The self-hosted server is reachable as DuckDNS / <mac>.local / LAN-IP —
+    // all the SAME box. When the runtime gateway flips between those aliases,
+    // the offline identity cached under one must still unlock offline mode under
+    // another, else every host-flip forces a spurious re-login.
+    test('a cache written under one alias is readable under another', () {
+      final raw = encodeAuthCachePayload(_user, kLanFallbackBaseUrl);
+      final restored =
+          decodeAuthCachePayload(raw, baseUrl: kLanFallbackIpBaseUrl);
+      expect(restored, isNotNull);
+      expect(restored!.username, 'sam');
+    });
+
+    test('DuckDNS <-> LAN aliases are equivalent both directions', () {
+      expect(
+        decodeAuthCachePayload(encodeAuthCachePayload(_user, kDefaultBaseUrl),
+            baseUrl: kLanFallbackBaseUrl),
+        isNotNull,
+      );
+      expect(
+        decodeAuthCachePayload(
+            encodeAuthCachePayload(_user, kLanFallbackIpBaseUrl),
+            baseUrl: kDefaultBaseUrl),
+        isNotNull,
+      );
+    });
+
+    test('a genuinely different server is STILL rejected', () {
+      final raw = encodeAuthCachePayload(_user, kLanFallbackBaseUrl);
+      expect(
+        decodeAuthCachePayload(raw, baseUrl: 'http://192.168.5.99:18789'),
+        isNull,
+      );
+    });
+
+    test('InMemoryAuthUserCache honors alias-equivalence', () async {
+      final cache = InMemoryAuthUserCache();
+      await cache.write(_user, baseUrl: kLanFallbackBaseUrl);
+      expect(await cache.read(baseUrl: kLanFallbackIpBaseUrl), isNotNull);
+      expect(await cache.read(baseUrl: kDefaultBaseUrl), isNotNull);
+      expect(await cache.read(baseUrl: 'http://foreign:1'), isNull);
     });
   });
 

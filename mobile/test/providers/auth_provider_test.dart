@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 import 'package:lazyclaw_mobile/core/auth/auth_cache.dart';
+import 'package:lazyclaw_mobile/core/constants/app_constants.dart';
 import 'package:lazyclaw_mobile/providers/auth_provider.dart';
 import 'package:lazyclaw_mobile/repositories/auth_repository.dart';
 import 'package:lazyclaw_mobile/models/user.dart';
@@ -247,5 +248,25 @@ void main() {
     );
     await notifier.checkSession();
     expect(notifier.state.status, AuthStatus.unauthenticated);
+  });
+
+  test(
+      'host-flip across server aliases keeps the user signed in offline '
+      '(the "asks for login all the time" regression)', () async {
+    // Logged in under the .local alias, cache written there...
+    final cache = InMemoryAuthUserCache();
+    await cache.write(_user, baseUrl: kLanFallbackBaseUrl);
+    // ...the runtime gateway flips to the LAN-IP alias, which is unreachable at
+    // this instant (connectionError). Same box, different name → the offline
+    // identity must survive instead of dumping the user on the login screen.
+    final notifier = AuthNotifier(
+      AuthRepository(_ThrowingTransport(_wrapped(0, 'Connection failed'))),
+      cache: cache,
+      meTimeout: const Duration(seconds: 5),
+      baseUrl: () => kLanFallbackIpBaseUrl,
+    );
+    await notifier.checkSession();
+    expect(notifier.state.status, AuthStatus.authenticatedOffline);
+    expect(notifier.state.user?.username, 'sam');
   });
 }

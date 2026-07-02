@@ -20,6 +20,17 @@ const String kLanFallbackBaseUrl = 'http://BlckIt.local:18789';
 /// answer and the app moves on.
 const String kLanFallbackIpBaseUrl = 'http://192.168.0.12:18789';
 
+/// Every URL the ONE self-hosted server is reachable as. The runtime gateway
+/// rotates among these (DuckDNS front door ↔ mDNS name ↔ LAN IP) as the network
+/// changes, so anything host-keyed (the offline auth cache) must treat them as
+/// the SAME server — otherwise a host-flip forces a spurious re-login. Keep this
+/// in lock-step with `ServerConfig._candidates`.
+const List<String> kServerAliases = <String>[
+  kDefaultBaseUrl,
+  kLanFallbackBaseUrl,
+  kLanFallbackIpBaseUrl,
+];
+
 /// Compile-time version/build, used ONLY as a fallback. The real running
 /// version is read at runtime from `package_info_plus` inside the self-update
 /// service ([SelfUpdateService]); these constants apply only when that read

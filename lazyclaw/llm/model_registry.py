@@ -51,27 +51,26 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "fallback": "claude-cli",
     },
     "minimax": {
-        # MiniMax Token Plan ($20/mo Plus = 4,500 M2.7 req / 5h). ALL roles on
-        # MiniMax — no dependency on the unfunded Anthropic key.
+        # MiniMax Monthly Plus — the plan explicitly grants "Full access to the
+        # MiniMax model family (M3 / M2.7 / image / speech / music)", ~1.7B
+        # tokens/mo of M3, and a 1M context window (verified from the user's
+        # subscription page 2026-07-01). M3 IS covered — an earlier revert to
+        # M2.7 was based on a stale code comment and was WRONG.
         #
-        # BRAIN = M2.7, NOT M3 (reverted 2026-07-01). The M3-brain swap from
-        # e2c8c32 was a bundled "upgrade" — but that commit's OWN root cause
-        # was conversational (drop_capability_denial_history breaks the refusal
-        # loop, model-independent), not the model. M3 as brain regressed on
-        # three fronts: (1) it is NOT in the Token Plan 5h request bucket (that
-        # covers M2.7 / m2.7-highspeed only — see PAID section below), yet
-        # rate_limiter counts every minimax call against that one bucket, so the
-        # paid workhorse ran off-plan; (2) documented ~9-min hangs (router.py
-        # timeout note); (3) narrated/fabricated results after tool failures in
-        # production (2026-07-01 automation_specialist intent_flail). A live A/B
-        # confirmed BOTH models emit native tool_use in a clean context, so this
-        # is a reliability/cost choice, not an endpoint defect. M2.7 is the
-        # proven structured-tool path and is already the provider default_model.
-        # Vision is served by Apple Vision OCR (ask_vision), not the brain, so
-        # dropping M3's image input costs nothing here.
-        "brain":    "MiniMax-M2.7",
+        # brain = M3: newest, 1M context, multimodal, strongest agentic. worker
+        # = M2.7 for the cheaper/faster sub-turns. Both emit native tool_use
+        # (live A/B 2026-07-01). Provider hardening lives in router.py
+        # (tool_choice=auto, 150s timeout+escalation guarding M3's ~9-min hang).
+        #
+        # fallback = claude-sdk: when MiniMax errors/rate-limits, escalate to the
+        # user's Claude subscription via the Agent SDK ($0, native tool_use) —
+        # NOT the unfunded Anthropic API key. Its model FAMILY is resolved by
+        # eco_router._resolve_claude_cli_model from the `claude_brain_model`
+        # setting (default claude-sonnet-4-6); set claude_brain_model =
+        # "claude-opus-4-8" to make this fallback Opus 4.8 as intended.
+        "brain":    "MiniMax-M3",
         "worker":   "MiniMax-M2.7",
-        "fallback": "minimax-m2.5",
+        "fallback": "claude-sdk",
     },
 }
 

@@ -129,6 +129,69 @@ async def test_preserves_name_when_reupserted_with_none(config, user_id):
     assert updated["last_preview"] == "newer"
 
 
+async def test_soft_delete_legacy_duplicate_removes_unconfigured_stale_row(config, user_id):
+    """A stale row keyed on a legacy pushName is soft-deleted onto the canonical
+    JID-keyed thread, collapsing the visible duplicate."""
+    legacy = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="Maria 🌸",
+        contact_name="Maria 🌸", preview="old", increment_unread=True,
+    )
+    canonical = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="34611@s.whatsapp.net",
+        contact_name="Maria 🌸", preview="new",
+    )
+    removed = await thread_store.soft_delete_legacy_duplicate(
+        config, user_id, channel="whatsapp",
+        canonical_thread_id=canonical["id"], legacy_handle="Maria 🌸",
+    )
+    assert removed == legacy["id"]
+    live = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert [t["id"] for t in live] == [canonical["id"]]
+
+
+async def test_soft_delete_legacy_duplicate_preserves_configured_row(config, user_id):
+    """A legacy row the user set a standing instruction on is NEVER auto-deleted
+    (a name-keyed match isn't reliable identity proof — don't lose the setting)."""
+    legacy = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="Jose",
+        contact_name="Jose", preview="old",
+    )
+    await thread_store.set_thread_instruction(
+        config, user_id, legacy["id"], "always reply within an hour",
+    )
+    canonical = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="34622@s.whatsapp.net",
+        contact_name="Jose", preview="new",
+    )
+    removed = await thread_store.soft_delete_legacy_duplicate(
+        config, user_id, channel="whatsapp",
+        canonical_thread_id=canonical["id"], legacy_handle="Jose",
+    )
+    assert removed is None
+    live = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert legacy["id"] in [t["id"] for t in live]  # preserved
+
+
+async def test_soft_delete_legacy_duplicate_noop_without_match(config, user_id):
+    """No legacy row + never touches the canonical thread itself."""
+    canonical = await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="34611@s.whatsapp.net",
+        contact_name="Maria", preview="x",
+    )
+    # no legacy row keyed on "Maria"
+    assert await thread_store.soft_delete_legacy_duplicate(
+        config, user_id, channel="whatsapp",
+        canonical_thread_id=canonical["id"], legacy_handle="Maria",
+    ) is None
+    # even if legacy_handle equals the canonical's OWN handle, must not self-delete
+    assert await thread_store.soft_delete_legacy_duplicate(
+        config, user_id, channel="whatsapp",
+        canonical_thread_id=canonical["id"], legacy_handle="34611@s.whatsapp.net",
+    ) is None
+    assert await thread_store.get_thread(config, user_id, canonical["id"]) is not None
+    assert len(await thread_store.list_threads(config, user_id, channel="whatsapp")) == 1
+
+
 async def test_cross_user_isolation(config, user_id):
     """A thread upserted for user_id must not appear for a different user_id."""
     from lazyclaw.crypto.key_manager import create_user_dek

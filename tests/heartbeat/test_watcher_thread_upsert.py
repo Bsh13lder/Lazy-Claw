@@ -109,6 +109,90 @@ async def test_upsert_threads_instagram_uses_user_field(config, user_id):
 
 
 @pytest.mark.asyncio
+async def test_group_thread_titled_by_group_not_sender(config, user_id):
+    """A group thread must be titled with the GROUP name, never the last
+    sender (which flips per message). Uses `groupName`; a later message from a
+    different sender must not retitle it."""
+    items = [{
+        "id": "g1", "chat_jid": "120363000@g.us", "type": "group",
+        "from": "Alex", "participantName": "Alex", "pushName": "Alex",
+        "groupName": "Family", "chatName": "Family", "body": "dinner?",
+    }]
+    await _upsert_threads_for_items(config, user_id, "whatsapp", items)
+    threads = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert len(threads) == 1
+    assert threads[0]["contact_name"] == "Family"
+
+    items2 = [{
+        "id": "g2", "chat_jid": "120363000@g.us", "type": "group",
+        "from": "Maria", "participantName": "Maria", "pushName": "Maria",
+        "groupName": "Family", "chatName": "Family", "body": "yes!",
+    }]
+    await _upsert_threads_for_items(config, user_id, "whatsapp", items2)
+    threads = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert threads[0]["contact_name"] == "Family"  # sender flip must not retitle
+
+
+@pytest.mark.asyncio
+async def test_dm_resolver_name_wins_over_changed_pushname(config, user_id):
+    """A user rename is persisted to the contacts store, so the resolver returns
+    it — and that saved name must win over an incoming (even changed) pushName
+    on every poll. This is how a rename survives without clobbering the title."""
+    async def resolver(jid: str):
+        return "Mom" if "34611" in jid else None
+
+    items = [{"id": "m1", "chat_jid": "34611@s.whatsapp.net",
+              "from": "Maria", "pushName": "Maria", "body": "hi"}]
+    await _upsert_threads_for_items(
+        config, user_id, "whatsapp", items, jid_resolver=resolver,
+    )
+    # A later poll where the raw pushName changed — resolver name still wins.
+    items2 = [{"id": "m2", "chat_jid": "34611@s.whatsapp.net",
+               "from": "Maria 🌸", "pushName": "Maria 🌸", "body": "later"}]
+    await _upsert_threads_for_items(
+        config, user_id, "whatsapp", items2, jid_resolver=resolver,
+    )
+    threads = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert threads[0]["contact_name"] == "Mom"       # saved name preserved
+    assert threads[0]["last_preview"] == "later"     # preview still refreshes
+
+
+@pytest.mark.asyncio
+async def test_dm_uses_saved_contact_name_resolver(config, user_id):
+    """When a JID resolver is supplied, a DM thread is titled with the saved
+    contact name (matches the notification path) instead of the raw pushName."""
+    async def resolver(jid: str):
+        return "Saved Maria" if "34611" in jid else None
+
+    items = [{"id": "m1", "chat_jid": "34611@s.whatsapp.net",
+              "from": "rando pushname", "pushName": "rando pushname", "body": "hi"}]
+    await _upsert_threads_for_items(
+        config, user_id, "whatsapp", items, jid_resolver=resolver,
+    )
+    threads = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert threads[0]["contact_name"] == "Saved Maria"
+
+
+@pytest.mark.asyncio
+async def test_watcher_cleans_legacy_pushname_duplicate(config, user_id):
+    """A pre-chat_jid-fix row keyed on the pushName is soft-deleted when a new
+    message for the same contact arrives keyed on the canonical JID → ONE row,
+    the correct JID-keyed one."""
+    # Legacy stale row (keyed on the mutable display name, no instruction).
+    await thread_store.upsert_thread(
+        config, user_id, channel="whatsapp", contact_handle="Maria 🌸",
+        contact_name="Maria 🌸", preview="old", increment_unread=True,
+    )
+    # New message: canonical JID handle, pushName carried forward.
+    items = [{"id": "m9", "chat_jid": "34611@s.whatsapp.net",
+              "from": "Maria 🌸", "pushName": "Maria 🌸", "body": "new"}]
+    await _upsert_threads_for_items(config, user_id, "whatsapp", items)
+    live = await thread_store.list_threads(config, user_id, channel="whatsapp")
+    assert len(live) == 1
+    assert live[0]["contact_handle"] == "34611@s.whatsapp.net"
+
+
+@pytest.mark.asyncio
 async def test_batch_path_populates_channel_threads(config, user_id):
     """Items detected on the batch path must populate channel_threads.
 

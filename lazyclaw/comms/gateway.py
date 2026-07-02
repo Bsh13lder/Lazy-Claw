@@ -41,8 +41,13 @@ def _parse_messages(result: object) -> list[Msg]:
         out.append(Msg(
             sender=str(m.get("sender") or m.get("from") or m.get("author") or ""),
             text=str(m.get("content") or m.get("body") or m.get("text") or ""),
-            timestamp=str(m.get("timestamp") or m.get("ts") or m.get("date") or ""),
-            is_mine=bool(m.get("is_mine", False)),
+            # `time` + `fromMe` are the WhatsApp MCP's _formatMsg field names
+            # (mcp-whatsapp/src/index.js:1171,1202). Without these aliases every
+            # WhatsApp message rendered with an empty timestamp and is_mine=False
+            # — own replies showed as incoming, no times. Keep the generic keys
+            # first so other channels are unaffected.
+            timestamp=str(m.get("timestamp") or m.get("time") or m.get("ts") or m.get("date") or ""),
+            is_mine=bool(m.get("is_mine", m.get("fromMe", False))),
             id=str(msg_id) if msg_id else None,
             media=media if isinstance(media, dict) else None,
         ))
@@ -80,6 +85,18 @@ class ChannelGateway:
                 return ReadResult(ok=False, error=str(result))
             if result.get("error"):
                 return ReadResult(ok=False, error=str(result.get("error")))
+            # build_gateway._call launders any NON-JSON tool reply into
+            # {"status": "sent", "raw": <text>}. For a READ that means the tool
+            # returned unparseable text — typically a plain-text error like
+            # "Error in email_search: 'email'" (email/instagram raise KeyError
+            # when their required args are absent). Returning ok=True+empty made
+            # the inbox show a misleading "No messages yet"; a real read always
+            # carries a messages/items/emails key, so its absence here is a
+            # failure, not an empty thread.
+            if "raw" in result and not any(
+                k in result for k in ("messages", "items", "emails")
+            ):
+                return ReadResult(ok=False, error=str(result.get("raw")))
         return ReadResult(ok=True, messages=tuple(_parse_messages(result)))
 
     async def send(self, channel: str, contact: str, text: str) -> SendResult:

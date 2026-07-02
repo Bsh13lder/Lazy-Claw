@@ -12,6 +12,27 @@ def test_parse_messages_normalizes_shapes():
     assert msgs[0].sender == "Alice" and msgs[0].text == "hi" and msgs[0].is_mine is False
     assert msgs[1].text == "yo" and msgs[1].is_mine is True
 
+
+def test_parse_messages_whatsapp_formatmsg_shape():
+    """The WhatsApp MCP's _formatMsg emits `time` and `fromMe` (index.js:1171,1202),
+    NOT `timestamp`/`is_mine`. If the normalizer doesn't alias them, every
+    WhatsApp message renders with an empty timestamp and is_mine=False —
+    your own sent replies show up as incoming, with no time. Root cause of
+    the "messy and non-accurate" inbox (confirmed by 3 investigator agents)."""
+    raw = {"messages": [
+        # contact-side message
+        {"from": "Maria", "body": "hey", "time": "2026-05-25 20:37:14 UTC",
+         "fromMe": False, "id": "M1"},
+        # your own reply
+        {"from": "me", "body": "on my way", "time": "2026-05-25 20:38:02 UTC",
+         "fromMe": True, "id": "M2"},
+    ]}
+    msgs = _parse_messages(raw)
+    assert msgs[0].timestamp == "2026-05-25 20:37:14 UTC"
+    assert msgs[0].is_mine is False
+    assert msgs[1].timestamp == "2026-05-25 20:38:02 UTC"
+    assert msgs[1].is_mine is True, "own reply must be attributed to me, not the contact"
+
 @pytest.mark.asyncio
 async def test_read_thread_returns_msgs():
     call = AsyncMock(return_value={"messages": [{"sender": "Bob", "content": "yo", "timestamp": "9:00"}]})
@@ -69,6 +90,34 @@ async def test_read_thread_bare_error_field_is_typed_failure():
     res = await gw.read_thread("whatsapp", "+1")
     assert res.ok is False
     assert "not found" in (res.error or "")
+
+@pytest.mark.asyncio
+async def test_read_thread_laundered_nonjson_error_is_failure():
+    """email_search / instagram_read_dms raise a KeyError when their required
+    args (email+query / username) are missing, and the MCP returns a PLAIN-TEXT
+    error string. build_gateway._call then launders that into
+    {"status":"sent","raw":"Error ..."}. For a READ that's a FAILURE — returning
+    ok=True+empty made the inbox render a misleading 'No messages yet' for a
+    channel that actually has history (the silent-empty antipattern)."""
+    call = AsyncMock(return_value={
+        "status": "sent", "raw": "Error in email_search: 'email'",
+    })
+    gw = ChannelGateway(mcp_call=call)
+    res = await gw.read_thread("email", "bob@x.com")
+    assert res.ok is False
+    assert "email_search" in (res.error or "")
+
+
+@pytest.mark.asyncio
+async def test_read_thread_empty_messages_list_still_ok():
+    """Guard for the fix above: a genuinely-empty structured read
+    ({"messages": []}) must STAY ok=True — only the laundered non-JSON shape
+    (raw + no message-list key) is a failure."""
+    call = AsyncMock(return_value={"messages": []})
+    gw = ChannelGateway(mcp_call=call)
+    res = await gw.read_thread("whatsapp", "+1")
+    assert res.ok is True and res.messages == () and res.error is None
+
 
 def test_parse_messages_alt_list_keys():
     from lazyclaw.comms.gateway import _parse_messages

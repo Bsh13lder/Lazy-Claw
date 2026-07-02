@@ -276,6 +276,62 @@ async def mark_thread_read(
         return cur.rowcount > 0
 
 
+async def soft_delete_legacy_duplicate(
+    config: Config,
+    user_id: str,
+    *,
+    channel: str,
+    canonical_thread_id: str,
+    legacy_handle: str,
+) -> str | None:
+    """Soft-delete a stale duplicate thread keyed on a LEGACY display-name handle.
+
+    Before the chat_jid dedup fix, WhatsApp threads were keyed on the mutable
+    pushName / sender name, so one contact left a stale row keyed on their
+    display name alongside the correct JID-keyed thread — the "two rows for one
+    contact" the user sees. Real threads are keyed by JID / phone / email, so a
+    row whose handle EQUALS a display-name string is, in practice, only ever a
+    legacy mis-keyed dupe.
+
+    SAFETY: a name-keyed match is NOT a reliable identity proof (two contacts
+    can share a display name), so this NEVER carries the legacy row's data
+    forward, and it PRESERVES any legacy row the user configured with a standing
+    instruction — deleting that could silently lose a deliberate setting. Only
+    unconfigured stale dupes are auto-cleaned. Returns the soft-deleted id, or
+    None when there is no distinct, unconfigured legacy row to remove.
+    """
+    legacy_handle = (legacy_handle or "").strip()
+    if not legacy_handle:
+        return None
+    key = await get_user_dek(config, user_id)
+    legacy_hash = _handle_hash(key, legacy_handle)
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT id, instruction FROM channel_threads "
+            "WHERE user_id=? AND channel=? AND contact_handle_hash=? "
+            "AND deleted_at IS NULL AND id != ?",
+            (user_id, channel, legacy_hash, canonical_thread_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        legacy_instruction = (
+            decrypt_field(row["instruction"], key)
+            if "instruction" in row.keys() else None
+        )
+        if legacy_instruction:
+            # User configured this thread — leave it for them to manage.
+            return None
+        now = _now()
+        await db.execute(
+            "UPDATE channel_threads SET deleted_at=?, updated_at=? "
+            "WHERE id=? AND user_id=?",
+            (now, now, row["id"], user_id),
+        )
+        await db.commit()
+    return row["id"]
+
+
 async def delete_thread(
     config: Config, user_id: str, thread_id: str
 ) -> bool:

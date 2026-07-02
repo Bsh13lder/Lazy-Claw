@@ -175,6 +175,7 @@ async def _upsert_threads_for_items(
     user_id: str,
     service: str,
     new_items: list[dict],
+    jid_resolver: JidResolver | None = None,
 ) -> str | None:
     """Mirror each new channel message into channel_threads.
 
@@ -186,6 +187,12 @@ async def _upsert_threads_for_items(
       - email:    ``from`` is the sender address
       - instagram: ``user`` is the sender username (no ``from`` field)
       - generic:  ``from`` then ``handle`` as fallback
+
+    ``jid_resolver`` (WhatsApp only) maps a chat JID to the saved-contact name
+    so a DM thread is titled the same as the notification and a user rename
+    survives future polls (the rename is persisted to the contacts store, which
+    the resolver reads). Group threads are titled by the group, never the last
+    sender; an unsaved contact still falls back to its current pushName.
     """
     from lazyclaw.comms import thread_store
 
@@ -213,20 +220,36 @@ async def _upsert_threads_for_items(
         handle = str(handle).strip() if handle else ""
         if not handle:
             continue
-        # contact_name: WhatsApp pushName/participantName, email "from", instagram "user"
-        contact_name = (
-            item.get("pushName")
-            or item.get("participantName")
-            or item.get("from")
-            or item.get("user")
-        )
+        # contact_name resolution:
+        #   - GROUP: the group name, NEVER the last sender (which flips per
+        #     message). WhatsApp carries it in `groupName` / `chatName`.
+        #   - DM: the saved-contact name (via resolver, matches the
+        #     notification title + stays stable across pushName edits), then
+        #     pushName / participantName / from / user as fallbacks.
+        is_group = (item.get("type") == "group") or handle.endswith("@g.us")
+        if is_group:
+            contact_name = item.get("groupName") or item.get("chatName") or None
+        else:
+            contact_name = None
+            if jid_resolver is not None:
+                try:
+                    contact_name = await jid_resolver(handle)
+                except Exception:
+                    contact_name = None
+            contact_name = (
+                contact_name
+                or item.get("pushName")
+                or item.get("participantName")
+                or item.get("from")
+                or item.get("user")
+            )
         # preview: WhatsApp "body", email "subject" then "body", instagram "text"
         preview = (
             item.get("body")
             or item.get("text")
             or item.get("subject")
         )
-        await thread_store.upsert_thread(
+        result = await thread_store.upsert_thread(
             config,
             user_id,
             channel=service,
@@ -237,6 +260,26 @@ async def _upsert_threads_for_items(
             increment_unread=True,
         )
         latest_handle = handle
+        # Legacy-duplicate cleanup (WhatsApp): before the chat_jid dedup fix, a
+        # contact left a stale thread keyed on their pushName / sender name.
+        # Now that messages key on the canonical JID, soft-delete that
+        # unconfigured stale dupe so the inbox shows ONE row per contact.
+        if service == "whatsapp":
+            legacy_candidates = {
+                item.get("from"),
+                item.get("pushName"),
+                item.get("participantName"),
+            }
+            for legacy in legacy_candidates:
+                legacy_str = str(legacy).strip() if legacy else ""
+                if legacy_str and legacy_str != handle:
+                    try:
+                        await thread_store.soft_delete_legacy_duplicate(
+                            config, user_id, channel=service,
+                            canonical_thread_id=result["id"], legacy_handle=legacy_str,
+                        )
+                    except Exception:
+                        logger.debug("legacy dup cleanup skipped", exc_info=True)
     return latest_handle
 
 
@@ -386,7 +429,9 @@ async def check_mcp_watcher(
     # of double-incrementing unread_count.
     if config and user_id:
         try:
-            latest = await _upsert_threads_for_items(config, user_id, service, new_items)
+            latest = await _upsert_threads_for_items(
+                config, user_id, service, new_items, jid_resolver=jid_resolver,
+            )
             new_ctx["_latest_contact"] = latest
         except Exception:
             logger.debug("thread upsert skipped", exc_info=True)

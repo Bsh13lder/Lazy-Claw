@@ -3966,6 +3966,19 @@ class Agent:
         # and the late-inject gate let them through. Recovery wins over
         # the filter; everything else stays filtered.
         _specialist_first_exempt: set[str] = set()
+        # Keyword-injected deterministic intent (2026-07-03 task-CRUD
+        # routing incident): when the user's message unambiguously names
+        # task management ("_TASK_KEYWORDS" match → _wants_tasks, injected
+        # at ~3089), the SAME task tools are trusted to survive both the
+        # specialist-first filter (4180 block) and the thin-router
+        # post-action narrowing (4241/4733 blocks) so the brain can call
+        # add_task/delete_task/etc. directly on this turn instead of
+        # hallucinating against a filtered-out schema and either bailing
+        # ("tool doesn't exist") or dead-ending in a confusing background
+        # dispatch. Scoped to explicit keyword intent only — non-task
+        # turns are completely unaffected.
+        if _wants_tasks:
+            _specialist_first_exempt |= _TASK_TOOL_NAMES
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
         # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
@@ -4244,7 +4257,15 @@ class Agent:
                     # → DISPATCH-ONLY: drop search_tools/web_search/recall so the
                     # brain can't keep thrashing tool-discovery and MUST hand off
                     # to a worker (2026-06-24 workspace-mail 13-iter noise turn).
-                    _narrow_set = _META_TOOLS if _cap_by_mutation else _DISPATCH_ONLY_TOOLS
+                    # Keyword-injected deterministic-intent tools (e.g. task
+                    # tools on a _wants_tasks turn) ride along with the narrow
+                    # set — the same trust extended to the specialist-first
+                    # filter above; see _specialist_first_exempt population
+                    # (2026-07-03 task-CRUD routing incident).
+                    _narrow_set = (
+                        (_META_TOOLS if _cap_by_mutation else _DISPATCH_ONLY_TOOLS)
+                        | _specialist_first_exempt
+                    )
                     _narrow_label = "meta-only" if _cap_by_mutation else "dispatch-only"
                     _meta_only = [
                         t for t in tools
@@ -4733,6 +4754,7 @@ class Agent:
                             if (
                                 _thin_router_capped
                                 and tc.name not in _META_TOOLS
+                                and tc.name not in _specialist_first_exempt
                             ):
                                 # THIN-ROUTER cap: after the one inline
                                 # action only meta tools are callable.
@@ -4742,6 +4764,10 @@ class Agent:
                                 # upwork_inbox_check on 2026-06-10 16:20)
                                 # would otherwise re-enter through this
                                 # late-inject door and bypass the cap.
+                                # Keyword-injected deterministic-intent tools
+                                # (2026-07-03 task-CRUD routing incident) are
+                                # exempt — same trust as the narrow-set patch
+                                # above.
                                 _resurrect_blocked.append(tc.name)
                                 continue
                             if (

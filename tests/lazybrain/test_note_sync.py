@@ -242,3 +242,30 @@ async def test_deleted_at_column_exists_in_db(cfg):
         row = await db.execute("PRAGMA table_info(notes)")
         columns = [r[1] for r in await row.fetchall()]
     assert "deleted_at" in columns, "deleted_at column must be added by migration"
+
+
+# ---------------------------------------------------------------------------
+# 4. Route ordering: /notes/changes must not be shadowed by /notes/{note_id}
+# ---------------------------------------------------------------------------
+
+async def test_notes_changes_route_declared_before_note_id_route():
+    """FastAPI matches routes in declaration order. The static
+    ``/notes/changes`` route MUST be declared before the parametrised
+    ``/notes/{note_id}`` route — otherwise ``GET /notes/changes`` binds
+    ``note_id="changes"`` and 404s, silently breaking mobile offline sync
+    (2026-07-03 incident). Import-only regression guard (async only to
+    satisfy the module-level asyncio mark).
+    """
+    from lazyclaw.gateway.routes.lazybrain import router
+
+    paths = [
+        getattr(r, "path", "") for r in router.routes
+    ]
+    changes_path = "/api/lazybrain/notes/changes"
+    note_id_path = "/api/lazybrain/notes/{note_id}"
+    assert changes_path in paths, "the /notes/changes route must be registered"
+    assert note_id_path in paths, "the /notes/{note_id} route must be registered"
+    assert paths.index(changes_path) < paths.index(note_id_path), (
+        "/notes/changes must be declared BEFORE /notes/{note_id} or FastAPI "
+        "will match 'changes' as a note_id and 404 the delta-sync feed"
+    )

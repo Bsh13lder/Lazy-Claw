@@ -710,6 +710,158 @@ _F1_MAX_RETRIES: int = 2
 _F1_CONFAB_MAX_RETRIES: int = 2
 
 
+# ── Dropped-channel confabulation guard (2026-07-04 web Upwork) ───────────
+# The two F1 gates above only fire when a channel-read tool ACTUALLY RAN
+# (both are wrapped in `any(_is_channel_read_tool(n) for n in
+# _tool_call_history)`). The 2026-07-04 incident slipped through that hole:
+# the brain requested `browser` then `upwork_inbox_check` — BOTH were dropped
+# as hallucinated (not in the current toolset), so nothing landed in
+# `_tool_call_history`, the turn read as a non-channel turn, and F1 stayed
+# observation-only. With ZERO live channel data the brain still shipped a
+# fabricated inbox table ("1 conversation room … | Amit K | …"). This guard
+# closes that hole with a structural invariant: a channel read requested-but-
+# dropped + no channel read that ran = no live channel data, so the reply
+# MUST NOT report inbox/message/sender/room/count contents. Cap mirrors the
+# sibling F1 retry caps (2 grounding corrections, then a safe fallback).
+_F1_DROPPED_CHANNEL_MAX_RETRIES: int = 2
+
+# Honest, content-free reply shipped when the brain keeps fabricating channel
+# data after the retry budget is spent. Deliberately free of any inbox/
+# message assertion so `_draft_asserts_channel_data` treats it as clean.
+_DROPPED_CHANNEL_FALLBACK: str = (
+    "I wasn't able to read that channel just now — the read didn't go "
+    "through. Want me to try again, or hand it to the specialist?"
+)
+
+# "This reply asserts the CONTENTS of a channel" — positive fabrication
+# tells the 2026-07-04 draft carried: a "conversation room" phrase, an
+# "Unread Count" table header, a "Room ID", a "message from <Name>", or an
+# explicit count ("detected 1 conversation"). Matched case-insensitively.
+_CHANNEL_CONTENT_ASSERTION_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"conversation\s+rooms?"
+    r"|unread\s+counts?"
+    r"|room\s+id"
+    r"|messages?\s+from\s+\w"
+    r"|\b\d+\s+(?:new\s+)?(?:conversations?|messages?|unread|rooms?|dms?|chats?)\b"
+    r"|\bdetected\s+\d+"
+    r")",
+    re.IGNORECASE,
+)
+
+# Inability phrasing — when present the reply is HONESTLY reporting it
+# couldn't reach the channel, NOT fabricating contents. Such replies ship
+# unchanged (we only force the fallback when the draft CLEARLY still lies).
+_CHANNEL_INABILITY_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"couldn'?t|could\s+not|can'?t|cannot"
+    r"|was(?:n'?t|\s+not)\s+able|wasn'?t\s+able|not\s+able\s+to"
+    r"|un(?:able|available)"
+    r"|didn'?t\s+(?:go\s+through|work|load)|did\s+not\s+go\s+through"
+    r"|failed\s+to\s+(?:read|access|reach|load|fetch|retrieve)"
+    r"|no\s+access"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _draft_asserts_channel_data(text: str) -> bool:
+    """Conservative check: does ``text`` assert the CONTENTS of a channel?
+
+    Used only after the dropped-channel retry budget is exhausted, to decide
+    whether to force the honest fallback. Errs toward NOT firing: an honest
+    "couldn't access" reply (even one that names the inbox) returns False so
+    it ships unchanged; only a positive assertion of invented contents —
+    a sender/room/unread table, a "conversation room" claim, a "message from
+    X", or an explicit count — returns True. 2026-07-04 web Upwork incident.
+    """
+    if not text:
+        return False
+    # An inability statement is honest reporting, not fabrication.
+    if _CHANNEL_INABILITY_RE.search(text):
+        return False
+    if _CHANNEL_CONTENT_ASSERTION_RE.search(text):
+        return True
+    # A markdown table row carrying channel-ish headers is a strong tell
+    # (the incident shipped a `| Sender | Room ID | Unread Count |` table).
+    for line in text.splitlines():
+        if line.count("|") >= 2 and re.search(
+            r"sender|room|unread|conversation|message", line, re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+def _dropped_channel_confab_guard_active(
+    final_content: str,
+    channel_read_requested_but_dropped: bool,
+    tool_call_history: list[str],
+) -> bool:
+    """True when the brain has NO live channel data yet shipped a draft.
+
+    Fires only when ALL hold this turn (2026-07-04 web Upwork incident):
+      * a non-empty draft is about to ship, AND
+      * a channel-READ tool was requested but DROPPED as hallucinated
+        (``channel_read_requested_but_dropped`` — sticky per turn), AND
+      * NO channel-read tool actually ran (nothing in ``tool_call_history``
+        is a channel read) — if one ran, the brain HAS live data and the
+        existing F1 gates own the turn.
+
+    Deliberately does NOT inspect the draft's wording — that keeps this a
+    broad safety net that nudges EVERY dropped-channel draft toward
+    grounding, even fabrications the content heuristic would miss.
+    """
+    if not final_content:
+        return False
+    if not channel_read_requested_but_dropped:
+        return False
+    if any(_is_channel_read_tool(n) for n in tool_call_history):
+        return False
+    return True
+
+
+def _build_dropped_channel_correction() -> str:
+    """System-style correction for a dropped-channel confabulation retry."""
+    return (
+        "[SYSTEM: The channel-read tool you tried is NOT available and did "
+        "NOT run this turn — you have NO live data from that channel. You "
+        "MUST NOT invent, fabricate, or report ANY messages, senders, "
+        "conversations, rooms, inbox entries, unread counts, or tables of "
+        "channel contents. Either: (1) call `delegate` to hand this off to "
+        "the channel specialist, or (2) reply honestly that you couldn't "
+        "access the channel and offer to retry. Do not guess what the "
+        "inbox contains.]"
+    )
+
+
+def _dropped_channel_ship_decision(
+    final_content: str,
+    channel_read_requested_but_dropped: bool,
+    tool_call_history: list[str],
+    retries: int,
+    max_retries: int = _F1_DROPPED_CHANNEL_MAX_RETRIES,
+) -> tuple[str, str]:
+    """Decide how to handle a draft when a channel read was dropped.
+
+    Returns ``(action, payload)``:
+      * ``("ship", final_content)`` — guard inactive, or (after the cap) the
+        draft no longer asserts channel data → ship unchanged.
+      * ``("retry", correction)``   — re-roll the brain with a grounding
+        correction (budget remains).
+      * ``("replace", fallback)``   — retries exhausted AND the draft still
+        fabricates channel data → ship the honest fallback instead.
+    """
+    if not _dropped_channel_confab_guard_active(
+        final_content, channel_read_requested_but_dropped, tool_call_history,
+    ):
+        return ("ship", final_content)
+    if retries < max_retries:
+        return ("retry", _build_dropped_channel_correction())
+    if _draft_asserts_channel_data(final_content):
+        return ("replace", _DROPPED_CHANNEL_FALLBACK)
+    return ("ship", final_content)
+
+
 def _pop_confabulated_draft_for_retry(
     messages: list[LLMMessage],
 ) -> LLMMessage | None:
@@ -3860,6 +4012,18 @@ class Agent:
         _confab_injected: bool = False
         _confab_retries: int = 0
 
+        # Dropped-channel confabulation guard (2026-07-04 web Upwork). Sticky
+        # per-turn flag: set True at the hallucinated-tool drop site when a
+        # channel-READ tool the brain requested was dropped (never ran). Paired
+        # with `_f1_dropped_channel_retries` (capped at
+        # `_F1_DROPPED_CHANNEL_MAX_RETRIES`). When the flag is set AND no
+        # channel-read tool actually ran this turn, the brain has NO live
+        # channel data — the ship guard near the F1 phase-1 gate forces a
+        # grounding correction, then an honest fallback. See module-level
+        # `_dropped_channel_ship_decision`.
+        _channel_read_requested_but_dropped = False
+        _f1_dropped_channel_retries = 0
+
         # Auto-promote-to-background nudge: when a foreground turn drags
         # past N tool-using iterations and the brain hasn't yet called
         # run_background, inject a system message that strongly suggests
@@ -4832,6 +4996,18 @@ class Agent:
                             "Dropped %d hallucinated tool calls (not in current tools): %s",
                             _dropped, _dropped_names,
                         )
+                        # 2026-07-04 web Upwork dropped-channel confabulation:
+                        # if the brain requested a channel-READ tool that got
+                        # dropped here (never ran), remember it (sticky). With
+                        # no live channel data it must not report inbox/message
+                        # contents downstream — the ship guard near the F1
+                        # phase-1 gate enforces that. Set on BOTH the mixed and
+                        # all-dropped branches; the downstream guard still
+                        # no-ops if a channel read later runs successfully.
+                        if any(
+                            _is_channel_read_tool(n) for n in _dropped_names
+                        ):
+                            _channel_read_requested_but_dropped = True
                         if _valid_calls:
                             # Mixed success — reset the hallucination counter.
                             _halluc_retries = 0
@@ -5312,6 +5488,58 @@ class Agent:
                         _iter_role = "escalation" if _fallback_name else ROLE_BRAIN
                         streamed_content = ""
                         continue  # Retry with a different provider
+
+                    # Dropped-channel confabulation guard (2026-07-04 web
+                    # Upwork). The F1 gates below only fire when a channel-read
+                    # tool ACTUALLY RAN. The 2026-07-04 incident dropped
+                    # `browser` + `upwork_inbox_check` as hallucinated (neither
+                    # ran) then fabricated a "1 conversation room | Amit K"
+                    # inbox table from ZERO live data — a non-channel turn to
+                    # the F1 gates, so they stayed observation-only. This guard
+                    # fires when a channel read was requested-but-dropped and
+                    # none ran: force a grounding correction (delegate or admit
+                    # no access), then an honest fallback after the cap. See
+                    # module-level `_dropped_channel_ship_decision`.
+                    _dc_action, _dc_payload = _dropped_channel_ship_decision(
+                        _final_content,
+                        _channel_read_requested_but_dropped,
+                        _tool_call_history,
+                        _f1_dropped_channel_retries,
+                    )
+                    if _dc_action == "retry":
+                        _f1_dropped_channel_retries += 1
+                        logger.warning(
+                            "[F1-dropped-channel] channel read requested but "
+                            "dropped (no live data) — injecting grounding "
+                            "correction (retry %d/%d). draft_head=%r",
+                            _f1_dropped_channel_retries,
+                            _F1_DROPPED_CHANNEL_MAX_RETRIES,
+                            (_final_content or "")[:160],
+                        )
+                        messages.append(LLMMessage(
+                            role="assistant", content=_final_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="user", content=_dc_payload,
+                        ))
+                        streamed_content = ""
+                        continue
+                    if _dc_action == "replace":
+                        # Retries exhausted and the draft STILL fabricates
+                        # channel contents. Ship the honest fallback instead of
+                        # the invented inbox. Override both the user-facing text
+                        # and `_history_content` (the version appended to
+                        # all_new_messages + returned to the user).
+                        logger.warning(
+                            "[F1-dropped-channel-degraded] retries exhausted "
+                            "(%d/%d); draft still fabricates channel data — "
+                            "shipping honest fallback. draft_head=%r",
+                            _f1_dropped_channel_retries,
+                            _F1_DROPPED_CHANNEL_MAX_RETRIES,
+                            (_final_content or "")[:160],
+                        )
+                        _final_content = _dc_payload
+                        _history_content = _dc_payload
 
                     # F1 grounding enforcement — when a channel-read tool was
                     # called this turn, the reply MUST quote the tool result,

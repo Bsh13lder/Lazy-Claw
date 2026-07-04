@@ -32,6 +32,87 @@ def _looks_like_json_plan(text: str) -> bool:
             return False
     return False
 
+
+# ─── MiniMax "narrating fabricated tool machinery" recovery ──────────────────
+#
+# 2026-07-04 web Upwork confabulation incident: asked to check Upwork, MiniMax
+# M2.7 returned text-only despite 49 tools attached and NARRATED a fabricated
+# tool result — prose describing MCP/browser machinery plus a markdown table of
+# invented inbox rows ("Amit K" — the inbox was actually EMPTY). This shape is
+# NOT a fenced/bare JSON plan, so `_looks_like_json_plan` returned False, the
+# forced-tool retry never fired, and the fabrication shipped to the user.
+#
+# `_looks_like_tool_narration` catches this second confabulation shape so the
+# same bounded one-shot `tool_choice={"type": "any"}` retry fires for it too.
+# The retry FORCES a tool call, so the predicate is deliberately high-precision:
+# a false positive on a legitimate final answer wastes a tool call.
+
+# Case-insensitive substring markers that only surface when the model is
+# narrating tool/MCP/browser machinery it never actually drove. Kept as a single
+# module-level tuple so new confabulation phrasings can be appended in one place.
+_TOOL_NARRATION_MARKERS: tuple[str, ...] = (
+    "here's everything the mcp returned",
+    "here's what the mcp returned",
+    "the mcp returned",
+    "mcp is fully connected",
+    "the browser is stuck",
+    "from the mcp",
+    "the tool returned",
+    "raw result from",
+    "here's what the tool",
+)
+
+# Markdown-table header column-sets that a model can only produce from a live
+# tool read — a "Room ID" column, or the Sender + Timestamp + Snippet triad.
+# Each entry is a set of lowercased cell labels that must ALL be present in one
+# header row for the table to count as fabricated tool-result machinery.
+_TOOL_TABLE_COLUMN_SIGNALS: tuple[frozenset[str], ...] = (
+    frozenset({"room id"}),
+    frozenset({"sender", "timestamp", "snippet"}),
+)
+
+
+def _has_tool_machinery_table(text: str) -> bool:
+    """True when a markdown table header row presents tool-oriented columns.
+
+    A legit comparison table (e.g. "| Feature | Playwright | Selenium |")
+    carries none of the `_TOOL_TABLE_COLUMN_SIGNALS`, so it returns False.
+    """
+    for line in text.splitlines():
+        # A markdown table header row is pipe-delimited with 2+ separators.
+        if line.count("|") < 2:
+            continue
+        cells = {c.strip().lower() for c in line.split("|") if c.strip()}
+        if any(required <= cells for required in _TOOL_TABLE_COLUMN_SIGNALS):
+            return True
+    return False
+
+
+def _looks_like_tool_narration(text: str) -> bool:
+    """True when a text-only reply NARRATES fabricated tool/MCP/browser results.
+
+    See the 2026-07-04 web Upwork confabulation incident above. Fires on two
+    high-precision signals:
+
+      1. A machinery-narration phrase from ``_TOOL_NARRATION_MARKERS`` (e.g.
+         "here's everything the mcp returned", "the browser is stuck").
+      2. A markdown table whose HEADER row presents tool-oriented columns —
+         a "Room ID" column, or the Sender + Timestamp + Snippet triad — data
+         the model cannot have without a live tool read.
+
+    Deliberately conservative: ordinary prose, greetings, and legit comparison
+    tables must return False so the forced-tool retry never fires on a genuine
+    final answer.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    lowered = t.lower()
+    if any(marker in lowered for marker in _TOOL_NARRATION_MARKERS):
+        return True
+    return _has_tool_machinery_table(t)
+
+
 # ─── MiniMax M2 / M2.7 tool-call recovery ────────────────────────────────────
 #
 # M2 is hardcoded to emit tool calls in its proprietary XML format:
@@ -384,9 +465,11 @@ class AnthropicProvider(BaseLLMProvider):
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
-        # Bounded retry loop: at most one extra request, fired only when
-        # MiniMax narrates a fenced/bare JSON plan as prose instead of
-        # emitting tool_use (2026-07-02 incident — see _looks_like_json_plan).
+        # Bounded retry loop: at most one extra request, fired when MiniMax
+        # narrates instead of emitting tool_use, in EITHER of two confabulation
+        # shapes — a fenced/bare JSON plan (2026-07-02 incident — see
+        # _looks_like_json_plan) OR fabricated tool-result narration (2026-07-04
+        # web Upwork incident — see _looks_like_tool_narration).
         # The retry re-issues the same create_kwargs with tool_choice forced
         # to {"type": "any"}; its response replaces the first unconditionally,
         # even if still text-only — never loop past one retry.
@@ -468,12 +551,16 @@ class AnthropicProvider(BaseLLMProvider):
                 response.model and "MiniMax" in response.model
                 and not parsed_tool_calls and joined_text and tools_payload
                 and not _plan_retry_done
-                and _looks_like_json_plan(joined_text)
+                and (
+                    _looks_like_json_plan(joined_text)
+                    or _looks_like_tool_narration(joined_text)
+                )
             ):
                 _plan_retry_done = True
                 _log.warning(
-                    "MiniMax %s narrated a JSON plan instead of tool_use — "
-                    "retrying once with tool_choice={'type': 'any'}",
+                    "MiniMax %s narrated a plan/fabricated tool-result as prose "
+                    "instead of tool_use — retrying once with "
+                    "tool_choice={'type': 'any'}",
                     response.model,
                 )
                 create_kwargs["tool_choice"] = {"type": "any"}

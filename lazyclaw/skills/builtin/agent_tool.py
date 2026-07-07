@@ -186,6 +186,7 @@ class AgentDispatchSkill(BaseSkill):
                 "timeout": {
                     "type": "integer",
                     "default": _DEFAULT_TIMEOUT_S,
+                    "minimum": _MIN_TIMEOUT_S,
                     "maximum": _MAX_TIMEOUT_S,
                     "description": "Sync budget in seconds (default 120).",
                 },
@@ -281,16 +282,23 @@ class AgentDispatchSkill(BaseSkill):
 
         async def _acquire_and_run():
             async with _loop_semaphore():
-                return await team_runner.run_specialist(
-                    user_id=user_id,
-                    specialist=spec,
-                    task=task,
-                    registry=self._registry,
-                    eco_router=self._eco_router,
-                    permission_checker=self._permission_checker,
-                    callback=wrapped_callback,
-                    task_id=task_id,
-                )
+                # Single-depth: mark this execution context as a subagent so
+                # anything the specialist reaches (including a custom
+                # specialist that allowlists `agent`) cannot re-dispatch.
+                token = _IS_SUBAGENT.set(True)
+                try:
+                    return await team_runner.run_specialist(
+                        user_id=user_id,
+                        specialist=spec,
+                        task=task,
+                        registry=self._registry,
+                        eco_router=self._eco_router,
+                        permission_checker=self._permission_checker,
+                        callback=wrapped_callback,
+                        task_id=task_id,
+                    )
+                finally:
+                    _IS_SUBAGENT.reset(token)
 
         try:
             result = await asyncio.wait_for(

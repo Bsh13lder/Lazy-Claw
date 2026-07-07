@@ -148,6 +148,27 @@ def test_clip_noop_under_cap():
     assert clip_agent_result("short") == "short"
 
 
+def test_sync_marks_subagent_context(monkeypatch):
+    """run_specialist executes with _IS_SUBAGENT=True; caller context stays False."""
+    seen = {}
+
+    async def _probe(**kwargs):
+        seen["flag"] = _IS_SUBAGENT.get()
+        return _ok_result()
+
+    monkeypatch.setattr("lazyclaw.teams.runner.run_specialist", _probe)
+    skill = _make_skill()
+
+    async def _run():
+        out = await skill.execute("u1", {"agent_type": "explore", "task": "x"})
+        return out, _IS_SUBAGENT.get()
+
+    out, after = asyncio.run(_run())
+    assert seen["flag"] is True
+    assert after is False
+    assert "all done" in out
+
+
 def test_concurrency_semaphore(monkeypatch):
     """6 concurrent max by default; excess queue."""
     import lazyclaw.skills.builtin.agent_tool as at

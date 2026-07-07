@@ -163,8 +163,20 @@ async def update_task_route(
     body: UpdateTaskBody = Body(default_factory=UpdateTaskBody),
     user: User = Depends(get_current_user),
 ):
-    """Patch an existing task. Only non-null fields are applied."""
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    """Patch an existing task.
+
+    Uses ``exclude_unset`` so a client can CLEAR a field by sending an explicit
+    ``null`` (e.g. ``{"due_date": null}``); a field the request omits is left
+    untouched. The old ``if v is not None`` filter conflated "absent" with
+    "clear", so clearing due_date / reminder_at / description from the web
+    silently 400'd. The store already writes NULL for a None value (and tears
+    down the reminder job when reminder_at is cleared). Mobile only ever sends
+    the fields it changed (never an explicit null), so it is unaffected.
+    """
+    updates = body.model_dump(exclude_unset=True)
+    # Never let a stray null blank the title — the one always-required field.
+    if "title" in updates and not (updates["title"] or "").strip():
+        updates.pop("title")
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     updated = await update_task(_config, user.id, task_id, **updates)

@@ -94,6 +94,7 @@ class DispatchSubagentsSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
+            "LEGACY — prefer the `agent` tool. "
             "Fire 2–5 TRULY DIFFERENT background tasks and return immediately "
             "with task IDs. Subagents appear in the Activity panel under "
             "lane='subagent' and stream results back as `background_done` "

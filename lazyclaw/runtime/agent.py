@@ -160,7 +160,7 @@ def _infer_browser_role(message: str) -> str:
 # discovers them via `search_tools` when genuinely needed.
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
-    "dispatch_subagents", "run_background",
+    "dispatch_subagents", "run_background", "agent",
     "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
 })
@@ -169,6 +169,7 @@ _BASE_TOOL_NAMES = frozenset({
 # Brain only needs delegate (dispatch workers) + search + memory
 _LOCAL_TOOL_NAMES = frozenset({
     "delegate", "web_search", "recall_memories", "save_memory", "search_tools",
+    "agent",
 })
 
 # MiniMax M2.7 narrates actions as text instead of emitting tool_use blocks
@@ -181,7 +182,7 @@ _MINIMAX_MAX_TOOLS = 24
 # inline non-meta (domain) tool call, the brain is narrowed to ONLY these so
 # it must delegate the rest. Used only when LAZYCLAW_THIN_ROUTER is set.
 _META_TOOLS = frozenset({
-    "delegate", "dispatch_subagents", "run_background",
+    "delegate", "dispatch_subagents", "run_background", "agent",
     "search_tools", "web_search", "recall_memories", "save_memory",
     "get_agent_status",
 })
@@ -193,7 +194,7 @@ _META_TOOLS = frozenset({
 # search_tools + a non-existent tool, 13 iterations, 1670-char noise reply
 # instead of a clean delegate-and-summarize).
 _DISPATCH_ONLY_TOOLS = frozenset({
-    "delegate", "dispatch_subagents", "run_background",
+    "delegate", "dispatch_subagents", "run_background", "agent",
 })
 
 # Specialist-first brain (ADR-0005 Phase 5a): behind this flag the brain
@@ -1260,6 +1261,13 @@ _MAX_TOOL_RESULT_CHARS = 4000
 # ~100 messages of a typical chat without blowing up cache budget.
 _MAX_TOOL_RESULT_CHARS_CHANNEL_READ = 50000
 
+# Unified `agent` tool results are load-bearing synthesis input (the
+# whole point of a sync sub-agent is that the brain reads its output).
+# Mirrors skills/builtin/agent_tool.MAX_AGENT_RESULT_CHARS — the skill
+# already clips with an explicit marker; this cap only guarantees the
+# generic capper below never re-chops it to 4K.
+_MAX_TOOL_RESULT_CHARS_AGENT = 12000
+
 # Substring match against the tool name to pick which cap applies.
 # Mirrored from f1_content_verifier._CHANNEL_READ_TOOL_PATTERNS so
 # both modules agree on what counts as a channel read.
@@ -1804,11 +1812,12 @@ def _cap_tool_result(result: str, tool_name: str | None = None) -> str:
     """
     if not result:
         return result
-    cap = (
-        _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
-        if _is_channel_read_tool_name(tool_name)
-        else _MAX_TOOL_RESULT_CHARS
-    )
+    if _is_channel_read_tool_name(tool_name):
+        cap = _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
+    elif tool_name == "agent":
+        cap = _MAX_TOOL_RESULT_CHARS_AGENT
+    else:
+        cap = _MAX_TOOL_RESULT_CHARS
     if len(result) <= cap:
         return result
     truncated = result[:cap]
@@ -2898,6 +2907,26 @@ class Agent:
             bg_skill._task_runner = self._task_runner
             bg_skill._caller_depth = self._depth
             self.registry.register(bg_skill)
+
+            # Unified `agent` dispatch tool (Claude Code dispatcher
+            # pattern) — sync parallel fan-out with in-turn results,
+            # background opt-in. Shares the turn's fanout group so
+            # background siblings consolidate with run_background's.
+            from lazyclaw.skills.builtin.agent_tool import AgentDispatchSkill
+
+            agent_dispatch_skill = AgentDispatchSkill(
+                config=self.config,
+                registry=self.registry,
+                eco_router=self.eco_router,
+                permission_checker=self.executor._checker if self.executor else None,
+                callback=cb,
+                team_lead=self._team_lead,
+                task_runner=self._task_runner,
+                chat_session_id=chat_session_id,
+                fanout_group_id=_bg_fanout_group_id,
+            )
+            agent_dispatch_skill._caller_depth = self._depth
+            self.registry.register(agent_dispatch_skill)
 
         # Initialize channel state (used by tool nudge later, must exist for all paths)
         _matched_channels: list[str] = []
@@ -5271,6 +5300,10 @@ class Agent:
                         # delegate is a real fire-and-forget dispatch too —
                         # a post-delegate "I've dispatched" is truthful.
                         and "delegate" not in _called_tool_names
+                        # `agent` sync calls already returned their result
+                        # this turn; bg calls are fire-and-forget like the
+                        # others above — either way "dispatched" is truthful.
+                        and "agent" not in _called_tool_names
                     ):
                         _halluc_retries += 1
                         _matched_phrase = _claim_match.group(0)[:60]
@@ -5326,6 +5359,7 @@ class Agent:
                         and "dispatch_subagents" not in _called_tool_names
                         # Same for delegate — it already dispatched a worker.
                         and "delegate" not in _called_tool_names
+                        and "agent" not in _called_tool_names
                         and not _is_meta_question(message)
                     ):
                         logger.warning(
@@ -6954,6 +6988,10 @@ class Agent:
                     # to a background worker spawns a THIRD redundant
                     # executor — the 2026-06-08 14:18 triple-execution bug.
                     and "delegate" not in _called_tool_names
+                    # `agent` (unified dispatch) — sync calls return their
+                    # results in-turn and bg calls already went to the task
+                    # runner; promoting either is redundant.
+                    and "agent" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
                     and not _only_readonly_so_far
                     # THIN-ROUTER replaces AUTO-PROMOTE with the earlier

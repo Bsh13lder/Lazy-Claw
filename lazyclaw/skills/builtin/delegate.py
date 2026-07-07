@@ -76,6 +76,7 @@ class DelegateSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
+            "LEGACY — prefer the `agent` tool. "
             "Delegate a sub-task to a specialist agent. Use when you need "
             "browser automation (navigate, click, read pages), web research "
             "(search + read files), or code/skill creation. The specialist "

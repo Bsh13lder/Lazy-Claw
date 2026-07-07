@@ -254,3 +254,17 @@ def test_background_does_not_consume_sync_cap():
         "agent_type": "explore", "task": "x", "run_in_background": True,
     }))
     assert skill._calls_this_turn == before
+
+
+def test_agent_in_brain_gating_sets():
+    from lazyclaw.runtime import agent as agent_mod
+    assert "agent" in agent_mod._BASE_TOOL_NAMES
+    assert "agent" in agent_mod._META_TOOLS
+    assert "agent" in agent_mod._DISPATCH_ONLY_TOOLS
+    assert "agent" in agent_mod._LOCAL_TOOL_NAMES
+
+
+def test_agent_result_cap_constant_matches_skill():
+    from lazyclaw.runtime import agent as agent_mod
+    assert agent_mod._MAX_TOOL_RESULT_CHARS_AGENT == MAX_AGENT_RESULT_CHARS
+    assert agent_mod._MAX_TOOL_RESULT_CHARS_AGENT > agent_mod._MAX_TOOL_RESULT_CHARS

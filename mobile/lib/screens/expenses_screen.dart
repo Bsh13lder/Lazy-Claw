@@ -578,8 +578,12 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
   /// clobber the fresher result.
   int _loadGen = 0;
 
-  /// Time window the ledger is scoped to. Defaults to the current month.
-  ExpenseRange _range = ExpenseRange.month;
+  /// Time window the ledger is scoped to. Defaults to All so the full history
+  /// of budget top-ups (which are sparse — often one per month) is visible the
+  /// moment the Ledger opens; the range chips + month stepper narrow it. A
+  /// month default silently hid every top-up made in a prior month, which made
+  /// budget tracking look broken ("only shows spends").
+  ExpenseRange _range = ExpenseRange.all;
 
   /// Month displacement when [_range] is [ExpenseRange.month]: 0 = current
   /// month, -1 = previous, etc. Driven by the `‹ month ›` stepper. Clamped so it
@@ -601,40 +605,71 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadEntries());
   }
 
+  @override
+  void didUpdateWidget(covariant _LedgerTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The online credit ledger is fetched imperatively (it isn't part of the
+    // offline cache), so it can go stale when the underlying data moves. Re-
+    // fetch when the project set OR any project's budget total changes:
+    //  • projects loaded after our first build (initState saw an empty set),
+    //  • a project was added / removed,
+    //  • a budget top-up bumped projects.budget (a new credit likely exists —
+    //    the Budget log sheet refreshes the provider after every add).
+    // Without this the tab latched whatever it saw on first mount, so a top-up
+    // added later only appeared after a manual pull-to-refresh.
+    if (_budgetSignature(oldWidget.state.projects) !=
+        _budgetSignature(widget.state.projects)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _loadEntries();
+      });
+    }
+  }
+
+  /// A cheap signature of the projects whose change should trigger a credit
+  /// re-fetch: the sorted `id:budget` pairs. The id set covers add/remove and
+  /// late-load; the budget total covers a top-up (which bumps projects.budget).
+  String _budgetSignature(List<Project> projects) {
+    final parts = projects.map((p) => '${p.id}:${p.budget}').toList()..sort();
+    return parts.join('|');
+  }
+
   /// Fetch the budget top-up ledger for every live project in parallel and
   /// combine into [_entries]. ONLINE-only (budget entries aren't part of the
   /// offline cache): if we're offline OR any fetch throws we keep [_entries]
   /// null so the ledger stays expenses-only and never shows a misleading
   /// balance. The expense list itself never blocks on this.
   Future<void> _loadEntries() async {
-    // Don't even attempt a network round-trip while offline.
-    if (!ref.read(reachableProvider)) {
-      if (mounted && _entriesLoading) setState(() => _entriesLoading = false);
-      return;
-    }
+    // NOTE: intentionally NOT gated on `reachableProvider`. That probe can read
+    // "offline" on a network where the API is in fact reachable (self-heal /
+    // remote-URL edge — the exact case that made top-ups vanish while cached
+    // expenses still showed). This fetch uses the SAME ApiClient that syncs
+    // expenses, so whenever the server is reachable at all it succeeds; a
+    // genuine outage falls through to the all-failed branch below (→ hint).
     final projects =
         widget.state.projects.where((p) => p.id.isNotEmpty).toList();
+    if (projects.isEmpty) return;
     final gen = ++_loadGen;
     if (mounted) setState(() => _entriesLoading = true);
-    try {
-      final repo = ref.read(budgetsRepositoryProvider);
-      final lists = await Future.wait(
-        projects.map((p) => repo.listBudgetEntries(p.id)),
-      );
-      if (!mounted || gen != _loadGen) return;
-      setState(() {
-        _entries = [for (final l in lists) ...l];
-        _entriesLoading = false;
-      });
-    } catch (_) {
-      // Offline / server unreachable → keep expenses-only view + the connect
-      // hint. Never surface a partial/misleading balance.
-      if (!mounted || gen != _loadGen) return;
-      setState(() {
-        _entries = null;
-        _entriesLoading = false;
-      });
-    }
+    final repo = ref.read(budgetsRepositoryProvider);
+    // Per-project so one project's transient failure can't hide another's
+    // credits — fail-fast `Future.wait` used to null the WHOLE ledger if any
+    // single request threw. Only an ALL-failed round (genuine offline) collapses
+    // to the connect hint; a partial success still shows what loaded.
+    var anyOk = false;
+    final lists = await Future.wait(
+      projects.map((p) => repo.listBudgetEntries(p.id).then(
+            (l) {
+              anyOk = true;
+              return l;
+            },
+            onError: (_) => <BudgetEntry>[],
+          )),
+    );
+    if (!mounted || gen != _loadGen) return;
+    setState(() {
+      _entries = anyOk ? [for (final l in lists) ...l] : null;
+      _entriesLoading = false;
+    });
   }
 
   /// Pull-to-refresh: run the parent's sync-refresh, then re-fetch the credits.

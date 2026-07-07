@@ -2915,6 +2915,12 @@ class Agent:
         # `if needs_tools and _wants_visible:`) outside the tool-loading block.
         _wants_browser: bool = False
         _wants_visible: bool = False
+        # Task-keyword intent — assigned inside the `elif needs_tools:` branch
+        # below, but referenced later in the COMMON path (specialist-first
+        # exempt gate at ~4144, added 2026-07-03 / 763c506). A tool-less chat
+        # turn ("hello") has needs_tools=False, so the branch is skipped and the
+        # gate would hit UnboundLocalError. Default here so every path is bound.
+        _wants_tasks: bool = False
 
         if needs_tools and _is_slim_heartbeat:
             # Tier-A slim heartbeat. Tool budget is split by envelope kind:

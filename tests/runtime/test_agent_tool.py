@@ -268,3 +268,24 @@ def test_agent_result_cap_constant_matches_skill():
     from lazyclaw.runtime import agent as agent_mod
     assert agent_mod._MAX_TOOL_RESULT_CHARS_AGENT == MAX_AGENT_RESULT_CHARS
     assert agent_mod._MAX_TOOL_RESULT_CHARS_AGENT > agent_mod._MAX_TOOL_RESULT_CHARS
+
+
+def test_all_already_dispatched_gates_include_agent():
+    """Every 'brain already dispatched' failsafe in agent.py must treat
+    the `agent` tool as a real dispatch — a missed site = double-dispatch
+    (2026-06-08 triple-execution incident class)."""
+    import pathlib
+
+    import lazyclaw.runtime.agent as agent_mod
+
+    src = pathlib.Path(agent_mod.__file__).read_text(encoding="utf-8")
+    # Shape 1: inline `"dispatch_subagents" not in _called_tool_names` chains
+    # must each have an adjacent agent line.
+    assert src.count('"dispatch_subagents" not in _called_tool_names') == \
+        src.count('"agent" not in _called_tool_names'), (
+        "an inline already-dispatched chain is missing the agent skip"
+    )
+    # Shape 2: tuple-driven any() gates must include "agent".
+    assert 'for d in ("delegate", "dispatch_subagents", "run_background")' not in src, (
+        "a tuple-shaped already-dispatched gate is missing \"agent\""
+    )

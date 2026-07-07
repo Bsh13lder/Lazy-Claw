@@ -7115,7 +7115,7 @@ class Agent:
                     and user_id is not None
                     and not any(
                         d in _called_tool_names
-                        for d in ("delegate", "dispatch_subagents", "run_background")
+                        for d in ("agent", "delegate", "dispatch_subagents", "run_background")
                     )
                 ):
                     _stall_anchor = _cap_iter if _cap_stalled else _sf_stall_iter

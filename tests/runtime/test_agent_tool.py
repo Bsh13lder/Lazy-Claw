@@ -197,3 +197,60 @@ def test_concurrency_semaphore(monkeypatch):
     at._SEMAPHORES.clear()
     assert len(results) == 5
     assert active["peak"] <= 2
+
+
+class FakeTaskRunner:
+    def __init__(self, raise_exc: Exception | None = None):
+        self.submits = []
+        self._raise = raise_exc
+
+    async def submit(self, **kwargs):
+        if self._raise:
+            raise self._raise
+        self.submits.append(kwargs)
+        return "task123456789"
+
+
+def test_background_routes_to_task_runner(fake_run_specialist):
+    tr = FakeTaskRunner()
+    skill = _make_skill(task_runner=tr)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "long scrape",
+        "run_in_background": True,
+    }))
+    assert "Background agent 'explore' started" in out
+    assert not fake_run_specialist          # sync path NOT taken
+    sub = tr.submits[0]
+    assert sub["instruction"] == "long scrape"
+    assert sub["source"] == "brain"
+    assert sub["fanout_group_id"] == "fg-1"
+    assert sub["chat_session_id"] == "sess-1"
+    assert sub["name"] == "agent:explore"
+
+
+def test_background_without_runner_errors():
+    skill = _make_skill(task_runner=None)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "x", "run_in_background": True,
+    }))
+    assert "not configured" in out
+
+
+def test_background_submit_rejection_surfaces():
+    tr = FakeTaskRunner(raise_exc=RuntimeError("per-user cap reached"))
+    skill = _make_skill(task_runner=tr)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "x", "run_in_background": True,
+    }))
+    assert "Cannot start background agent" in out
+    assert "per-user cap reached" in out
+
+
+def test_background_does_not_consume_sync_cap():
+    tr = FakeTaskRunner()
+    skill = _make_skill(task_runner=tr)
+    before = skill._calls_this_turn
+    asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "x", "run_in_background": True,
+    }))
+    assert skill._calls_this_turn == before

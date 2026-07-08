@@ -124,15 +124,28 @@ async def ask_claude_vision(
     # explicitly blank out any API_KEY/AUTH_TOKEN/BASE_URL that would preempt
     # the OAuth subscription path. See claude_sdk_provider._build_options for
     # the full rationale.
+    # Force OAuth subscription auth AND inject the persisted setup-token — the
+    # SAME injection claude_sdk_provider._build_options does. Without it this
+    # path falls back to the (often-expired) ~/.claude/.credentials.json and
+    # 401s, which surfaces as the SDK "error result: success" quirk and a BLIND
+    # browser specialist: every ask_vision call fails, the model can't read the
+    # page, and it re-fires `browser` in a loop (2026-07-06 incident).
+    from lazyclaw.llm.providers._claude_token import read_claude_oauth_token
+
+    _vision_env = {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "ANTHROPIC_BASE_URL": "",
+    }
+    _vision_token = read_claude_oauth_token()
+    if _vision_token:
+        _vision_env["CLAUDE_CODE_OAUTH_TOKEN"] = _vision_token
+
     options = ClaudeAgentOptions(
         model=model,
         permission_mode="bypassPermissions",
         strict_mcp_config=True,
-        env={
-            "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_AUTH_TOKEN": "",
-            "ANTHROPIC_BASE_URL": "",
-        },
+        env=_vision_env,
         system_prompt=_VISION_SYSTEM_PROMPT,
     )
 

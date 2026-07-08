@@ -1139,6 +1139,39 @@ export const getEcoModels = () =>
 export const getEcoCosts = () =>
   request<{ success: boolean; data: EcoCosts }>("/api/eco/costs").then((r) => r.data);
 
+// ── Claude subscription auth (CLAUDE mode $0 via `claude setup-token`) ───────
+
+export interface ClaudeAuthStatus {
+  authenticated: boolean;
+  source: string;
+  detail: string;
+  expires_at: string | null;
+}
+
+export const getClaudeAuth = () =>
+  request<{ success: boolean; data: ClaudeAuthStatus }>("/api/eco/claude-auth").then((r) => r.data);
+
+export const setClaudeToken = (token: string) =>
+  request<{ success: boolean; data: { authenticated: boolean; detail: string } }>(
+    "/api/eco/claude-token",
+    { method: "POST", body: JSON.stringify({ token }) },
+  ).then((r) => r.data);
+
+// One-click OAuth login. These endpoints return HTTP 200 even on logical
+// failure ({success:false,error}), so we return the FULL envelope and let the
+// caller branch on `success` rather than relying on request<T>'s throw.
+export const startClaudeLogin = () =>
+  request<{ success: boolean; data?: { login_id: string; auth_url: string }; error?: string }>(
+    "/api/eco/claude-login/start",
+    { method: "POST" },
+  );
+
+export const completeClaudeLogin = (loginId: string, code: string) =>
+  request<{ success: boolean; data?: { authenticated: boolean; detail: string }; error?: string }>(
+    "/api/eco/claude-login/complete",
+    { method: "POST", body: JSON.stringify({ login_id: loginId, code }) },
+  );
+
 // ── Teams ──────────────────────────────────────────────────────────────────
 
 export const getTeamSettings = () =>

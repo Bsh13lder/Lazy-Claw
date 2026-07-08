@@ -11,6 +11,7 @@ import type {
   ModelsData,
   GeneralSettings,
   AboutInfo,
+  ClaudeAuthStatus,
 } from "../api";
 import { useToast } from "../context/ToastContext";
 import Modal from "../components/Modal";
@@ -247,6 +248,8 @@ const ROLE_INFO: Record<string, { label: string; description: string }> = {
 // 3-role model dropdowns — they consume the same subscription, only the
 // wire protocol differs. Writes to claude_transport + claude_*_model.
 const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
+  { value: "claude-sonnet-5[1m]", label: "Sonnet 5 — 1M context (latest)" },
+  { value: "claude-sonnet-5", label: "Sonnet 5 — 200K context" },
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6 — 200K context" },
   { value: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 — 1M context (beta)" },
   { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
@@ -324,6 +327,96 @@ function ClaudeModePanel({
     }
   };
 
+  // ── Subscription login ($0 CLAUDE via `claude setup-token`) ────────────────
+  const [auth, setAuth] = useState<ClaudeAuthStatus | null>(null);
+  const [authLoaded, setAuthLoaded] = useState(false);
+  const [token, setToken] = useState("");
+  const [verifying, setVerifying] = useState(false);
+
+  // One-click "Login with Claude" OAuth flow.
+  const [loginId, setLoginId] = useState<string | null>(null);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginCode, setLoginCode] = useState("");
+
+  const loadAuth = useCallback(async () => {
+    try {
+      setAuth(await api.getClaudeAuth());
+    } catch {
+      // Degrade gracefully — show a neutral "unknown" state, never crash.
+      setAuth(null);
+    } finally {
+      setAuthLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAuth();
+  }, [loadAuth]);
+
+  const handleSaveToken = async () => {
+    if (!token.trim()) {
+      toast.error("Paste a token first — run `claude setup-token` to get one.");
+      return;
+    }
+    setVerifying(true);
+    try {
+      const result = await api.setClaudeToken(token.trim());
+      toast.success(result.detail);
+      setToken("");
+      await loadAuth();
+    } catch (err) {
+      toast.error((err as Error).message ?? "Failed to save token");
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleStartLogin = async () => {
+    setLoginBusy(true);
+    try {
+      const resp = await api.startClaudeLogin();
+      if (resp.success && resp.data) {
+        window.open(resp.data.auth_url, "_blank", "noopener");
+        setAuthUrl(resp.data.auth_url);
+        setLoginId(resp.data.login_id);
+        toast.success("Opened Claude sign-in — authorize, then paste the code below.");
+      } else {
+        toast.error(resp.error ?? "Couldn't start login");
+      }
+    } catch (err) {
+      toast.error((err as Error).message ?? "Couldn't start login");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const handleCompleteLogin = async () => {
+    if (!loginId) return;
+    const code = loginCode.trim();
+    if (!code) {
+      toast.error("Paste the code from Claude first.");
+      return;
+    }
+    setLoginBusy(true);
+    try {
+      const resp = await api.completeClaudeLogin(loginId, code);
+      if (resp.success) {
+        toast.success(resp.data?.detail ?? "Logged in");
+        setLoginId(null);
+        setAuthUrl(null);
+        setLoginCode("");
+        await loadAuth();
+      } else {
+        toast.error(resp.error ?? "Login failed");
+      }
+    } catch (err) {
+      toast.error((err as Error).message ?? "Login failed");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
   return (
     <section className="bg-bg-secondary border border-border rounded-xl p-5">
       <SectionHeading
@@ -386,6 +479,114 @@ function ClaudeModePanel({
             </div>
           );
         })}
+      </div>
+
+      {/* Subscription login — $0 CLAUDE via `claude setup-token` */}
+      <div className="mt-5 pt-5 border-t border-border">
+        <p className="text-xs font-medium text-text-secondary mb-2">Subscription login</p>
+
+        {/* Status row */}
+        <div className="flex items-center gap-2 mb-3">
+          <span
+            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+              !authLoaded
+                ? "bg-text-muted opacity-40"
+                : auth?.authenticated
+                  ? "bg-accent"
+                  : "bg-error"
+            }`}
+          />
+          <span
+            className={`text-xs ${
+              !authLoaded
+                ? "text-text-muted"
+                : auth?.authenticated
+                  ? "text-accent"
+                  : "text-error"
+            }`}
+          >
+            {!authLoaded
+              ? "Checking subscription…"
+              : auth?.detail ?? "Subscription status unknown"}
+          </span>
+          {auth?.expires_at && (
+            <span className="text-[10px] text-text-muted shrink-0">
+              expires {auth.expires_at}
+            </span>
+          )}
+        </div>
+
+        {/* One-click OAuth login */}
+        <button
+          onClick={handleStartLogin}
+          disabled={loginBusy}
+          className="w-full px-3 py-2 text-sm font-semibold text-accent border border-accent bg-accent-soft rounded-lg hover:brightness-110 disabled:opacity-40 transition-colors"
+        >
+          {loginBusy && !loginId ? "Opening sign-in…" : "Login with Claude"}
+        </button>
+        <p className="text-[10px] text-text-muted mt-2 leading-snug">
+          Opens Claude sign-in in a new tab. After you authorize, Anthropic shows a short code —
+          paste it back here. One-time; the token lasts ~1 year.
+        </p>
+
+        {authUrl && (
+          <p className="text-[10px] text-text-muted mt-1">
+            Popup blocked?{" "}
+            <a
+              href={authUrl}
+              target="_blank"
+              rel="noopener"
+              className="text-accent hover:underline"
+            >
+              open sign-in again
+            </a>
+          </p>
+        )}
+
+        {loginId && (
+          <div className="flex gap-1.5 items-center mt-3">
+            <input
+              type="text"
+              placeholder="Paste the code from Claude here"
+              value={loginCode}
+              onChange={(e) => setLoginCode(e.target.value)}
+              className="flex-1 px-2 py-1.5 text-xs rounded bg-bg-tertiary border border-border text-text-primary focus:outline-none focus:border-border-light"
+            />
+            <button
+              onClick={handleCompleteLogin}
+              disabled={loginBusy}
+              className="px-2.5 py-1.5 text-[10px] text-accent border border-accent/30 rounded hover:bg-accent-soft disabled:opacity-40 shrink-0"
+            >
+              {loginBusy ? "Finishing…" : "Complete login"}
+            </button>
+          </div>
+        )}
+
+        {/* Manual token fallback */}
+        <p className="text-[10px] font-medium text-text-muted mt-4 mb-1.5">
+          Or paste a token manually
+        </p>
+        <div className="flex gap-1.5 items-center">
+          <input
+            type="password"
+            placeholder="sk-ant-oat…"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            className="flex-1 px-2 py-1.5 text-xs rounded bg-bg-tertiary border border-border text-text-primary focus:outline-none focus:border-border-light"
+          />
+          <button
+            onClick={handleSaveToken}
+            disabled={verifying}
+            className="px-2.5 py-1.5 text-[10px] text-accent border border-accent/30 rounded hover:bg-accent-soft disabled:opacity-40 shrink-0"
+          >
+            {verifying ? "Verifying…" : "Save & verify"}
+          </button>
+        </div>
+        <p className="text-[10px] text-text-muted mt-2 leading-snug">
+          Run <code className="text-text-secondary">claude setup-token</code> on a machine logged
+          into your Claude subscription, then paste the token (starts with sk-ant-oat…).
+          Long-lived (~1 year) — survives restarts.
+        </p>
       </div>
 
       <p className="text-[10px] text-text-muted mt-3">

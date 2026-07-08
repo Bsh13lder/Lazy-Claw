@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
+from lazyclaw.llm.providers._claude_token import (
+    claude_auth_status,
+    clear_claude_oauth_token,
+    write_claude_oauth_token,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/eco", tags=["eco"])
 
@@ -66,6 +75,113 @@ async def update_settings(
         return {"success": True, "data": new_settings}
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+
+class ClaudeTokenRequest(BaseModel):
+    token: str
+
+
+@router.get("/claude-auth")
+async def get_claude_auth(user: User = Depends(get_current_user)):
+    """Cheap auth-status for the CLAUDE-mode subscription (Settings badge)."""
+    return {"success": True, "data": claude_auth_status()}
+
+
+@router.post("/claude-token")
+async def set_claude_token(
+    body: ClaudeTokenRequest,
+    user: User = Depends(get_current_user),
+):
+    """Store a `claude setup-token` for CLAUDE mode + live-verify it.
+
+    An empty token clears the stored value (auth falls back to the
+    `claude /login` credentials file). A non-empty token is format-checked,
+    stored, then verified with a one-token ping. On a genuine auth failure we
+    discard it so a bad paste can't shadow a working login credential; on a
+    transient/timeout we keep it (the user can retry a real message).
+    """
+    token = (body.token or "").strip()
+    if not token:
+        clear_claude_oauth_token()
+        return {"success": True, "data": {"authenticated": False, "detail": "Token cleared."}}
+
+    if not token.startswith("sk-ant-"):
+        logger.warning(
+            "claude-token save REJECTED bad prefix: %r… (len=%d)", token[:10], len(token)
+        )
+        return {
+            "success": False,
+            "error": (
+                "That doesn't look like a Claude token — it should start with "
+                "'sk-ant-oat'. Run `claude setup-token` (or use the Login button)."
+            ),
+        }
+
+    write_claude_oauth_token(token)
+    logger.warning(
+        "claude-token save: stored token prefix=%r len=%d — verifying…",
+        token[:12], len(token),
+    )
+
+    # Live-verify. Imported lazily so a stale image without the helper still boots.
+    from lazyclaw.llm.providers.claude_sdk_provider import verify_claude_sdk_auth
+
+    ok, detail = await verify_claude_sdk_auth()
+    logger.warning("claude-token verify result: ok=%s detail=%s", ok, detail)
+    if not ok and "authentication failed" in detail.lower():
+        clear_claude_oauth_token()
+        return {"success": False, "error": detail}
+    return {"success": True, "data": {"authenticated": ok, "detail": detail}}
+
+
+class ClaudeLoginCompleteRequest(BaseModel):
+    login_id: str
+    code: str
+
+
+@router.post("/claude-login/start")
+async def claude_login_start(user: User = Depends(get_current_user)):
+    """One-click login step 1: spawn `claude setup-token` (pty) → return the
+    OAuth URL for the browser to open + a login_id to resume with the code."""
+    import asyncio
+
+    from lazyclaw.llm.providers._claude_login import start_login
+
+    logger.warning("claude-login START requested")
+    try:
+        data = await asyncio.to_thread(start_login)
+        logger.warning("claude-login START ok — auth URL captured, login_id issued")
+        return {"success": True, "data": data}
+    except Exception as exc:  # noqa: BLE001 — surface a clean message
+        logger.warning("claude-login START failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/claude-login/complete")
+async def claude_login_complete(
+    body: ClaudeLoginCompleteRequest,
+    user: User = Depends(get_current_user),
+):
+    """One-click login step 2: feed the pasted code into the pty, capture +
+    store the token, then live-verify it."""
+    import asyncio
+
+    from lazyclaw.llm.providers._claude_login import complete_login
+    from lazyclaw.llm.providers.claude_sdk_provider import verify_claude_sdk_auth
+
+    logger.warning("claude-login COMPLETE requested (code len=%d)", len((body.code or "").strip()))
+    try:
+        await asyncio.to_thread(complete_login, body.login_id, body.code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("claude-login COMPLETE failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    ok, detail = await verify_claude_sdk_auth()
+    logger.warning("claude-login COMPLETE verify: ok=%s detail=%s", ok, detail)
+    if not ok and "authentication failed" in detail.lower():
+        clear_claude_oauth_token()
+        return {"success": False, "error": detail}
+    return {"success": True, "data": {"authenticated": ok, "detail": detail}}
 
 
 @router.get("/usage")

@@ -1042,6 +1042,17 @@ class ClaudeSDKProvider(BaseLLMProvider):
             "ANTHROPIC_AUTH_TOKEN": "",
             "ANTHROPIC_BASE_URL": "",
         }
+        # Self-service auth: a `claude setup-token` value pasted in web
+        # Settings is stored on the persistent data mount and injected here
+        # as CLAUDE_CODE_OAUTH_TOKEN. It takes precedence over the (often
+        # expired, non-refreshing) ~/.claude/.credentials.json login token
+        # and is long-lived (~1yr), so an always-on server stops 401-ing
+        # every ~2 weeks. Read per-call so a fresh paste applies with no
+        # restart. Absent → fall through to the .credentials.json OAuth.
+        from lazyclaw.llm.providers._claude_token import read_claude_oauth_token
+        _oauth_token = read_claude_oauth_token()
+        if _oauth_token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = _oauth_token
 
         kw: dict[str, Any] = {
             "model": self._model,
@@ -1158,3 +1169,92 @@ def check_claude_sdk_auth() -> tuple[bool, str]:
         )
 
     return True, ""
+
+
+async def verify_claude_sdk_auth(
+    model: str = "sonnet", timeout_s: float = 40.0
+) -> tuple[bool, str]:
+    """Live one-token ping to confirm the CURRENT credential authenticates.
+
+    Used by ``POST /api/eco/claude-{token,login}`` after a token is stored, so
+    the user gets real "it works" / "it's invalid" feedback.
+
+    Inspects the RAW SDK stream rather than ``ClaudeSDKProvider.chat`` because
+    the provider launders an upstream 401 through its ``error result: success``
+    quirk handler into a generic RuntimeError — losing the auth signal. Here we
+    watch the stream directly: an ``api_retry`` with ``error_status 401`` /
+    ``authentication_failed``, or a synthetic ``AssistantMessage`` (``model ==
+    '<synthetic>'``), means NOT authenticated; a real ``TextBlock`` means it is.
+    """
+    import asyncio
+
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions, query
+    except ImportError:
+        return False, "claude-agent-sdk is not installed."
+
+    from lazyclaw.llm.providers._claude_token import read_claude_oauth_token
+
+    env = {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "ANTHROPIC_BASE_URL": "",
+    }
+    tok = read_claude_oauth_token()
+    if tok:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+
+    opt_kw: dict[str, Any] = {
+        "model": model,
+        "env": env,
+        "setting_sources": [],
+        "cwd": _isolated_claude_cwd("__auth_probe__"),
+        "permission_mode": "bypassPermissions",
+        "disallowed_tools": _DISALLOWED_BUILT_INS,
+        "strict_mcp_config": True,
+    }
+    _bin = _find_claude_binary()
+    if _bin:
+        opt_kw["cli_path"] = _bin
+
+    state = {"auth_fail": False, "text": False}
+
+    async def _run() -> None:
+        async for msg in query(
+            prompt="Reply with the single word: ok",
+            options=ClaudeAgentOptions(**opt_kw),
+        ):
+            cls = type(msg).__name__
+            data = getattr(msg, "data", None)
+            if cls == "SystemMessage" and isinstance(data, dict):
+                if str(data.get("error_status")) == "401" or (
+                    data.get("error") == "authentication_failed"
+                ):
+                    state["auth_fail"] = True
+            elif cls == "AssistantMessage":
+                if getattr(msg, "error", None) == "authentication_failed" or (
+                    getattr(msg, "model", None) == "<synthetic>"
+                ):
+                    state["auth_fail"] = True
+                else:
+                    for block in getattr(msg, "content", None) or []:
+                        if getattr(block, "text", "").strip():
+                            state["text"] = True
+            elif cls == "ResultMessage":
+                break
+
+    try:
+        await asyncio.wait_for(_run(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        return False, "Timed out contacting Claude — try again."
+    except Exception as exc:  # noqa: BLE001 — classify below
+        text = str(exc).lower()
+        if "401" in text or "authenticat" in text:
+            return False, "Authentication failed — token is invalid or expired."
+        return False, f"Verification error: {str(exc)[:160]}"
+
+    if state["auth_fail"]:
+        return False, "Authentication failed — token is invalid or expired."
+    if state["text"]:
+        return True, "Authenticated — Claude responded. ✓"
+    return False, "No response from Claude — try again."

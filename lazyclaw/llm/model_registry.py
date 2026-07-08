@@ -217,6 +217,32 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         tool_calling=True,
         role="brain",
     ),
+    "claude-sonnet-5": ModelProfile(
+        name="claude-sonnet-5",
+        display_name="Sonnet 5",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=3.0,      # $3/M input
+        cost_output=15.0,     # $15/M output
+        icon="\U0001f4ab",    # 💫
+        max_context=200000,
+        tool_calling=True,
+        role="brain",
+    ),
+    "claude-sonnet-5[1m]": ModelProfile(
+        name="claude-sonnet-5[1m]",
+        display_name="Sonnet 5 (1M)",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=3.0,      # $3/M input
+        cost_output=15.0,     # $15/M output
+        icon="\U0001f4ab",    # 💫
+        max_context=1000000,
+        tool_calling=True,
+        role="brain",
+    ),
     "claude-haiku-4-5-20251001": ModelProfile(
         name="claude-haiku-4-5-20251001",
         display_name="Haiku 4.5",
@@ -270,6 +296,19 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         max_context=200000,
         tool_calling=True,
         role="fallback",
+    ),
+    "claude-opus-4-8[1m]": ModelProfile(
+        name="claude-opus-4-8[1m]",
+        display_name="Opus 4.8 (1M)",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=5.0,       # $5/M input
+        cost_output=25.0,     # $25/M output
+        icon="\U0001f48e",    # 💎
+        max_context=1000000,  # 1M total (in+out); >512K input doubles PAYG price
+        tool_calling=True,
+        role="brain",
     ),
 
     # ── PAID — MiniMax (Token Plan — Anthropic-compatible at api.minimax.io/anthropic) ──

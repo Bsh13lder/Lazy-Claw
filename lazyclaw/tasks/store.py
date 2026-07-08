@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps"})
 
+# Encrypted fields whose value is a JSON list rather than a plain string.
+# ``create_task`` ``json.dumps`` these before encrypting; ``update_task`` must
+# do the same, or ``encrypt()`` calls ``.encode`` on a ``list`` and raises
+# (HTTP 500, edit silently lost).
+_JSON_LIST_ENCRYPTED_FIELDS = frozenset({"tags", "steps"})
+
 # A task category is promoted to a first-class project once this many tasks
 # share it (casefold). Below the threshold it stays a phantom category.
 _PROJECT_MATERIALIZE_THRESHOLD = 3
@@ -684,6 +690,13 @@ async def update_task(
 
     for field_name, value in fields.items():
         if field_name in ENCRYPTED_FIELDS and value is not None:
+            # List-shaped encrypted fields (tags/steps) are stored as a JSON
+            # string — mirror create_task: json.dumps before encrypting.
+            # ``steps`` is normalized to the canonical {id,title,done} shape.
+            if field_name in _JSON_LIST_ENCRYPTED_FIELDS and isinstance(value, list):
+                if field_name == "steps":
+                    value = _normalize_steps(value)
+                value = json.dumps(value)
             value = encrypt(value, key)
         elif field_name == "pre_reminders" and value is not None:
             # Accept either a list of ISO strings (preferred) or a pre-encoded
@@ -983,6 +996,14 @@ async def complete_task(
     if not task:
         return False
 
+    # Idempotency guard: completing an already-done task must be a no-op.
+    # Mobile sync is at-least-once (a dropped response re-pushes the complete
+    # op) and a web double-click both fire this twice. Without the guard the
+    # recurring-respawn block below runs again and spawns a DUPLICATE next
+    # occurrence. Return True so the caller still sees success.
+    if task.get("status") == "done":
+        return True
+
     # Delete reminder job if exists
     if task.get("reminder_job_id"):
         await _delete_reminder_job(config, user_id, task["reminder_job_id"])
@@ -1052,14 +1073,15 @@ async def complete_task(
     if task.get("recurring"):
         try:
             from lazyclaw.heartbeat.cron import get_next_run
+            # get_next_run returns a tz-aware (UTC) datetime, not a string.
             next_due = get_next_run(task["recurring"])
-            next_date = next_due[:10] if next_due else None
+            next_date = next_due.date().isoformat() if next_due else None
 
             next_reminder = None
             offset_min = task.get("reminder_offset_minutes")
-            if next_due and offset_min is not None:
+            if next_due is not None and offset_min is not None:
                 try:
-                    next_due_dt = datetime.fromisoformat(next_due)
+                    next_due_dt = next_due
                     if next_due_dt.tzinfo is None:
                         next_due_dt = next_due_dt.replace(tzinfo=timezone.utc)
                     next_reminder = (

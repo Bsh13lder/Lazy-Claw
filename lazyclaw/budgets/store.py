@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -66,6 +67,9 @@ RECUR_COLUMNS = [
 BUDGET_ENTRY_COLUMNS = [
     "id", "user_id", "project_id", "amount", "currency", "source",
     "kind", "created_at",
+    # Offline-sync primitives — updated_at drives the /changes delta feed;
+    # deleted_at is the soft-delete tombstone (NULL = live).
+    "updated_at", "deleted_at",
 ]
 
 PROJECT_SELECT = ", ".join(PROJECT_COLUMNS)
@@ -273,6 +277,51 @@ async def _delete_note(config: Config, user_id: str, note_id: str | None) -> Non
 # ---------------------------------------------------------------------------
 
 
+async def _merge_into_existing_project(
+    config: Config,
+    user_id: str,
+    existing: dict,
+    *,
+    name: str,
+    budget: float,
+    currency: str,
+    description: str | None,
+    color: str | None,
+    is_favorite: bool | None,
+) -> dict:
+    """Idempotent upsert into an already-existing project (resolved by its
+    ``name_key``). Only explicitly-provided, non-empty fields are applied so a
+    replay of an offline create never clobbers a richer server row with empty
+    defaults (e.g. an offline ``budget=0`` must not zero a web-set budget).
+    Returns the merged project dict."""
+    updates: dict = {}
+    if budget:
+        updates["budget"] = budget
+    if currency and currency != existing.get("currency"):
+        updates["currency"] = currency
+    if description is not None:
+        updates["description"] = description
+    if color is not None:
+        updates["color"] = color
+    if is_favorite is not None:
+        updates["is_favorite"] = is_favorite
+    if not existing.get("lazybrain_note_id"):
+        note_id = await _ensure_project_note(
+            config, user_id, name,
+            budget or existing.get("budget") or 0.0, currency,
+            description=(
+                description if description is not None
+                else existing.get("description")
+            ),
+        )
+        if note_id:
+            updates["lazybrain_note_id"] = note_id
+    if updates:
+        await update_project(config, user_id, existing["id"], **updates)
+        return {**existing, **updates}
+    return existing
+
+
 async def create_project(
     config: Config,
     user_id: str,
@@ -321,30 +370,18 @@ async def create_project(
         if existing_by_id is not None:
             return _project_to_dict(existing_by_id, key)
 
+    # Name-key merge (idempotent). Runs even when a client id was supplied but
+    # no row owns that id yet: a project whose casefolded name already exists
+    # under a DIFFERENT id (e.g. created on web) must merge into that row, not
+    # hit the UNIQUE(user_id, name_key) index on INSERT and 500 forever — the
+    # bug that stranded offline mobile projects + all their expenses.
     existing = await get_project_by_name(config, user_id, name)
-    if existing and not project_id:
-        updates: dict = {}
-        if budget:
-            updates["budget"] = budget
-        if currency and currency != existing.get("currency"):
-            updates["currency"] = currency
-        if description is not None:
-            updates["description"] = description
-        if color is not None:
-            updates["color"] = color
-        if is_favorite is not None:
-            updates["is_favorite"] = is_favorite
-        if not existing.get("lazybrain_note_id"):
-            note_id = await _ensure_project_note(
-                config, user_id, name, budget or existing.get("budget") or 0.0, currency,
-                description=description if description is not None else existing.get("description"),
-            )
-            if note_id:
-                updates["lazybrain_note_id"] = note_id
-        if updates:
-            await update_project(config, user_id, existing["id"], **updates)
-            return {**existing, **updates}
-        return existing
+    if existing:
+        return await _merge_into_existing_project(
+            config, user_id, existing,
+            name=name, budget=budget, currency=currency,
+            description=description, color=color, is_favorite=is_favorite,
+        )
 
     project_id = project_id or str(uuid4())
     now = _now()
@@ -353,20 +390,34 @@ async def create_project(
     )
 
     favorite_int = _clean_favorite(is_favorite)
-    async with db_session(config) as db:
-        await db.execute(
-            "INSERT INTO projects "
-            "(id, user_id, name, name_key, budget, currency, status, "
-            "description, color, is_favorite, lazybrain_note_id, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-            (
-                project_id, user_id, encrypt(name, key), name_key,
-                budget, currency, _enc(description, key), color, favorite_int,
-                note_id, now, now,
-            ),
-        )
-        await db.commit()
+    try:
+        async with db_session(config) as db:
+            await db.execute(
+                "INSERT INTO projects "
+                "(id, user_id, name, name_key, budget, currency, status, "
+                "description, color, is_favorite, lazybrain_note_id, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+                (
+                    project_id, user_id, encrypt(name, key), name_key,
+                    budget, currency, _enc(description, key), color, favorite_int,
+                    note_id, now, now,
+                ),
+            )
+            await db.commit()
+    except sqlite3.IntegrityError:
+        # Belt-and-suspenders: a concurrent create won the name_key race
+        # between the pre-check above and this INSERT. Re-resolve by name (user
+        # isolation preserved by get_project_by_name) and merge instead of
+        # surfacing a 500.
+        collided = await get_project_by_name(config, user_id, name)
+        if collided is not None:
+            return await _merge_into_existing_project(
+                config, user_id, collided,
+                name=name, budget=budget, currency=currency,
+                description=description, color=color, is_favorite=is_favorite,
+            )
+        raise
 
     logger.debug("Created project %s (%s) for user %s", project_id, name_key, user_id)
     return {
@@ -487,26 +538,31 @@ async def set_budget(
 async def _insert_budget_entry(
     config: Config, user_id: str, project_id: str, *,
     amount: float, source: str | None, currency: str, kind: str,
+    entry_id: str | None = None,
 ) -> dict:
     """Low-level ledger row insert. Caller is responsible for any
     project.budget adjustment — keep ``add_budget_entry`` as the public
-    bump-and-record API for top-ups."""
+    bump-and-record API for top-ups.
+
+    ``entry_id``: optional client-minted id for offline-first idempotent
+    replay. When omitted a fresh uuid4 is minted."""
     key = await get_user_dek(config, user_id)
-    entry_id = str(uuid4())
+    entry_id = entry_id or str(uuid4())
     now = _now()
     async with db_session(config) as db:
         await db.execute(
             "INSERT INTO budget_entries "
-            "(id, user_id, project_id, amount, currency, source, kind, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, user_id, project_id, amount, currency, source, kind, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (entry_id, user_id, project_id, amount, currency,
-             _enc(source, key), kind, now),
+             _enc(source, key), kind, now, now),
         )
         await db.commit()
     return {
         "id": entry_id, "user_id": user_id, "project_id": project_id,
         "amount": amount, "currency": currency, "source": source,
-        "kind": kind, "created_at": now,
+        "kind": kind, "created_at": now, "updated_at": now, "deleted_at": None,
     }
 
 
@@ -840,8 +896,10 @@ async def get_budget_changes(
     Returns:
     - ``projects``: live (non-deleted) projects with ``updated_at > since``
     - ``expenses``: live (non-deleted) expenses with ``updated_at > since``
+    - ``budget_entries``: live (non-deleted) top-ups with ``updated_at > since``
     - ``deleted_projects``: ids of projects soft-deleted after ``since``
     - ``deleted_expenses``: ids of expenses soft-deleted after ``since``
+    - ``deleted_budget_entries``: ids of top-ups soft-deleted after ``since``
     - ``now``: server ISO timestamp — pass this as ``since`` next time
 
     When ``since`` is omitted, returns ALL live rows + ALL tombstones (full
@@ -888,6 +946,25 @@ async def get_budget_changes(
                 (user_id, since),
             )
             deleted_exp_ids = [r[0] for r in await cur.fetchall()]
+
+        # Live budget entries (top-ups) updated after since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {BUDGET_ENTRY_SELECT} FROM budget_entries "
+                "WHERE user_id = ? AND deleted_at IS NULL AND updated_at > ? "
+                "ORDER BY updated_at DESC",
+                (user_id, since),
+            )
+            entry_rows = await cur.fetchall()
+
+        # Deleted budget entries whose deleted_at > since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM budget_entries "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at > ?",
+                (user_id, since),
+            )
+            deleted_entry_ids = [r[0] for r in await cur.fetchall()]
     else:
         # Full sync: all live rows + all tombstones.
         async with db_session(config) as db:
@@ -924,11 +1001,30 @@ async def get_budget_changes(
             )
             deleted_exp_ids = [r[0] for r in await cur.fetchall()]
 
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {BUDGET_ENTRY_SELECT} FROM budget_entries "
+                "WHERE user_id = ? AND deleted_at IS NULL "
+                "ORDER BY updated_at DESC",
+                (user_id,),
+            )
+            entry_rows = await cur.fetchall()
+
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM budget_entries "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL",
+                (user_id,),
+            )
+            deleted_entry_ids = [r[0] for r in await cur.fetchall()]
+
     return {
         "projects": [_project_to_dict(r, key) for r in proj_rows],
         "expenses": [_expense_to_dict(r, key) for r in exp_rows],
+        "budget_entries": [_budget_entry_to_dict(r, key) for r in entry_rows],
         "deleted_projects": deleted_proj_ids,
         "deleted_expenses": deleted_exp_ids,
+        "deleted_budget_entries": deleted_entry_ids,
         "now": now_ts,
     }
 
@@ -985,19 +1081,32 @@ async def add_budget_entry(
     source: str | None = None,
     currency: str | None = None,
     kind: str = "credit",
+    entry_id: str | None = None,
 ) -> dict:
     """Add money to a project's budget, recording WHERE it came from. Bumps
     ``projects.budget`` by ``amount`` and writes a ledger row (shown in the
     project Log next to expenses). ``source`` is the first comment — the
-    answer to "where is this budget from?"."""
+    answer to "where is this budget from?".
+
+    ``entry_id``: optional client-minted id for offline-first idempotent
+    replay. A retried POST with the same id returns the existing row WITHOUT
+    re-bumping the project budget (mirrors ``create_expense``)."""
     project = await get_project(config, user_id, project_id)
     if project is None:
         raise ValueError(f"project not found: {project_id}")
+
+    # Idempotent replay: if the client-minted id already exists, return it
+    # without inserting a duplicate or re-bumping the budget.
+    if entry_id:
+        existing = await get_budget_entry(config, user_id, entry_id)
+        if existing is not None:
+            return {**existing, "new_budget": float(project.get("budget") or 0.0)}
 
     currency = currency or project.get("currency") or "EUR"
     entry = await _insert_budget_entry(
         config, user_id, project_id,
         amount=amount, source=source, currency=currency, kind=kind,
+        entry_id=entry_id,
     )
     new_budget = float(project.get("budget") or 0.0) + amount
     await update_project(config, user_id, project_id, budget=new_budget)
@@ -1012,7 +1121,8 @@ async def list_budget_entries(
     async with db_session(config) as db:
         cursor = await db.execute(
             f"SELECT {BUDGET_ENTRY_SELECT} FROM budget_entries "
-            "WHERE user_id = ? AND project_id = ? ORDER BY created_at DESC",
+            "WHERE user_id = ? AND project_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at DESC",
             (user_id, project_id),
         )
         rows = await cursor.fetchall()
@@ -1026,7 +1136,7 @@ async def get_budget_entry(
     async with db_session(config) as db:
         cur = await db.execute(
             f"SELECT {BUDGET_ENTRY_SELECT} FROM budget_entries "
-            "WHERE id = ? AND user_id = ?",
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (entry_id, user_id),
         )
         row = await cur.fetchone()
@@ -1052,12 +1162,15 @@ async def update_budget_entry(
     # source: None means "leave alone"; empty string means "clear it".
     new_source = source if source is not None else existing.get("source")
     delta = new_amount - float(existing["amount"])
+    now = _now()
 
     async with db_session(config) as db:
         await db.execute(
-            "UPDATE budget_entries SET amount = ?, currency = ?, source = ? "
+            "UPDATE budget_entries "
+            "SET amount = ?, currency = ?, source = ?, updated_at = ? "
             "WHERE id = ? AND user_id = ?",
-            (new_amount, new_currency, _enc(new_source, key), entry_id, user_id),
+            (new_amount, new_currency, _enc(new_source, key), now,
+             entry_id, user_id),
         )
         await db.commit()
 
@@ -1074,15 +1187,20 @@ async def update_budget_entry(
 async def delete_budget_entry(
     config: Config, user_id: str, entry_id: str
 ) -> bool:
-    """Delete a ledger entry and roll back its effect on ``project.budget``."""
+    """Soft-delete a ledger entry (set ``deleted_at``) and roll back its effect
+    on ``project.budget``. The row is preserved so offline clients learn of the
+    delete via /api/budgets/changes instead of it silently vanishing. Mirrors
+    ``delete_expense``'s soft-delete pattern."""
     existing = await get_budget_entry(config, user_id, entry_id)
     if existing is None:
         return False
 
+    now = _now()
     async with db_session(config) as db:
         result = await db.execute(
-            "DELETE FROM budget_entries WHERE id = ? AND user_id = ?",
-            (entry_id, user_id),
+            "UPDATE budget_entries SET deleted_at = ? "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (now, entry_id, user_id),
         )
         await db.commit()
         if result.rowcount == 0:

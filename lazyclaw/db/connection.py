@@ -294,6 +294,15 @@ async def init_db(config: Config) -> None:
             # "starred only" total. Exposed via list + /api/budgets/changes for
             # the offline sync pull, exactly like projects.is_favorite.
             ("project_expenses", "is_favorite", "ALTER TABLE project_expenses ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
+            # Budget-entry offline-sync primitives (fix/container-vision) —
+            # budget_entries (top-ups) were create-only + hard-deleted, so they
+            # could not cross-sync, retries double-added, and deletes left no
+            # tombstone. updated_at: last-write-wins timestamp so top-ups appear
+            # in /api/budgets/changes; deleted_at: soft-delete tombstone. Both
+            # nullable so the guarded ALTER + created_at backfill below are safe
+            # on the existing rows.
+            ("budget_entries", "updated_at", "ALTER TABLE budget_entries ADD COLUMN updated_at TEXT"),
+            ("budget_entries", "deleted_at", "ALTER TABLE budget_entries ADD COLUMN deleted_at TEXT"),
             # Document tags (feat/sheets-next-level) — plaintext JSON array so the
             # sidebar and agent skills can filter/group sheets/docs/PDFs by tag.
             # Default '[]' (empty array) so pre-migration rows return [] cleanly.
@@ -336,6 +345,18 @@ async def init_db(config: Config) -> None:
             )
         except Exception:
             logger.debug("tasks.updated_at backfill skipped", exc_info=True)
+
+        # Backfill budget_entries.updated_at = created_at for rows inserted
+        # before the offline-sync migration added the column. WHERE guard makes
+        # this a no-op once every row is stamped, so it is safe on every boot
+        # (idempotent) and on the existing production rows.
+        try:
+            await db.execute(
+                "UPDATE budget_entries SET updated_at = created_at "
+                "WHERE updated_at IS NULL AND created_at IS NOT NULL"
+            )
+        except Exception:
+            logger.debug("budget_entries.updated_at backfill skipped", exc_info=True)
 
         # PDF version index — created HERE (post-migration) not in schema.sql,
         # because on an existing DB the `version_of` column only exists after the

@@ -99,6 +99,10 @@ class CreateRecurringBody(BaseModel):
 
 
 class AddBudgetEntryBody(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay. A retried
+    # POST with the same id returns the existing entry without double-adding to
+    # the project budget.
+    id: str | None = Field(default=None, max_length=128)
     amount: float
     source: str | None = Field(default=None, max_length=500)
     currency: str | None = Field(default=None, max_length=8)
@@ -337,6 +341,7 @@ async def add_budget_entry_route(
         entry = await store.add_budget_entry(
             _config, user.id, project_id,
             amount=body.amount, source=body.source, currency=body.currency,
+            entry_id=body.id or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

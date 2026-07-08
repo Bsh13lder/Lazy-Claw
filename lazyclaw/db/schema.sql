@@ -546,7 +546,14 @@ CREATE TABLE IF NOT EXISTS budget_entries (
     currency TEXT NOT NULL DEFAULT 'EUR',
     source TEXT,                       -- encrypted "where the money came from" / audit reason
     kind TEXT NOT NULL DEFAULT 'credit',  -- credit | edit  (audit type)
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    -- Offline-sync primitives (feat/flutter-mobile) — mirror projects/expenses.
+    -- updated_at: last-write-wins timestamp bumped on every mutation so top-ups
+    -- surface in /api/budgets/changes. deleted_at: soft-delete tombstone
+    -- (NULL = live) so a deleted top-up is learned via the delta feed, not by
+    -- silently vanishing.
+    updated_at TEXT,
+    deleted_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_budget_entries_project

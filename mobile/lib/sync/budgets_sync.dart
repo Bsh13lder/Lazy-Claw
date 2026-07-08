@@ -59,41 +59,72 @@ class BudgetsSync {
 
   bool _running = false;
 
+  /// Set when a sync() is requested while one is already in flight. The running
+  /// drain may have snapshotted the outbox BEFORE that mutation was queued, so
+  /// it drains once more before finishing — otherwise a fresh add can sit
+  /// unsynced until the next unrelated trigger (the reserva "didn't sync at add
+  /// time" bug that made the user re-add the same expense and create duplicates).
+  bool _pendingRerun = false;
+  bool _pendingRetryRejected = false;
+
   BudgetsSync(this._dao, this._repo);
 
   bool get isRunning => _running;
 
-  /// push() then pull(). A second call while one is in flight is a no-op.
+  /// push() then pull(). A call arriving while one is in flight is NOT dropped —
+  /// it requests a single coalesced re-drain so a mutation queued mid-sync still
+  /// reaches the server this cycle.
   Future<BudgetsSyncResult> sync({bool retryRejected = false}) async {
-    if (_running) return const BudgetsSyncResult();
+    if (_running) {
+      _pendingRerun = true;
+      _pendingRetryRejected = _pendingRetryRejected || retryRejected;
+      return const BudgetsSyncResult();
+    }
     _running = true;
     try {
-      // Explicit user-triggered force-retry ("Sync now"): drop stale
-      // create_rejected markers so a transiently-rejected orphan (e.g. the
-      // reserva-1000 dropped by an outage or parent-404) is no longer excluded
-      // from the self-heal below. Routine syncs pass false, keeping the markers.
-      if (retryRejected) {
-        await _dao.clearCreateRejectedConflicts();
+      var result = await _drainOnce(retryRejected: retryRejected);
+      // Coalesce: keep draining while mutations landed during the last drain.
+      // Bounded — each pass empties more of the outbox and a re-run is only
+      // requested by a concurrent sync() call.
+      while (_pendingRerun) {
+        _pendingRerun = false;
+        final rr = _pendingRetryRejected;
+        _pendingRetryRejected = false;
+        result = await _drainOnce(retryRejected: rr);
       }
-      // Self-heal any stranded offline creates (ops that were dead-lettered or
-      // silently drained by an older build) BEFORE draining, so the reserva-1000
-      // class of orphan — a dirty cache row with no outbox op — re-pushes this
-      // run instead of living on-device forever, invisible to the server.
-      await _dao.reenqueueOrphanedCreates();
-      final pushResult = await push();
-      final pullResult = await pull();
-      return BudgetsSyncResult(
-        pushed: pushResult.pushed,
-        pulled: pullResult.pulled,
-        deletedApplied: pullResult.deletedApplied,
-        conflicts: pullResult.conflicts,
-        pushInterrupted: pushResult.pushInterrupted,
-        pullFailed: pullResult.pullFailed,
-        error: pushResult.error ?? pullResult.error,
-      );
+      return result;
     } finally {
       _running = false;
+      _pendingRerun = false;
+      _pendingRetryRejected = false;
     }
+  }
+
+  /// One self-heal + push() + pull() drain.
+  Future<BudgetsSyncResult> _drainOnce({bool retryRejected = false}) async {
+    // Explicit user-triggered force-retry ("Sync now"): drop stale
+    // create_rejected markers so a transiently-rejected orphan (e.g. the
+    // reserva-1000 dropped by an outage or parent-404) is no longer excluded
+    // from the self-heal below. Routine syncs pass false, keeping the markers.
+    if (retryRejected) {
+      await _dao.clearCreateRejectedConflicts();
+    }
+    // Self-heal any stranded offline creates (ops that were dead-lettered or
+    // silently drained by an older build) BEFORE draining, so the reserva-1000
+    // class of orphan — a dirty cache row with no outbox op — re-pushes this
+    // run instead of living on-device forever, invisible to the server.
+    await _dao.reenqueueOrphanedCreates();
+    final pushResult = await push();
+    final pullResult = await pull();
+    return BudgetsSyncResult(
+      pushed: pushResult.pushed,
+      pulled: pullResult.pulled,
+      deletedApplied: pullResult.deletedApplied,
+      conflicts: pullResult.conflicts,
+      pushInterrupted: pushResult.pushInterrupted,
+      pullFailed: pullResult.pullFailed,
+      error: pushResult.error ?? pullResult.error,
+    );
   }
 
   // ── PUSH ────────────────────────────────────────────────────────────────

@@ -244,6 +244,57 @@ void main() {
     });
   });
 
+  group('BudgetsDao expense delete (create/delete collapse)', () {
+    test(
+        'deleting a NEVER-SYNCED expense cancels its pending create '
+        '(no delete op, row hard-removed)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('P', id: 'p1');
+      await dao.applyLocalExpenseCreate('p1', 1000.0, 'reserva', id: 'e1');
+      // The un-synced create is queued.
+      expect(
+        (await dao.readBudgetsOutbox())
+            .where((o) => o.isExpense && o.entityId == 'e1')
+            .length,
+        1,
+      );
+
+      final ok = await dao.applyLocalExpenseDelete('e1');
+      expect(ok, isTrue);
+
+      // The queued create is annihilated — NO create AND NO delete op remains
+      // for e1 (avoids a pointless create→delete server round-trip and the
+      // reappearance window if sync interrupts between the two pushes).
+      expect(
+        (await dao.readBudgetsOutbox()).where((o) => o.entityId == 'e1'),
+        isEmpty,
+      );
+      // The row is hard-removed locally, not left as a dirty tombstone.
+      expect(await dao.getExpenseRow('e1'), isNull);
+    });
+
+    test('deleting a SYNCED expense tombstones + enqueues a delete', () async {
+      final dao = await _freshDao();
+      // Pulled from the server → last_synced_at set, dirty=0, no pending create.
+      await dao.upsertExpenseFromServer(_serverExpense(id: 'e-synced'));
+
+      final ok = await dao.applyLocalExpenseDelete('e-synced');
+      expect(ok, isTrue);
+
+      // A server-backed row must be tombstoned + a delete queued so the server
+      // learns about the removal.
+      final row = await dao.getExpenseRow('e-synced');
+      expect(row?['deleted'], 1);
+      expect(
+        (await dao.readBudgetsOutbox()).any((o) =>
+            o.isExpense &&
+            o.entityId == 'e-synced' &&
+            o.op == BudgetsOutboxOp.delete),
+        isTrue,
+      );
+    });
+  });
+
   // ── Expenses ─────────────────────────────────────────────────────────────
 
   group('BudgetsDao local expense create', () {
@@ -378,14 +429,18 @@ void main() {
   });
 
   group('BudgetsDao expense delete', () {
-    test('delete tombstones + enqueues a delete', () async {
+    test('delete tombstones + enqueues a delete (server-backed row)', () async {
       final dao = await _freshDao();
-      final e = await dao.applyLocalExpenseCreate('p1', 12.0, 'Remove me');
-      final ok = await dao.applyLocalExpenseDelete(e.id);
+      // A server-backed expense (last_synced_at set): its removal must reach the
+      // server as a tombstone + delete op. (An un-synced create is collapsed
+      // instead — see the "create/delete collapse" group.)
+      await dao.upsertExpenseFromServer(_serverExpense(id: 'e-srv'));
+      final ok = await dao.applyLocalExpenseDelete('e-srv');
       expect(ok, isTrue);
 
-      expect(await dao.getExpense(e.id), isNotNull); // tombstone present
-      expect((await dao.listExpenses()).map((x) => x.id), isNot(contains(e.id)));
+      expect(await dao.getExpense('e-srv'), isNotNull); // tombstone present
+      expect(
+          (await dao.listExpenses()).map((x) => x.id), isNot(contains('e-srv')));
 
       final outbox = await dao.readBudgetsOutbox();
       expect(outbox.any((o) => o.op == BudgetsOutboxOp.delete), isTrue);
@@ -455,13 +510,15 @@ void main() {
 
     test('commitPush hard-removes a pushed expense tombstone', () async {
       final dao = await _freshDao();
-      final e = await dao.applyLocalExpenseCreate('p1', 5.0, 'A', id: 'cpe');
-      await dao.applyLocalExpenseDelete(e.id);
+      // Server-backed row so delete tombstones + enqueues a delete (an un-synced
+      // create is collapsed instead, leaving no delete op to push).
+      await dao.upsertExpenseFromServer(_serverExpense(id: 'cpe'));
+      await dao.applyLocalExpenseDelete('cpe');
       final delSeq = (await dao.readBudgetsOutbox())
           .firstWhere((o) => o.op == BudgetsOutboxOp.delete)
           .seq;
-      await dao.commitPush(delSeq, kExpenseEntity, e.id);
-      expect(await dao.getExpense(e.id), isNull);
+      await dao.commitPush(delSeq, kExpenseEntity, 'cpe');
+      expect(await dao.getExpense('cpe'), isNull);
     });
 
     test('bumpOutboxAttempts increments + returns the new count', () async {

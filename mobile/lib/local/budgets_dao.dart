@@ -646,13 +646,34 @@ class BudgetsDao {
     return updated;
   }
 
-  /// Tombstone an expense locally (deleted=1) + enqueue a `delete`.
+  /// Delete an expense locally. A server-backed row is tombstoned (deleted=1) +
+  /// a `delete` op is enqueued so the server learns about it. But an expense
+  /// that was created offline and NEVER reached the server (last_synced_at IS
+  /// NULL with its `create` op still queued) is instead ANNIHILATED locally —
+  /// the queued create is cancelled and the row hard-removed. That avoids a
+  /// pointless create→delete server round-trip and, more importantly, the
+  /// reappearance window: if sync interrupts between pushing the create and the
+  /// delete, the create commits, the next pull re-materializes the "deleted"
+  /// row, and it comes back until a later sync finally drains the delete.
   Future<bool> applyLocalExpenseDelete(String id) async {
-    final existing = await getExpense(id);
-    if (existing == null) return false;
+    final row = await getExpenseRow(id);
+    if (row == null) return false;
+
+    final neverSynced = row['last_synced_at'] == null;
+    final hasPendingCreate = (await readBudgetsOutbox()).any((o) =>
+        o.isExpense && o.entityId == id && o.op == BudgetsOutboxOp.create);
 
     final now = _now();
     await _db.transaction((txn) async {
+      if (neverSynced && hasPendingCreate) {
+        // Cancel the queued create (and any sibling op) + hard-remove the row.
+        await txn.delete('outbox',
+            where: 'entity = ? AND entity_id = ?',
+            whereArgs: [kExpenseEntity, id]);
+        await txn.delete('expense_cache', where: 'id = ?', whereArgs: [id]);
+        return;
+      }
+      // Server-backed (or already-pushed) row: tombstone + enqueue a delete.
       await txn.update(
         'expense_cache',
         {

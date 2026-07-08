@@ -327,22 +327,38 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   }
 
   Future<void> removeExpense(String id) async {
+    // Drop the row from state SYNCHRONOUSLY — before any await — so a swipe's
+    // Dismissible.onDismissed never leaves a dismissed tile in the tree. That
+    // race throws "A dismissed Dismissible widget is still part of the tree"
+    // and freezes the Money screen. The DB delete + sync follow;
+    // _refreshFromCache re-reconciles from the source of truth. Mirrors
+    // TasksNotifier.deleteTask.
+    final prev = state.expenses;
+    state = state.copyWith(
+      expenses: prev.where((e) => e.id != id).toList(),
+    );
     try {
       await _dao.applyLocalExpenseDelete(id);
       await _refreshFromCache();
       unawaited(_syncThenRefresh());
     } catch (e) {
-      state = state.copyWith(error: e.toString());
+      // Restore the optimistically-removed row on failure.
+      state = state.copyWith(expenses: prev, error: e.toString());
     }
   }
 
   Future<void> deleteProject(String id) async {
+    // Same Dismissible-safe optimistic removal as removeExpense.
+    final prev = state.projects;
+    state = state.copyWith(
+      projects: prev.where((p) => p.id != id).toList(),
+    );
     try {
       await _dao.applyLocalProjectDelete(id);
       await _refreshFromCache();
       unawaited(_syncThenRefresh());
     } catch (e) {
-      state = state.copyWith(error: e.toString());
+      state = state.copyWith(projects: prev, error: e.toString());
     }
   }
 

@@ -159,6 +159,55 @@ void main() {
       expect(n.state.expenses.map((e) => e.id), isNot(contains(id)));
     });
 
+    test(
+        'removeExpense drops it from state SYNCHRONOUSLY (before the DB await) '
+        '— Dismissible-safe', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Proj');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await n.addExpense(n.state.projects.first.id, 5.0, 'Reserva');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final id = n.state.expenses.first.id;
+
+      // Call WITHOUT awaiting: the synchronous prefix must already have removed
+      // the row from state, so a swipe's Dismissible.onDismissed never leaves a
+      // dismissed tile in the tree ("A dismissed Dismissible widget is still
+      // part of the tree" → screen freeze). With an await-first implementation
+      // the row is still present here and this fails.
+      final future = n.removeExpense(id);
+      expect(
+        n.state.expenses.map((e) => e.id),
+        isNot(contains(id)),
+        reason: 'row must leave state synchronously, before the DB await',
+      );
+      await future;
+      expect(n.state.expenses.map((e) => e.id), isNot(contains(id)));
+    });
+
+    test(
+        'deleteProject drops it from state SYNCHRONOUSLY (before the DB await) '
+        '— Dismissible-safe', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Kill me');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final id = n.state.projects.first.id;
+
+      final future = n.deleteProject(id);
+      expect(
+        n.state.projects.map((p) => p.id),
+        isNot(contains(id)),
+        reason: 'project must leave state synchronously, before the DB await',
+      );
+      await future;
+      expect(n.state.projects.map((p) => p.id), isNot(contains(id)));
+    });
+
     test('deleteProject drops it from the visible list offline', () async {
       final dao = await _freshDao();
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));

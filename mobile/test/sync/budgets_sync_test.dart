@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
@@ -91,6 +93,55 @@ class _FakeTransport implements BudgetsTransport {
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async {
     _maybeFail(path);
+    calls.add(_Call('DELETE', path));
+    return {'status': 'deleted'};
+  }
+}
+
+/// Blocks the FIRST expense POST on [gate] so a drain can be held mid-push while
+/// a second mutation + sync() arrives — used to prove coalesced re-run.
+class _GatedTransport implements BudgetsTransport {
+  final Completer<void> gate;
+  final List<_Call> calls = [];
+  bool _firstExpensePost = true;
+  _GatedTransport(this.gate);
+
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+      {Map<String, dynamic>? queryParams}) async {
+    calls.add(_Call('GET', path, query: queryParams));
+    if (path.contains('/changes')) {
+      return {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '',
+      };
+    }
+    return {'projects': [], 'expenses': []};
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    if (path.contains('/expenses') && _firstExpensePost) {
+      _firstExpensePost = false;
+      await gate.future; // hold drain #1 mid-push until the test releases it
+    }
+    calls.add(_Call('POST', path, body: body));
+    return {'status': 'ok'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> patchJson(
+      String path, Map<String, dynamic> body) async {
+    calls.add(_Call('PATCH', path, body: body));
+    return {'status': 'ok'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async {
     calls.add(_Call('DELETE', path));
     return {'status': 'deleted'};
   }
@@ -1126,6 +1177,41 @@ void main() {
       final b = sync.sync();
       final results = await Future.wait([a, b]);
       expect(results, hasLength(2));
+    });
+
+    test(
+        'a sync() arriving mid-drain coalesces into a second drain '
+        '(a fresh add queued during a running sync is not stranded)', () async {
+      final dao = await _freshDao();
+      final gate = Completer<void>();
+      final transport = _GatedTransport(gate);
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      await dao.applyLocalProjectCreate('P', id: 'p1');
+      await dao.applyLocalExpenseCreate('p1', 1.0, 'first', id: 'e1');
+
+      // Drain #1 starts and blocks inside the first expense POST. Its outbox
+      // snapshot was taken BEFORE e2 exists — exactly the reserva race.
+      final run1 = sync.sync();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      // A new expense is added and its sync() fires WHILE drain #1 is blocked.
+      await dao.applyLocalExpenseCreate('p1', 2.0, 'second', id: 'e2');
+      final run2 = sync.sync(); // running → must schedule a coalesced re-run
+      await run2;
+
+      // Release drain #1 → it finishes, then the coalesced re-run drains e2.
+      gate.complete();
+      await run1;
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      final expensePosts = transport.calls
+          .where((c) => c.method == 'POST' && c.path.contains('/expenses'))
+          .length;
+      expect(expensePosts, greaterThanOrEqualTo(2),
+          reason: 'both e1 and the mid-drain e2 must reach the server');
+      expect(await dao.readBudgetsOutbox(), isEmpty,
+          reason: 'the coalesced re-run must fully drain the outbox');
     });
   });
 }

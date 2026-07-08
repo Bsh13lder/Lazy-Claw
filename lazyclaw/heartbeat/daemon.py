@@ -1666,6 +1666,7 @@ class HeartbeatDaemon:
             cursor = await db.execute(
                 "SELECT DISTINCT user_id FROM tasks "
                 "WHERE status IN ('todo', 'in_progress') "
+                "AND deleted_at IS NULL "
                 "AND reminder_at IS NOT NULL AND reminder_at <= ?",
                 (now_iso,),
             )
@@ -1679,6 +1680,7 @@ class HeartbeatDaemon:
                     "SELECT id, title, reminder_at, nag_count, nag_fired_at "
                     "FROM tasks "
                     "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
+                    "AND deleted_at IS NULL "
                     "AND reminder_at IS NOT NULL AND reminder_at <= ? "
                     "AND nag_count < 5",
                     (user_id, now_iso),
@@ -1843,6 +1845,7 @@ class HeartbeatDaemon:
                 "SELECT id, user_id, title, pre_reminders, reminder_at, priority "
                 "FROM tasks "
                 "WHERE status IN ('todo', 'in_progress') "
+                "AND deleted_at IS NULL "
                 "AND pre_reminders IS NOT NULL AND pre_reminders != '[]'",
             )
             rows = await cursor.fetchall()

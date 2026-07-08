@@ -34,7 +34,7 @@ class _NoopTaskSync implements TaskSync {
   @override
   bool get isRunning => false;
   @override
-  Future<SyncResult> sync() async => const SyncResult();
+  Future<SyncResult> sync({bool retryRejected = false}) async => const SyncResult();
   @override
   Future<SyncResult> push() async => const SyncResult();
   @override

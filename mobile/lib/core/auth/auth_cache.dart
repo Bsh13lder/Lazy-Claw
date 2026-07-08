@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../../models/user.dart';
+import '../constants/app_constants.dart';
 
 /// Secure-storage key for the last successfully authenticated user.
 const String kAuthCacheKey = 'auth.last_user';
@@ -12,9 +13,14 @@ const String kAuthCacheKey = 'auth.last_user';
 /// unreachable (offline mode — Tasks/Notes/Budgets keep working from the
 /// encrypted local store).
 ///
-/// The payload is pinned to the server `base_url` it was issued by: switching
-/// servers must NOT let a cached identity from server A unlock offline mode
-/// against server B.
+/// The payload records the server `base_url` it was issued by: switching to a
+/// genuinely DIFFERENT server must NOT let a cached identity from server A
+/// unlock offline mode against server B. The ONE exception is the app's own
+/// known aliases ([kServerAliases]) — DuckDNS / `.local` / LAN-IP all address
+/// the SAME self-hosted box, so an identity cached under one is valid under
+/// another. Without this, a runtime gateway host-flip forces a spurious
+/// re-login (see [SessionCookieInterceptor] for the same host-drift fix on the
+/// session cookie).
 abstract class AuthUserCache {
   /// The cached user for [baseUrl], or null when absent / unreadable /
   /// written for a different server. NEVER throws.
@@ -36,7 +42,7 @@ User? decodeAuthCachePayload(String? raw, {required String baseUrl}) {
   try {
     final decoded = jsonDecode(raw);
     if (decoded is! Map) return null;
-    if (decoded['base_url'] != baseUrl) return null;
+    if (!_sameServer(decoded['base_url'], baseUrl)) return null;
     final userJson = decoded['user'];
     if (userJson is! Map) return null;
     return User.fromJson(Map<String, dynamic>.from(userJson));
@@ -44,6 +50,16 @@ User? decodeAuthCachePayload(String? raw, {required String baseUrl}) {
     // Corrupt cache = no cache. The caller falls back to unauthenticated.
     return null;
   }
+}
+
+/// True when [cached] (a stored `base_url`) and [current] address the SAME
+/// server: an exact match, OR both are known aliases of the one self-hosted box
+/// ([kServerAliases]). A foreign URL never matches an alias, so offline mode
+/// still can't be unlocked against a different server.
+bool _sameServer(Object? cached, String current) {
+  if (cached is! String) return false;
+  if (cached == current) return true;
+  return kServerAliases.contains(cached) && kServerAliases.contains(current);
 }
 
 /// Production cache backed by [FlutterSecureStorage] (same store the server

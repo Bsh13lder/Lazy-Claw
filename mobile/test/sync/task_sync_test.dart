@@ -926,6 +926,62 @@ void main() {
       // One ran, one returned the empty default — neither throws.
       expect(results, hasLength(2));
     });
+
+    test('self-heals a stranded orphan create on the next sync() (ZZsynctest)',
+        () async {
+      final dao = await _freshDao();
+      // A locally-created task whose create op was dropped (drained by an older
+      // build / outage): dirty=1, last_synced_at=null, NOTHING in the outbox.
+      await dao.applyLocalCreate('ZZsynctest', id: 'orphan-1');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      expect(await dao.outboxCount(), 0);
+
+      final transport = _FakeTransport();
+      final sync = TaskSync(dao, TasksRepository(transport));
+
+      final result = await sync.sync();
+
+      // The heal re-queued the create, push drained it → a real POST happened.
+      final posts = transport.calls
+          .where((c) => c.method == 'POST' && c.path.contains('/api/tasks'))
+          .toList();
+      expect(posts, hasLength(1));
+      expect(posts.single.body?['id'], 'orphan-1');
+      expect(posts.single.body?['title'], 'ZZsynctest');
+      expect(result.pushed, 1);
+      // Row is now clean (no longer shows the un-synced badge).
+      expect(await dao.dirtyIds(), isNot(contains('orphan-1')));
+      expect(await dao.outboxCount(), 0);
+    });
+
+    test('sync(retryRejected: true) recovers a create_rejected orphan', () async {
+      final dao = await _freshDao();
+      // Stranded orphan flagged create_rejected (e.g. dropped during an outage).
+      await dao.applyLocalCreate('reserva-like', id: 'rej-1');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      await dao.logConflict(
+          id: 'rej-1', field: 'create_rejected', local: 'HTTP 401', server: null);
+
+      final transport = _FakeTransport();
+      final sync = TaskSync(dao, TasksRepository(transport));
+
+      // Routine sync leaves it excluded → no POST.
+      await sync.sync();
+      expect(
+          transport.calls.where((c) => c.method == 'POST').toList(), isEmpty);
+
+      // Force-retry sync clears the marker → the orphan re-queues + pushes.
+      await sync.sync(retryRejected: true);
+      final posts =
+          transport.calls.where((c) => c.method == 'POST').toList();
+      expect(posts, hasLength(1));
+      expect(posts.single.body?['id'], 'rej-1');
+      expect(await dao.dirtyIds(), isNot(contains('rej-1')));
+    });
   });
 }
 

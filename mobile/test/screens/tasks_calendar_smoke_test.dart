@@ -72,13 +72,15 @@ class _OfflineBudgetsTransport implements BudgetsTransport {
 class _NoopTaskSync extends TaskSync {
   _NoopTaskSync(super.dao, super.repo);
   @override
-  Future<SyncResult> sync() async => const SyncResult();
+  Future<SyncResult> sync({bool retryRejected = false}) async =>
+      const SyncResult();
 }
 
 class _NoopBudgetsSync extends BudgetsSync {
   _NoopBudgetsSync(super.dao, super.repo);
   @override
-  Future<BudgetsSyncResult> sync() async => const BudgetsSyncResult();
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async =>
+      const BudgetsSyncResult();
 }
 
 // ── Stub notifiers ───────────────────────────────────────────────────────────

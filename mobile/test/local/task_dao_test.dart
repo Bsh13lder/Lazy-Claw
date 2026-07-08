@@ -44,6 +44,114 @@ void main() {
     sqfliteFfiInit();
   });
 
+  // ── Self-heal stranded creates (orphan recovery — mirrors BudgetsDao) ───────
+  group('reenqueueOrphanedCreates', () {
+    test('re-enqueues a stranded task create (dropped op, never synced)',
+        () async {
+      final dao = await _freshDao();
+      // An offline-created task: dirty=1, last_synced_at=null, create queued.
+      await dao.applyLocalCreate('ZZsynctest',
+          id: 'task-orphan', priority: 'medium', category: 'Project');
+      // Simulate the create op being dropped (drained by an older build / outage).
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      expect(await dao.readOutbox(), isEmpty);
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 1);
+      final outbox = await dao.readOutbox();
+      expect(outbox.length, 1);
+      final op = outbox.single;
+      expect(op.op, OutboxOp.create);
+      expect(op.entity, kTaskEntity);
+      expect(op.entityId, 'task-orphan');
+      expect(op.payload['id'], 'task-orphan');
+      expect(op.payload['title'], 'ZZsynctest');
+      expect(op.payload['priority'], 'medium');
+      expect(op.payload['category'], 'Project');
+    });
+
+    test('does NOT duplicate when a pending op already exists', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('still queued', id: 't1');
+      // Op is still queued → not an orphan.
+      final healed = await dao.reenqueueOrphanedCreates();
+      expect(healed, 0);
+      expect((await dao.readOutbox()).length, 1);
+    });
+
+    test('skips a row already flagged create_rejected (no infinite loop)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('bad', id: 't-bad');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      await dao.logConflict(
+          id: 't-bad', field: 'create_rejected', local: 'HTTP 400', server: null);
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 0);
+      expect(await dao.readOutbox(), isEmpty);
+    });
+
+    test('skips a synced row whose UPDATE op was drained (last_synced_at set)',
+        () async {
+      final dao = await _freshDao();
+      // Pulled from server → last_synced_at set, dirty=0.
+      await dao.upsertFromServer(_serverTask(id: 't-synced'));
+      // A local edit → dirty=1 but last_synced_at stays (it DID reach server once).
+      await dao.applyLocalUpdate('t-synced', title: 'edited offline');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      // Not a stranded CREATE — it exists server-side; the next pull reconciles it.
+      expect(healed, 0);
+    });
+
+    test('idempotent — a second heal does not double-enqueue', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('orphan', id: 't-x');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      expect(await dao.reenqueueOrphanedCreates(), 1);
+      // Second call: the row now has a pending op again → no double-enqueue.
+      expect(await dao.reenqueueOrphanedCreates(), 0);
+      expect((await dao.readOutbox()).length, 1);
+    });
+
+    test('clearCreateRejectedConflicts unblocks a rejected orphan (force-retry)',
+        () async {
+      final dao = await _freshDao();
+      // A stranded orphan flagged create_rejected (transient outage rejection).
+      await dao.applyLocalCreate('reserva-like', id: 't-rej');
+      for (final o in await dao.readOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+      await dao.logConflict(
+          id: 't-rej', field: 'create_rejected', local: 'HTTP 401', server: null);
+
+      // Routine heal skips it (still excluded).
+      expect(await dao.reenqueueOrphanedCreates(), 0);
+
+      // Force-retry: clear markers, then the heal re-queues it.
+      final cleared = await dao.clearCreateRejectedConflicts();
+      expect(cleared, 1);
+      expect(await dao.reenqueueOrphanedCreates(), 1);
+      final op = (await dao.readOutbox()).single;
+      expect(op.op, OutboxOp.create);
+      expect(op.entityId, 't-rej');
+    });
+  });
+
   group('TaskDao local create', () {
     test('mints a UUID, stores dirty row, and enqueues a create', () async {
       final dao = await _freshDao();

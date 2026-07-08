@@ -664,6 +664,19 @@ class BrowserManager:
             
             # Add CDP endpoint verification before connecting
             if not await self._verify_cdp_ready(cdp_url):
+                # The managed browser process was already spawned by
+                # managed_browser.start() above, but since this raises
+                # before start() returns, the caller's `async with
+                # AsyncWebCrawler(...) as crawler:` never reaches
+                # __aexit__ -> crawler.close() (Python skips __aexit__
+                # entirely when __aenter__ raises). Without this explicit
+                # cleanup, a failed CDP handshake orphans the Chromium
+                # subprocess for the lifetime of the container (2026-07-03
+                # OOM incident: repeated failed launches accumulated until
+                # the cgroup memory limit was hit). cleanup() is a no-op
+                # when there is no owned subprocess (e.g. an externally
+                # supplied cdp_url), so it is always safe to call here.
+                await self.managed_browser.cleanup()
                 raise Exception(f"CDP endpoint at {cdp_url} is not ready after startup")
             
             self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)

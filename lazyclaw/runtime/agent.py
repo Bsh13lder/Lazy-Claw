@@ -34,6 +34,7 @@ from lazyclaw.browser.action_planner import (
 )
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.skills.tool_namespace import bare_tool_name
 from lazyclaw.channels.telegram_view import render_error as _render_error
 from lazyclaw.runtime.consolidation_guidance import is_consolidation_turn
 
@@ -159,7 +160,7 @@ def _infer_browser_role(message: str) -> str:
 # discovers them via `search_tools` when genuinely needed.
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
-    "dispatch_subagents", "run_background",
+    "dispatch_subagents", "run_background", "agent",
     "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
 })
@@ -168,6 +169,7 @@ _BASE_TOOL_NAMES = frozenset({
 # Brain only needs delegate (dispatch workers) + search + memory
 _LOCAL_TOOL_NAMES = frozenset({
     "delegate", "web_search", "recall_memories", "save_memory", "search_tools",
+    "agent",
 })
 
 # MiniMax M2.7 narrates actions as text instead of emitting tool_use blocks
@@ -180,7 +182,7 @@ _MINIMAX_MAX_TOOLS = 24
 # inline non-meta (domain) tool call, the brain is narrowed to ONLY these so
 # it must delegate the rest. Used only when LAZYCLAW_THIN_ROUTER is set.
 _META_TOOLS = frozenset({
-    "delegate", "dispatch_subagents", "run_background",
+    "delegate", "dispatch_subagents", "run_background", "agent",
     "search_tools", "web_search", "recall_memories", "save_memory",
     "get_agent_status",
 })
@@ -192,7 +194,7 @@ _META_TOOLS = frozenset({
 # search_tools + a non-existent tool, 13 iterations, 1670-char noise reply
 # instead of a clean delegate-and-summarize).
 _DISPATCH_ONLY_TOOLS = frozenset({
-    "delegate", "dispatch_subagents", "run_background",
+    "delegate", "dispatch_subagents", "run_background", "agent",
 })
 
 # Specialist-first brain (ADR-0005 Phase 5a): behind this flag the brain
@@ -709,6 +711,158 @@ _F1_MAX_RETRIES: int = 2
 _F1_CONFAB_MAX_RETRIES: int = 2
 
 
+# ── Dropped-channel confabulation guard (2026-07-04 web Upwork) ───────────
+# The two F1 gates above only fire when a channel-read tool ACTUALLY RAN
+# (both are wrapped in `any(_is_channel_read_tool(n) for n in
+# _tool_call_history)`). The 2026-07-04 incident slipped through that hole:
+# the brain requested `browser` then `upwork_inbox_check` — BOTH were dropped
+# as hallucinated (not in the current toolset), so nothing landed in
+# `_tool_call_history`, the turn read as a non-channel turn, and F1 stayed
+# observation-only. With ZERO live channel data the brain still shipped a
+# fabricated inbox table ("1 conversation room … | Amit K | …"). This guard
+# closes that hole with a structural invariant: a channel read requested-but-
+# dropped + no channel read that ran = no live channel data, so the reply
+# MUST NOT report inbox/message/sender/room/count contents. Cap mirrors the
+# sibling F1 retry caps (2 grounding corrections, then a safe fallback).
+_F1_DROPPED_CHANNEL_MAX_RETRIES: int = 2
+
+# Honest, content-free reply shipped when the brain keeps fabricating channel
+# data after the retry budget is spent. Deliberately free of any inbox/
+# message assertion so `_draft_asserts_channel_data` treats it as clean.
+_DROPPED_CHANNEL_FALLBACK: str = (
+    "I wasn't able to read that channel just now — the read didn't go "
+    "through. Want me to try again, or hand it to the specialist?"
+)
+
+# "This reply asserts the CONTENTS of a channel" — positive fabrication
+# tells the 2026-07-04 draft carried: a "conversation room" phrase, an
+# "Unread Count" table header, a "Room ID", a "message from <Name>", or an
+# explicit count ("detected 1 conversation"). Matched case-insensitively.
+_CHANNEL_CONTENT_ASSERTION_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"conversation\s+rooms?"
+    r"|unread\s+counts?"
+    r"|room\s+id"
+    r"|messages?\s+from\s+\w"
+    r"|\b\d+\s+(?:new\s+)?(?:conversations?|messages?|unread|rooms?|dms?|chats?)\b"
+    r"|\bdetected\s+\d+"
+    r")",
+    re.IGNORECASE,
+)
+
+# Inability phrasing — when present the reply is HONESTLY reporting it
+# couldn't reach the channel, NOT fabricating contents. Such replies ship
+# unchanged (we only force the fallback when the draft CLEARLY still lies).
+_CHANNEL_INABILITY_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"couldn'?t|could\s+not|can'?t|cannot"
+    r"|was(?:n'?t|\s+not)\s+able|wasn'?t\s+able|not\s+able\s+to"
+    r"|un(?:able|available)"
+    r"|didn'?t\s+(?:go\s+through|work|load)|did\s+not\s+go\s+through"
+    r"|failed\s+to\s+(?:read|access|reach|load|fetch|retrieve)"
+    r"|no\s+access"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _draft_asserts_channel_data(text: str) -> bool:
+    """Conservative check: does ``text`` assert the CONTENTS of a channel?
+
+    Used only after the dropped-channel retry budget is exhausted, to decide
+    whether to force the honest fallback. Errs toward NOT firing: an honest
+    "couldn't access" reply (even one that names the inbox) returns False so
+    it ships unchanged; only a positive assertion of invented contents —
+    a sender/room/unread table, a "conversation room" claim, a "message from
+    X", or an explicit count — returns True. 2026-07-04 web Upwork incident.
+    """
+    if not text:
+        return False
+    # An inability statement is honest reporting, not fabrication.
+    if _CHANNEL_INABILITY_RE.search(text):
+        return False
+    if _CHANNEL_CONTENT_ASSERTION_RE.search(text):
+        return True
+    # A markdown table row carrying channel-ish headers is a strong tell
+    # (the incident shipped a `| Sender | Room ID | Unread Count |` table).
+    for line in text.splitlines():
+        if line.count("|") >= 2 and re.search(
+            r"sender|room|unread|conversation|message", line, re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+def _dropped_channel_confab_guard_active(
+    final_content: str,
+    channel_read_requested_but_dropped: bool,
+    tool_call_history: list[str],
+) -> bool:
+    """True when the brain has NO live channel data yet shipped a draft.
+
+    Fires only when ALL hold this turn (2026-07-04 web Upwork incident):
+      * a non-empty draft is about to ship, AND
+      * a channel-READ tool was requested but DROPPED as hallucinated
+        (``channel_read_requested_but_dropped`` — sticky per turn), AND
+      * NO channel-read tool actually ran (nothing in ``tool_call_history``
+        is a channel read) — if one ran, the brain HAS live data and the
+        existing F1 gates own the turn.
+
+    Deliberately does NOT inspect the draft's wording — that keeps this a
+    broad safety net that nudges EVERY dropped-channel draft toward
+    grounding, even fabrications the content heuristic would miss.
+    """
+    if not final_content:
+        return False
+    if not channel_read_requested_but_dropped:
+        return False
+    if any(_is_channel_read_tool(n) for n in tool_call_history):
+        return False
+    return True
+
+
+def _build_dropped_channel_correction() -> str:
+    """System-style correction for a dropped-channel confabulation retry."""
+    return (
+        "[SYSTEM: The channel-read tool you tried is NOT available and did "
+        "NOT run this turn — you have NO live data from that channel. You "
+        "MUST NOT invent, fabricate, or report ANY messages, senders, "
+        "conversations, rooms, inbox entries, unread counts, or tables of "
+        "channel contents. Either: (1) call `delegate` to hand this off to "
+        "the channel specialist, or (2) reply honestly that you couldn't "
+        "access the channel and offer to retry. Do not guess what the "
+        "inbox contains.]"
+    )
+
+
+def _dropped_channel_ship_decision(
+    final_content: str,
+    channel_read_requested_but_dropped: bool,
+    tool_call_history: list[str],
+    retries: int,
+    max_retries: int = _F1_DROPPED_CHANNEL_MAX_RETRIES,
+) -> tuple[str, str]:
+    """Decide how to handle a draft when a channel read was dropped.
+
+    Returns ``(action, payload)``:
+      * ``("ship", final_content)`` — guard inactive, or (after the cap) the
+        draft no longer asserts channel data → ship unchanged.
+      * ``("retry", correction)``   — re-roll the brain with a grounding
+        correction (budget remains).
+      * ``("replace", fallback)``   — retries exhausted AND the draft still
+        fabricates channel data → ship the honest fallback instead.
+    """
+    if not _dropped_channel_confab_guard_active(
+        final_content, channel_read_requested_but_dropped, tool_call_history,
+    ):
+        return ("ship", final_content)
+    if retries < max_retries:
+        return ("retry", _build_dropped_channel_correction())
+    if _draft_asserts_channel_data(final_content):
+        return ("replace", _DROPPED_CHANNEL_FALLBACK)
+    return ("ship", final_content)
+
+
 def _pop_confabulated_draft_for_retry(
     messages: list[LLMMessage],
 ) -> LLMMessage | None:
@@ -1106,6 +1260,13 @@ _MAX_TOOL_RESULT_CHARS = 4000
 # 50K (~12k tokens) is a safer ceiling for channel reads — covers
 # ~100 messages of a typical chat without blowing up cache budget.
 _MAX_TOOL_RESULT_CHARS_CHANNEL_READ = 50000
+
+# Unified `agent` tool results are load-bearing synthesis input (the
+# whole point of a sync sub-agent is that the brain reads its output).
+# Mirrors skills/builtin/agent_tool.MAX_AGENT_RESULT_CHARS — the skill
+# already clips with an explicit marker; this cap only guarantees the
+# generic capper below never re-chops it to 4K.
+_MAX_TOOL_RESULT_CHARS_AGENT = 12000
 
 # Substring match against the tool name to pick which cap applies.
 # Mirrored from f1_content_verifier._CHANNEL_READ_TOOL_PATTERNS so
@@ -1651,11 +1812,12 @@ def _cap_tool_result(result: str, tool_name: str | None = None) -> str:
     """
     if not result:
         return result
-    cap = (
-        _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
-        if _is_channel_read_tool_name(tool_name)
-        else _MAX_TOOL_RESULT_CHARS
-    )
+    if _is_channel_read_tool_name(tool_name):
+        cap = _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
+    elif tool_name == "agent":
+        cap = _MAX_TOOL_RESULT_CHARS_AGENT
+    else:
+        cap = _MAX_TOOL_RESULT_CHARS
     if len(result) <= cap:
         return result
     truncated = result[:cap]
@@ -1863,10 +2025,15 @@ def _build_hallucination_correction(
 ) -> str:
     """Craft a correction message that surfaces the RIGHT alternatives.
 
-    Handles two shapes:
+    Handles three shapes:
       - Plain hallucinated name (`foo_bar`) → search_tools(bar).
       - MCP-shaped name (`mcp_<uuid>_delete_spreadsheet`) → list actual
         sibling tools on the same server so the LLM sees what is real.
+      - Bad name's bare form matches a REGISTERED-but-not-attached MCP
+        tool (exists on a connected server but wasn't sent this turn,
+        e.g. thin-router narrowing or channel suppression) → steer to
+        delegate(...)/run_background(...) instead of retrying inline,
+        since search_tools discovery can't make it callable this turn.
     """
     parsed = _parse_mcp_name(bad_name)
     if parsed is not None and registry is not None:
@@ -1876,17 +2043,36 @@ def _build_hallucination_correction(
         # Surface the short form (strip the uuid prefix) so the LLM sees
         # familiar names.
         siblings_bare = [n[len(prefix):] for n in sibling_names][:40]
-        available_display = ", ".join(siblings_bare) if siblings_bare else "(none)"
-        return (
-            f"[SYSTEM: The tool '{bad_name}' does NOT exist. "
-            f"You called a non-existent operation on MCP server "
-            f"{server_id[:8]}…. Tools ACTUALLY available on that server: "
-            f"{available_display}. "
-            f"If '{bare}' is what you need and it's not in that list, "
-            f"the MCP server does not support it — try a native skill "
-            f"(e.g. google_run_task for Drive/Sheets delete or trash ops) "
-            f"or tell the user the operation is unsupported.]"
-        )
+        if siblings_bare:
+            return (
+                f"[SYSTEM: The tool '{bad_name}' does NOT exist. "
+                f"You called a non-existent operation on MCP server "
+                f"{server_id[:8]}…. Tools ACTUALLY available on that server: "
+                f"{', '.join(siblings_bare)}. "
+                f"If '{bare}' is what you need and it's not in that list, "
+                f"the MCP server does not support it — try a native skill "
+                f"(e.g. google_run_task for Drive/Sheets delete or trash ops) "
+                f"or tell the user the operation is unsupported.]"
+            )
+        # No siblings found on THAT server (it may be a stale/dead uuid) —
+        # fall through to the registered-but-not-attached check below,
+        # which searches every connected MCP server by bare name.
+
+    # Registered-but-not-attached: the tool EXISTS on a connected MCP
+    # server but was not sent this turn (thin-router narrowing, channel
+    # suppression). search_tools discovery can't make it callable — the
+    # ONLY productive move is delegate. Without this steer the model
+    # retried the same inline call to the hallucination cap (2026-07-02).
+    if registry is not None:
+        bad_bare = bare_tool_name(bad_name)
+        mcp_names = registry.list_names_by_prefix("mcp_")
+        if any(bare_tool_name(n) == bad_bare for n in mcp_names):
+            return (
+                f"[SYSTEM: The tool '{bad_bare}' exists but is NOT active in "
+                f"your current toolset this turn. Do NOT call it inline "
+                f"again. Call delegate(...) so a specialist executes it, or "
+                f"run_background(...) for long work.]"
+            )
 
     # Plain hallucination — use the last name segment as a search hint
     # instead of splitting at the first '_' (old bug: 'mcp_x'.split('_')[0] = 'mcp').
@@ -1899,6 +2085,37 @@ def _build_hallucination_correction(
         f"Your current tools: {', '.join(_avail)}. "
         f"Try search_tools FIRST, then use what you find, or respond with text if nothing fits.]"
     )
+
+
+def _suffix_rescue_tool_calls(
+    tool_calls: list, valid_names: set[str],
+) -> tuple[list, list[str]]:
+    """Rewrite hallucinated tool names that bare-suffix-match EXACTLY ONE
+    attached tool. The model often remembers a tool's bare name
+    (`upwork_get_job_details`) or a stale `mcp_<old-uuid>_` prefix from
+    history; exact-match-only validity bailed the 2026-07-02 Upwork
+    proposal turn after 3 strikes. Matching is restricted to the tools
+    attached THIS turn, so thin-router / specialist-first suppression is
+    never bypassed. Returns (new_calls, ["old → new", ...]).
+    """
+    bare_to_valid: dict[str, list[str]] = {}
+    for vn in valid_names:
+        bare_to_valid.setdefault(bare_tool_name(vn), []).append(vn)
+    rescued: list[str] = []
+    new_calls = []
+    for tc in tool_calls:
+        if tc.name in valid_names:
+            new_calls.append(tc)
+            continue
+        matches = bare_to_valid.get(bare_tool_name(tc.name), [])
+        if len(matches) == 1:
+            new_calls.append(
+                ToolCall(id=tc.id, name=matches[0], arguments=tc.arguments)
+            )
+            rescued.append(f"{tc.name} → {matches[0]}")
+        else:
+            new_calls.append(tc)
+    return new_calls, rescued
 
 
 def _correction_hint_for_user(bad_name: str, registry) -> str:
@@ -2691,6 +2908,26 @@ class Agent:
             bg_skill._caller_depth = self._depth
             self.registry.register(bg_skill)
 
+            # Unified `agent` dispatch tool (Claude Code dispatcher
+            # pattern) — sync parallel fan-out with in-turn results,
+            # background opt-in. Shares the turn's fanout group so
+            # background siblings consolidate with run_background's.
+            from lazyclaw.skills.builtin.agent_tool import AgentDispatchSkill
+
+            agent_dispatch_skill = AgentDispatchSkill(
+                config=self.config,
+                registry=self.registry,
+                eco_router=self.eco_router,
+                permission_checker=self.executor._checker if self.executor else None,
+                callback=cb,
+                team_lead=self._team_lead,
+                task_runner=self._task_runner,
+                chat_session_id=chat_session_id,
+                fanout_group_id=_bg_fanout_group_id,
+            )
+            agent_dispatch_skill._caller_depth = self._depth
+            self.registry.register(agent_dispatch_skill)
+
         # Initialize channel state (used by tool nudge later, must exist for all paths)
         _matched_channels: list[str] = []
 
@@ -2707,6 +2944,12 @@ class Agent:
         # `if needs_tools and _wants_visible:`) outside the tool-loading block.
         _wants_browser: bool = False
         _wants_visible: bool = False
+        # Task-keyword intent — assigned inside the `elif needs_tools:` branch
+        # below, but referenced later in the COMMON path (specialist-first
+        # exempt gate at ~4144, added 2026-07-03 / 763c506). A tool-less chat
+        # turn ("hello") has needs_tools=False, so the branch is skipped and the
+        # gate would hit UnboundLocalError. Default here so every path is bound.
+        _wants_tasks: bool = False
 
         if needs_tools and _is_slim_heartbeat:
             # Tier-A slim heartbeat. Tool budget is split by envelope kind:
@@ -3804,6 +4047,18 @@ class Agent:
         _confab_injected: bool = False
         _confab_retries: int = 0
 
+        # Dropped-channel confabulation guard (2026-07-04 web Upwork). Sticky
+        # per-turn flag: set True at the hallucinated-tool drop site when a
+        # channel-READ tool the brain requested was dropped (never ran). Paired
+        # with `_f1_dropped_channel_retries` (capped at
+        # `_F1_DROPPED_CHANNEL_MAX_RETRIES`). When the flag is set AND no
+        # channel-read tool actually ran this turn, the brain has NO live
+        # channel data — the ship guard near the F1 phase-1 gate forces a
+        # grounding correction, then an honest fallback. See module-level
+        # `_dropped_channel_ship_decision`.
+        _channel_read_requested_but_dropped = False
+        _f1_dropped_channel_retries = 0
+
         # Auto-promote-to-background nudge: when a foreground turn drags
         # past N tool-using iterations and the brain hasn't yet called
         # run_background, inject a system message that strongly suggests
@@ -3910,6 +4165,19 @@ class Agent:
         # and the late-inject gate let them through. Recovery wins over
         # the filter; everything else stays filtered.
         _specialist_first_exempt: set[str] = set()
+        # Keyword-injected deterministic intent (2026-07-03 task-CRUD
+        # routing incident): when the user's message unambiguously names
+        # task management ("_TASK_KEYWORDS" match → _wants_tasks, injected
+        # at ~3089), the SAME task tools are trusted to survive both the
+        # specialist-first filter (4180 block) and the thin-router
+        # post-action narrowing (4241/4733 blocks) so the brain can call
+        # add_task/delete_task/etc. directly on this turn instead of
+        # hallucinating against a filtered-out schema and either bailing
+        # ("tool doesn't exist") or dead-ending in a confusing background
+        # dispatch. Scoped to explicit keyword intent only — non-task
+        # turns are completely unaffected.
+        if _wants_tasks:
+            _specialist_first_exempt |= _TASK_TOOL_NAMES
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
         # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
@@ -4188,7 +4456,15 @@ class Agent:
                     # → DISPATCH-ONLY: drop search_tools/web_search/recall so the
                     # brain can't keep thrashing tool-discovery and MUST hand off
                     # to a worker (2026-06-24 workspace-mail 13-iter noise turn).
-                    _narrow_set = _META_TOOLS if _cap_by_mutation else _DISPATCH_ONLY_TOOLS
+                    # Keyword-injected deterministic-intent tools (e.g. task
+                    # tools on a _wants_tasks turn) ride along with the narrow
+                    # set — the same trust extended to the specialist-first
+                    # filter above; see _specialist_first_exempt population
+                    # (2026-07-03 task-CRUD routing incident).
+                    _narrow_set = (
+                        (_META_TOOLS if _cap_by_mutation else _DISPATCH_ONLY_TOOLS)
+                        | _specialist_first_exempt
+                    )
                     _narrow_label = "meta-only" if _cap_by_mutation else "dispatch-only"
                     _meta_only = [
                         t for t in tools
@@ -4677,6 +4953,7 @@ class Agent:
                             if (
                                 _thin_router_capped
                                 and tc.name not in _META_TOOLS
+                                and tc.name not in _specialist_first_exempt
                             ):
                                 # THIN-ROUTER cap: after the one inline
                                 # action only meta tools are callable.
@@ -4686,6 +4963,10 @@ class Agent:
                                 # upwork_inbox_check on 2026-06-10 16:20)
                                 # would otherwise re-enter through this
                                 # late-inject door and bypass the cap.
+                                # Keyword-injected deterministic-intent tools
+                                # (2026-07-03 task-CRUD routing incident) are
+                                # exempt — same trust as the narrow-set patch
+                                # above.
                                 _resurrect_blocked.append(tc.name)
                                 continue
                             if (
@@ -4717,6 +4998,29 @@ class Agent:
                             _resurrect_blocked,
                         )
 
+                    # Suffix-rescue: the LLM sometimes calls a tool's bare
+                    # name or a stale mcp_<old-uuid>_ prefix (leaked from
+                    # another user's history) instead of the exact attached
+                    # name. Rewrite it when EXACTLY ONE attached tool
+                    # bare-matches — matching is restricted to _valid_names
+                    # so thin-router / specialist-first suppression is never
+                    # bypassed (2026-07-02 Upwork incident).
+                    _rescued_calls, _rescue_log = _suffix_rescue_tool_calls(
+                        response.tool_calls, _valid_names,
+                    )
+                    if _rescue_log:
+                        logger.info(
+                            "Suffix-rescued %d hallucinated tool name(s): %s",
+                            len(_rescue_log), _rescue_log,
+                        )
+                        response = _LLMResp(
+                            content=response.content,
+                            model=response.model,
+                            usage=response.usage,
+                            tool_calls=_rescued_calls,
+                            fallback_reason=response.fallback_reason,
+                        )
+
                     _valid_calls = [
                         tc for tc in response.tool_calls if tc.name in _valid_names
                     ]
@@ -4727,6 +5031,18 @@ class Agent:
                             "Dropped %d hallucinated tool calls (not in current tools): %s",
                             _dropped, _dropped_names,
                         )
+                        # 2026-07-04 web Upwork dropped-channel confabulation:
+                        # if the brain requested a channel-READ tool that got
+                        # dropped here (never ran), remember it (sticky). With
+                        # no live channel data it must not report inbox/message
+                        # contents downstream — the ship guard near the F1
+                        # phase-1 gate enforces that. Set on BOTH the mixed and
+                        # all-dropped branches; the downstream guard still
+                        # no-ops if a channel read later runs successfully.
+                        if any(
+                            _is_channel_read_tool(n) for n in _dropped_names
+                        ):
+                            _channel_read_requested_but_dropped = True
                         if _valid_calls:
                             # Mixed success — reset the hallucination counter.
                             _halluc_retries = 0
@@ -4984,6 +5300,10 @@ class Agent:
                         # delegate is a real fire-and-forget dispatch too —
                         # a post-delegate "I've dispatched" is truthful.
                         and "delegate" not in _called_tool_names
+                        # `agent` sync calls already returned their result
+                        # this turn; bg calls are fire-and-forget like the
+                        # others above — either way "dispatched" is truthful.
+                        and "agent" not in _called_tool_names
                     ):
                         _halluc_retries += 1
                         _matched_phrase = _claim_match.group(0)[:60]
@@ -5039,6 +5359,7 @@ class Agent:
                         and "dispatch_subagents" not in _called_tool_names
                         # Same for delegate — it already dispatched a worker.
                         and "delegate" not in _called_tool_names
+                        and "agent" not in _called_tool_names
                         and not _is_meta_question(message)
                     ):
                         logger.warning(
@@ -5207,6 +5528,58 @@ class Agent:
                         _iter_role = "escalation" if _fallback_name else ROLE_BRAIN
                         streamed_content = ""
                         continue  # Retry with a different provider
+
+                    # Dropped-channel confabulation guard (2026-07-04 web
+                    # Upwork). The F1 gates below only fire when a channel-read
+                    # tool ACTUALLY RAN. The 2026-07-04 incident dropped
+                    # `browser` + `upwork_inbox_check` as hallucinated (neither
+                    # ran) then fabricated a "1 conversation room | Amit K"
+                    # inbox table from ZERO live data — a non-channel turn to
+                    # the F1 gates, so they stayed observation-only. This guard
+                    # fires when a channel read was requested-but-dropped and
+                    # none ran: force a grounding correction (delegate or admit
+                    # no access), then an honest fallback after the cap. See
+                    # module-level `_dropped_channel_ship_decision`.
+                    _dc_action, _dc_payload = _dropped_channel_ship_decision(
+                        _final_content,
+                        _channel_read_requested_but_dropped,
+                        _tool_call_history,
+                        _f1_dropped_channel_retries,
+                    )
+                    if _dc_action == "retry":
+                        _f1_dropped_channel_retries += 1
+                        logger.warning(
+                            "[F1-dropped-channel] channel read requested but "
+                            "dropped (no live data) — injecting grounding "
+                            "correction (retry %d/%d). draft_head=%r",
+                            _f1_dropped_channel_retries,
+                            _F1_DROPPED_CHANNEL_MAX_RETRIES,
+                            (_final_content or "")[:160],
+                        )
+                        messages.append(LLMMessage(
+                            role="assistant", content=_final_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="user", content=_dc_payload,
+                        ))
+                        streamed_content = ""
+                        continue
+                    if _dc_action == "replace":
+                        # Retries exhausted and the draft STILL fabricates
+                        # channel contents. Ship the honest fallback instead of
+                        # the invented inbox. Override both the user-facing text
+                        # and `_history_content` (the version appended to
+                        # all_new_messages + returned to the user).
+                        logger.warning(
+                            "[F1-dropped-channel-degraded] retries exhausted "
+                            "(%d/%d); draft still fabricates channel data — "
+                            "shipping honest fallback. draft_head=%r",
+                            _f1_dropped_channel_retries,
+                            _F1_DROPPED_CHANNEL_MAX_RETRIES,
+                            (_final_content or "")[:160],
+                        )
+                        _final_content = _dc_payload
+                        _history_content = _dc_payload
 
                     # F1 grounding enforcement — when a channel-read tool was
                     # called this turn, the reply MUST quote the tool result,
@@ -6615,6 +6988,10 @@ class Agent:
                     # to a background worker spawns a THIRD redundant
                     # executor — the 2026-06-08 14:18 triple-execution bug.
                     and "delegate" not in _called_tool_names
+                    # `agent` (unified dispatch) — sync calls return their
+                    # results in-turn and bg calls already went to the task
+                    # runner; promoting either is redundant.
+                    and "agent" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
                     and not _only_readonly_so_far
                     # THIN-ROUTER replaces AUTO-PROMOTE with the earlier
@@ -6738,7 +7115,7 @@ class Agent:
                     and user_id is not None
                     and not any(
                         d in _called_tool_names
-                        for d in ("delegate", "dispatch_subagents", "run_background")
+                        for d in ("agent", "delegate", "dispatch_subagents", "run_background")
                     )
                 ):
                     _stall_anchor = _cap_iter if _cap_stalled else _sf_stall_iter

@@ -8,16 +8,19 @@ import 'package:pdfx/pdfx.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
+import 'doc_freshness.dart';
 import 'doc_share.dart';
 import 'export_password_dialog.dart';
 
 /// PDF viewer (pdfx — MIT, pdfium-backed) fed by `GET /api/pdf/{id}/raw`, plus
 /// the ✨ AI-edit box.
 ///
-/// PDF ops are immutable server-side: a successful AI edit returns a NEW
-/// `new_pdf_id`, so we swap the viewer to it in place (and the old file stays
-/// untouched). PDFs can't be reflow text-edited — the AI box drives
-/// sign/fill/merge/split/rotate/generate.
+/// A successful AI edit returns `new_pdf_id`. For single-output ops
+/// (sign/fill/rotate/merge) that id EQUALS the open id — the file was edited in
+/// place (its prior bytes kept as a recoverable server-side version) — so we
+/// force a network reload to replace the now-stale cached bytes. `generate` /
+/// `split` return a NEW id and we swap the viewer to it. PDFs can't be reflow
+/// text-edited.
 class PdfViewerScreen extends ConsumerStatefulWidget {
   const PdfViewerScreen({super.key, required this.id, required this.name});
 
@@ -28,35 +31,76 @@ class PdfViewerScreen extends ConsumerStatefulWidget {
   ConsumerState<PdfViewerScreen> createState() => _PdfViewerScreenState();
 }
 
-class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
+class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen>
+    with WidgetsBindingObserver {
   late String _pdfId = widget.id;
   bool _loading = true;
   bool _applying = false;
   String? _error;
   PdfControllerPinch? _controller;
+  // updated_at of the bytes currently on screen. When sync learns the server
+  // copy is newer (edited on web / another device / an in-place ✨ edit), we
+  // auto-reload the fresh bytes in place.
+  String? _renderedUpdatedAt;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _load();
+      // Pull /changes so an edit made elsewhere BEFORE we opened this PDF
+      // surfaces; the ref.listen in build() then reloads if it's now stale.
+      _triggerRefresh();
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
     super.dispose();
   }
 
-  Future<void> _load() async {
+  /// Re-check for a server-side edit whenever the app returns to foreground.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _triggerRefresh();
+  }
+
+  /// Drain the outbox + pull /changes for PDFs so the list provider learns of a
+  /// server-side edit. Fire-and-forget — offline is a normal no-op, and the
+  /// ref.listen in build() reacts to the resulting state change.
+  void _triggerRefresh() {
+    if (!mounted) return;
+    ref.read(documentsListProvider(DocKind.pdf).notifier).refresh();
+  }
+
+  /// The freshest server updated_at for the open PDF, from the list provider
+  /// (kept current by sync). Null when unknown (list not loaded / offline).
+  String? _serverUpdatedAt() {
+    for (final m in ref.read(documentsListProvider(DocKind.pdf)).items) {
+      if (m.id == _pdfId) return m.updatedAt;
+    }
+    return null;
+  }
+
+  Future<void> _load({bool forceNetwork = false}) async {
     final cache = ref.read(documentCacheDaoProvider);
-    // PDFs are immutable per id (an edit mints a NEW id), so a cached copy is
-    // always fresh — render it and skip the network entirely (also = offline).
-    if (cache != null) {
+    final serverUpdatedAt = _serverUpdatedAt();
+    // A cached copy is fresh UNLESS the server copy is newer (an in-place ✨
+    // edit here, or an edit on web / another device). Serve the cache only when
+    // it isn't stale and the caller didn't force the network; otherwise fetch
+    // and overwrite the cache with the new bytes + updated_at below.
+    if (cache != null && !forceNetwork) {
       final cached = await cache.getDoc(DocKind.pdf.api, _pdfId);
       final cbytes = cached?.bytes;
-      if (cbytes != null && cbytes.isNotEmpty) {
+      if (cbytes != null &&
+          cbytes.isNotEmpty &&
+          !isServerNewer(cached?.updatedAt, serverUpdatedAt)) {
         if (!mounted) return;
         _renderBytes(cbytes);
+        _renderedUpdatedAt = cached?.updatedAt ?? serverUpdatedAt;
         setState(() {
           _loading = false;
           _error = null;
@@ -73,13 +117,17 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
       final bytes = await repo.getPdfBytes(_pdfId);
       if (!mounted) return;
       _renderBytes(bytes);
+      _renderedUpdatedAt = serverUpdatedAt ?? _renderedUpdatedAt;
       setState(() => _loading = false);
       try {
-        await cache?.putDoc(
+        // Cache the fresh bytes WITH updated_at so the next staleness check is
+        // meaningful (a null updated_at would always look "not newer").
+        await cache?.putServerDoc(
           kind: DocKind.pdf.api,
           id: _pdfId,
           name: widget.name,
           bytes: bytes,
+          updatedAt: serverUpdatedAt,
         );
       } catch (_) {
         // Caching is best-effort.
@@ -112,11 +160,15 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
       if (!mounted) return;
       setState(() => _applying = false);
       if (result.ok && result.newPdfId != null) {
-        // Immutable op: switch to the freshly produced file.
+        // In-place edit → same id (bytes changed); generate/split → new id.
+        // Either way the cached copy for the target id is stale. Pull /changes
+        // FIRST so the list has this file's new updated_at (keeps the staleness
+        // tracker honest), then force a network reload to fetch + re-cache.
         _pdfId = result.newPdfId!;
-        ref.read(documentsListProvider(DocKind.pdf).notifier).refresh();
+        await ref.read(documentsListProvider(DocKind.pdf).notifier).refresh();
+        if (!mounted) return;
         _snack(result.summary ?? 'PDF updated.');
-        await _load();
+        await _load(forceNetwork: true);
       } else {
         _snack(result.error ?? 'AI could not apply that change.', error: true);
       }
@@ -165,6 +217,22 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Auto-refresh: when sync learns this PDF's server copy is newer (edited on
+    // web / another device), reload the fresh bytes in place. Guarded so it
+    // never fires mid-load or mid-edit, and only on a genuinely newer stamp.
+    ref.listen(documentsListProvider(DocKind.pdf), (_, next) {
+      if (_loading || _applying) return;
+      String? su;
+      for (final m in next.items) {
+        if (m.id == _pdfId) {
+          su = m.updatedAt;
+          break;
+        }
+      }
+      if (isServerNewer(_renderedUpdatedAt, su)) {
+        _load(forceNetwork: true);
+      }
+    });
     return LzScaffold(
       appBar: LzAppBar(
         title: widget.name,

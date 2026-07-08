@@ -5,10 +5,13 @@ import {
   downloadPdfBlob,
   extractPdfText,
   listPdfs,
+  listPdfVersions,
   patchPdf,
   pdfRawUrl,
+  restorePdfVersion,
   uploadPdf,
   type PdfMeta,
+  type PdfVersion,
 } from "../api";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -46,6 +49,13 @@ export default function Pdf() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [extract, setExtract] = useState<ExtractState>({ phase: "idle" });
   const [exportPassword, setExportPassword] = useState("");
+  // Bumped after an in-place ✨ edit so the viewer re-fetches the same id's new
+  // bytes (react-pdf caches by `===` on the source URL — see pdfRawUrl).
+  const [reloadToken, setReloadToken] = useState(0);
+  // Pre-edit version history for the open PDF (recoverable snapshots).
+  const [showVersions, setShowVersions] = useState(false);
+  const [versions, setVersions] = useState<PdfVersion[]>([]);
+  const [versionsBusy, setVersionsBusy] = useState(false);
 
   // ── Tag filter state ────────────────────────────────────────────────
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
@@ -69,10 +79,12 @@ export default function Pdf() {
       : files.filter((f) => (f.tags ?? []).some((t) => activeTags.has(t)));
 
   // Memoize the `file` source — react-pdf uses `===` to detect changes, so a
-  // fresh string each render would re-fetch the whole document every time.
+  // fresh string each render would re-fetch the whole document every time. The
+  // `reloadToken` is part of the URL so an in-place ✨ edit (same id, new bytes)
+  // busts the cache and forces exactly one re-fetch.
   const fileSource = useMemo(
-    () => (activeId ? pdfRawUrl(activeId) : null),
-    [activeId],
+    () => (activeId ? pdfRawUrl(activeId, reloadToken) : null),
+    [activeId, reloadToken],
   );
 
   async function refreshList(selectId?: string) {
@@ -97,6 +109,8 @@ export default function Pdf() {
     setNumPages(null);
     setLoadError(null);
     setExtract({ phase: "idle" });
+    setShowVersions(false);
+    setVersions([]);
   }, [activeId]);
 
   async function handleUploadClick() {
@@ -149,6 +163,30 @@ export default function Pdf() {
         phase: "error",
         message: err instanceof Error ? err.message : "Extraction failed",
       });
+    }
+  }
+
+  async function loadVersions() {
+    if (!activeId) return;
+    setVersionsBusy(true);
+    try {
+      setVersions(await listPdfVersions(activeId));
+    } catch {
+      setVersions([]);
+    } finally {
+      setVersionsBusy(false);
+    }
+  }
+
+  async function handleRestore(versionId: string) {
+    if (!activeId) return;
+    try {
+      await restorePdfVersion(activeId, versionId);
+      setReloadToken((t) => t + 1); // re-fetch the restored bytes
+      await refreshList(activeId);
+      await loadVersions(); // restore is itself undoable → history grew
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Restore failed");
     }
   }
 
@@ -360,10 +398,65 @@ export default function Pdf() {
                   docId={activeId}
                   docName={activeFile.name}
                   onPdfApplied={(newId) => {
-                    // PDF ops create a new file — switch the viewer to it.
+                    // Bust the viewer cache — the bytes changed either way.
+                    setReloadToken((t) => t + 1);
+                    // In-place edit (sign/fill/rotate/merge) returns the SAME id
+                    // → reload it. generate/split return a NEW id → switch to it.
                     refreshList(newId ?? activeId).catch(() => {});
+                    // Refresh version history if the panel is open.
+                    if (showVersions) loadVersions().catch(() => {});
                   }}
                 />
+                {activeId && (
+                  <div className="relative">
+                    <button
+                      onClick={() => {
+                        const next = !showVersions;
+                        setShowVersions(next);
+                        if (next) loadVersions().catch(() => {});
+                      }}
+                      className="text-xs text-text-muted hover:text-accent transition-colors"
+                      title="Recover a version from before an AI edit"
+                    >
+                      History
+                    </button>
+                    {showVersions && (
+                      <div className="absolute right-0 z-20 mt-2 w-72 rounded-lg border border-border bg-bg-secondary p-2 shadow-xl">
+                        <p className="px-2 pb-1 text-[11px] uppercase tracking-wide text-text-muted">
+                          Pre-edit versions
+                        </p>
+                        {versionsBusy ? (
+                          <p className="px-2 py-2 text-xs text-text-muted">Loading…</p>
+                        ) : versions.length === 0 ? (
+                          <p className="px-2 py-2 text-xs text-text-muted">
+                            No earlier versions. AI edits keep a recoverable copy here.
+                          </p>
+                        ) : (
+                          <ul className="max-h-64 overflow-auto">
+                            {versions.map((v) => (
+                              <li
+                                key={v.id}
+                                className="flex items-center gap-2 px-2 py-1.5 text-xs"
+                              >
+                                <span className="flex-1 truncate text-text-secondary">
+                                  {v.created_at
+                                    ? new Date(v.created_at).toLocaleString()
+                                    : v.name}
+                                </span>
+                                <button
+                                  onClick={() => handleRestore(v.id)}
+                                  className="text-accent hover:underline"
+                                >
+                                  Restore
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <button
                   onClick={handleExtract}
                   disabled={extract.phase === "loading"}

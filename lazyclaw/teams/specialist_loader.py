@@ -145,6 +145,7 @@ def validate_specialist_tools(
             t
             for t in s.allowed_skills
             if t not in known
+            and t != "*"
             and not t.startswith("mcp_")
             and not t.startswith("mcp__")
         ]

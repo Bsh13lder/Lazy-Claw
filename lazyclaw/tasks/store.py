@@ -513,6 +513,7 @@ async def get_nagging_tasks(
         params = (user_id, now_iso)
         where = (
             "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
+            "AND deleted_at IS NULL "
             "AND reminder_at IS NOT NULL AND reminder_at <= ? "
             "AND nag_count > 0"
         )
@@ -520,6 +521,7 @@ async def get_nagging_tasks(
         params = (now_iso,)
         where = (
             "WHERE status IN ('todo', 'in_progress') "
+            "AND deleted_at IS NULL "
             "AND reminder_at IS NOT NULL AND reminder_at <= ? "
             "AND nag_count > 0"
         )

@@ -140,6 +140,36 @@ async def create_note_route(
     return note
 
 
+# NOTE: this static path MUST be declared before ``/notes/{note_id}`` —
+# FastAPI matches routes in declaration order, so if the parametrised
+# route comes first, ``GET /notes/changes`` binds ``note_id="changes"``
+# and 404s (the mobile offline-sync pull silently never worked, 2026-07-03).
+@router.get("/notes/changes")
+async def note_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 datetime. Only notes updated after this timestamp are "
+            "returned. Omit to receive all notes (full sync). Use the `now` "
+            "field from the previous response as the next `since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients.
+
+    Returns:
+    - ``notes``: live (non-deleted) notes updated after ``since``
+    - ``deleted``: ids of notes soft-deleted after ``since``
+    - ``now``: server ISO timestamp — pass this as ``since`` next time
+
+    Clients should persist ``now`` locally and send it on the next pull.
+    Last-write-wins on ``updated_at`` resolves any conflicts.
+    """
+    result = await store.get_note_changes(_config, user.id, since=since)
+    return result
+
+
 @router.get("/notes/{note_id}")
 async def get_note_route(note_id: str, user: User = Depends(get_current_user)):
     note = await store.get_note(_config, user.id, note_id)
@@ -182,32 +212,6 @@ async def delete_note_route(
         user.id, note_id, note["title"] if note else None
     )
     return {"status": "deleted", "id": note_id}
-
-
-@router.get("/notes/changes")
-async def note_changes_route(
-    user: User = Depends(get_current_user),
-    since: str | None = Query(
-        default=None,
-        description=(
-            "ISO-8601 datetime. Only notes updated after this timestamp are "
-            "returned. Omit to receive all notes (full sync). Use the `now` "
-            "field from the previous response as the next `since` value."
-        ),
-    ),
-):
-    """Delta feed for offline-first clients.
-
-    Returns:
-    - ``notes``: live (non-deleted) notes updated after ``since``
-    - ``deleted``: ids of notes soft-deleted after ``since``
-    - ``now``: server ISO timestamp — pass this as ``since`` next time
-
-    Clients should persist ``now`` locally and send it on the next pull.
-    Last-write-wins on ``updated_at`` resolves any conflicts.
-    """
-    result = await store.get_note_changes(_config, user.id, since=since)
-    return result
 
 
 @router.get("/notes/{note_id}/backlinks")

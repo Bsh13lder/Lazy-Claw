@@ -64,10 +64,17 @@ class BudgetsSync {
   bool get isRunning => _running;
 
   /// push() then pull(). A second call while one is in flight is a no-op.
-  Future<BudgetsSyncResult> sync() async {
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async {
     if (_running) return const BudgetsSyncResult();
     _running = true;
     try {
+      // Explicit user-triggered force-retry ("Sync now"): drop stale
+      // create_rejected markers so a transiently-rejected orphan (e.g. the
+      // reserva-1000 dropped by an outage or parent-404) is no longer excluded
+      // from the self-heal below. Routine syncs pass false, keeping the markers.
+      if (retryRejected) {
+        await _dao.clearCreateRejectedConflicts();
+      }
       // Self-heal any stranded offline creates (ops that were dead-lettered or
       // silently drained by an older build) BEFORE draining, so the reserva-1000
       // class of orphan — a dirty cache row with no outbox op — re-pushes this

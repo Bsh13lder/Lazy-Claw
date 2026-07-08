@@ -20,6 +20,43 @@ from .page_state import empty_or_blocked_result
 logger = logging.getLogger(__name__)
 
 
+# ── Fail-fast read-timeout hardening (2026-07-03) ────────────────────
+# Live incident: ``upwork_get_conversation`` / ``upwork_get_unread_count``
+# / ``upwork_get_messages`` all timed out ~60s against a genuinely-loaded
+# (no Cloudflare) Upwork Messages tab. mcp-upwork's own stderr showed the
+# room/bubble selectors matching ZERO elements (2026 layout drift), but
+# there was no fail-fast — each call burned its FULL wait budget on
+# elements that were never going to appear. Two stacked root causes:
+#
+# 1. ``browser/client.py:safe_goto`` defaults ``wait_until="networkidle"``.
+#    Upwork's messages page holds an open WebSocket/long-poll connection
+#    for real-time delivery, so it can NEVER reach network-idle (this is
+#    already acknowledged below at the ``wait_for_load_state`` call —
+#    "Upwork's SPA frequently never hits networkidle (long-poll WS,
+#    analytics beacons)" — but that lesson was never applied to the
+#    NAVIGATION itself). Every ``page.goto()`` / ``page.reload()`` using
+#    that wait_until burns the FULL per-page navigation timeout (default
+#    30000ms) waiting for a network state that will never happen.
+#    ``get_conversation_messages`` passes ``force_reload=True`` — TWO
+#    such waits (goto + reload) stack to up to 60000ms from navigation
+#    ALONE, before any selector is even queried. Exact match for the
+#    reported "~60s" symptom.
+#
+# 2. The rooms-panel ``wait_for_selector`` used a flat 20000ms timeout
+#    with no short-circuit for the "none of these will ever match"
+#    case (structural layout drift, not a slow-loading happy path).
+#
+# Fix: message-surface navigations pass ``_FAST_NAV_WAIT_UNTIL`` instead
+# of inheriting ``safe_goto``'s networkidle-forever default, and the
+# rooms-panel wait is capped at ``_ROOMS_PANEL_WAIT_MS`` — a few seconds,
+# not most of a minute. Converts a near-60s hang into a fast, honest
+# ``empty_or_blocked`` result. Other (non-message) Upwork surfaces keep
+# ``safe_goto``'s default — this is scoped to the tools actually
+# reported broken, per "minimal impact."
+_FAST_NAV_WAIT_UNTIL = "domcontentloaded"
+_ROOMS_PANEL_WAIT_MS = 6000
+
+
 # JS snippet that finds the chat scroll container on Upwork's 2026 DOM.
 # Three strategies, tried in order:
 #
@@ -289,7 +326,7 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     # search_jobs in flight at the same time would knock each other's
     # page handle out.
     try:
-        page = await browser.safe_goto(url)
+        page = await browser.safe_goto(url, wait_until=_FAST_NAV_WAIT_UNTIL)
     except Exception:
         logger.exception("get_messages: safe_goto to %s failed", url)
         raise
@@ -315,7 +352,7 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
         await page.wait_for_selector(
             '[data-test="rooms-panel"], [data-test="empty-state"], '
             '.rooms-panel-body, [data-test="room-item"]',
-            timeout=20000,
+            timeout=_ROOMS_PANEL_WAIT_MS,
         )
     except Exception as exc:
         logger.warning(
@@ -333,6 +370,18 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     # This is the upstream-original (fork commit 3009e69) chain that worked
     # reliably on MiniMax before the regression introduced in 12d3593.
     _room_selector = '[data-test="room-item"], .room-item, .conversation-item'
+
+    # Selector-resilience widening (2026-07-03) — UNVERIFIED against
+    # Upwork's live current DOM, needs live-capture confirmation. Same
+    # widening pattern already proven for the message-bubble selector in
+    # `get_conversation_messages` below (ARIA role + `data-qa` substring
+    # + class-substring fallbacks). Only consulted as a one-shot fallback
+    # AFTER `_room_selector` matches zero rows — doesn't cost extra wait
+    # time, just a broader net before concluding "truly empty / drifted".
+    _room_selector_widened = (
+        '[role="listitem"], [data-qa*="room"], [data-qa*="conversation"], '
+        'div[class*="RoomItem"], div[class*="room-item"], li[class*="room"]'
+    )
 
     # SPA-route stability gate. `safe_goto` can land on a /rooms/<id> tab
     # that React then re-routes to /ab/messages/rooms/ — the doctype
@@ -370,10 +419,24 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     # (vanooo/upwork-mcp 3009e69) — no .desktop-layout-room wrapper.
     room_els = await page.query_selector_all(_room_selector)
     if not room_els:
+        # Widened fallback (see `_room_selector_widened` above) — one
+        # extra cheap query, no additional wait. Confirm against a live
+        # DOM capture before trusting this shape long-term.
+        widened_els = await page.query_selector_all(_room_selector_widened)
+        if widened_els:
+            logger.warning(
+                "get_messages: primary room selector matched 0, widened "
+                "fallback matched %d at %s — Upwork layout may have "
+                "drifted, confirm selector against a live DOM capture",
+                len(widened_els), getattr(page, "url", "?"),
+            )
+            room_els = widened_els
+    if not room_els:
         logger.warning(
             "get_messages: 0 room elements matched at %s "
-            "(rooms-panel + [data-test=\"room-item\"] both empty). "
-            "Likely 2026 layout drift or CF challenge — surface upstream.",
+            "(rooms-panel + [data-test=\"room-item\"] + widened fallback "
+            "all empty). Likely 2026 layout drift or CF challenge — "
+            "surface upstream.",
             getattr(page, "url", "?"),
         )
 
@@ -754,7 +817,9 @@ async def get_conversation_messages(
     # the browser layer to defeat both the SPA short-circuit and the
     # SW cache.
     try:
-        page = await browser.safe_goto(url, force_reload=True)
+        page = await browser.safe_goto(
+            url, force_reload=True, wait_until=_FAST_NAV_WAIT_UNTIL,
+        )
     except UpworkRoomNotFound as exc:
         logger.warning(
             "get_conversation_messages: room not found — requested=%s redirected_to=%s",
@@ -2306,7 +2371,10 @@ async def get_unread_count() -> dict:
     await browser.ensure_logged_in()
 
     # Check messages badge in header
-    page = await browser.safe_goto("https://www.upwork.com/nx/find-work/")
+    page = await browser.safe_goto(
+        "https://www.upwork.com/nx/find-work/",
+        wait_until=_FAST_NAV_WAIT_UNTIL,
+    )
 
     unread_el = await page.query_selector('[data-test="messages-badge"], .messages-count, .unread-count')
     if unread_el:

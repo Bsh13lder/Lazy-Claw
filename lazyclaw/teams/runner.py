@@ -157,6 +157,35 @@ class SpecialistResult:
 # module-local alias so existing references (and tests) resolve unchanged.
 _bare_tool_name = bare_tool_name
 
+# Wildcard allowlist: a specialist with `tools: "*"` gets EVERY registry
+# tool except dispatch tools — single-depth means a subagent must never
+# be able to re-dispatch (mirrors Claude Code's general-purpose agent).
+WILDCARD_TOOLS = "*"
+WILDCARD_DENYLIST: frozenset[str] = frozenset({
+    "agent", "delegate", "dispatch_subagents", "run_background",
+})
+
+
+def wildcard_allows(
+    allowed_skills: tuple[str, ...],
+    tool_name: str,
+    native_names: frozenset[str] | set[str],
+) -> bool:
+    """True iff a wildcard allowlist permits executing ``tool_name``.
+
+    Deny: dispatch tools (single-depth), MCP twins of dispatch tools
+    (bare-name match), and native-shadowed MCP tools (native primacy).
+    """
+    if WILDCARD_TOOLS not in allowed_skills:
+        return False
+    if tool_name in WILDCARD_DENYLIST:
+        return False
+    if _bare_tool_name(tool_name) in WILDCARD_DENYLIST:
+        return False
+    if tool_name.startswith("mcp_") and is_native_shadowed(tool_name, native_names):
+        return False
+    return True
+
 
 def _filter_tools(
     registry: SkillRegistry,
@@ -171,10 +200,39 @@ def _filter_tools(
     so we identify them by their description containing ``mcp-scraper``.
     Without this, browser/research specialists would fall back to opening
     Chrome for read-only contact-data work that ``extract_entities`` solves
-    in one JS-rendered call.
+    in one JS-rendered call. When ``allowed`` contains the wildcard
+    (``WILDCARD_TOOLS``), every native tool minus ``WILDCARD_DENYLIST`` is
+    returned, unioned with every MCP tool EXCEPT those that are denylisted
+    or native-shadowed (native primacy — see ``tool_namespace.py``).
     """
     all_tools = registry.list_tools()
     allowed_set = set(allowed)
+
+    if WILDCARD_TOOLS in allowed_set:
+        native_names = native_names_from_tools(all_tools)
+        seen: set[str] = set()
+        out = []
+        for t in all_tools:
+            nm = t["function"]["name"]
+            if nm not in WILDCARD_DENYLIST and nm not in seen:
+                out.append(t)
+                seen.add(nm)
+        try:
+            mcp_tools = registry.list_mcp_tools()
+        except Exception:
+            mcp_tools = []
+        for t in mcp_tools:
+            nm = t.get("function", {}).get("name", "")
+            if (
+                nm
+                and nm not in seen
+                and _bare_tool_name(nm) not in WILDCARD_DENYLIST
+                and not is_native_shadowed(nm, native_names)
+            ):
+                out.append(t)
+                seen.add(nm)
+        return out
+
     out = [t for t in all_tools if t["function"]["name"] in allowed_set]
     if include_scraper:
         try:
@@ -678,9 +736,13 @@ async def run_specialist(
                     and _bare_tool_name(tc.name) in specialist.allowed_skills
                     and not is_native_shadowed(tc.name, native_names)
                 )
+                _wildcard_ok = wildcard_allows(
+                    specialist.allowed_skills, tc.name, native_names,
+                )
                 _step_started = time.monotonic()
                 if (
                     tc.name not in specialist.allowed_skills
+                    and not _wildcard_ok
                     and not _is_scraper_tool
                     and not _is_allowed_mcp
                 ):

@@ -35,7 +35,9 @@ from lazyclaw.pdf.store import (
     delete_pdf,
     get_pdf,
     get_pdf_changes,
+    list_pdf_versions,
     list_pdfs,
+    restore_pdf_version,
     update_pdf_meta,
 )
 from lazyclaw.runtime.doc_specialist import ai_edit_document
@@ -259,9 +261,11 @@ async def ai_edit_pdf_route(
 ):
     """Edit the open PDF from a natural-language instruction (✨ AI box).
 
-    PDF ops produce a NEW file (immutable), so the response carries
-    ``new_pdf_id`` for the viewer to switch to. PDFs can't be reflow
-    text-edited — this drives sign/fill/merge/split/rotate/generate.
+    Single-output ops (sign/fill/rotate/merge) edit the open PDF IN PLACE —
+    ``new_pdf_id`` comes back equal to ``pdf_id`` so the viewer just reloads
+    (the prior bytes are stashed as a recoverable version). ``generate`` /
+    ``split`` create NEW files, so ``new_pdf_id`` is a fresh id for the viewer
+    to switch to. PDFs can't be reflow text-edited.
     """
     result = await ai_edit_document(_config, user.id, "pdf", pdf_id, body.instruction)
     return {
@@ -270,6 +274,43 @@ async def ai_edit_pdf_route(
         "new_pdf_id": result.new_id,
         "error": result.error,
     }
+
+
+@router.get("/{pdf_id}/versions")
+async def list_pdf_versions_route(
+    pdf_id: str,
+    user: User = Depends(get_current_user),
+):
+    """List the recoverable pre-edit snapshots for a PDF (metadata, no bytes).
+
+    Each entry's ``id`` fetches bytes via ``/api/pdf/{id}/raw`` (preview) and
+    restores via ``POST /api/pdf/{pdf_id}/versions/{version_id}/restore``.
+    """
+    row = await get_pdf(_config, user.id, pdf_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    versions = await list_pdf_versions(_config, user.id, pdf_id)
+    return {"versions": versions, "count": len(versions)}
+
+
+@router.post("/{pdf_id}/versions/{version_id}/restore")
+async def restore_pdf_version_route(
+    pdf_id: str,
+    version_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Restore an archived snapshot back into the live PDF (itself undoable).
+
+    ``pdf_id`` is the live parent (for a clean REST path); the restore is keyed
+    on ``version_id`` and refuses a version that doesn't belong to this user OR
+    to the ``pdf_id`` in the path.
+    """
+    row = await restore_pdf_version(
+        _config, user.id, version_id, expected_parent=pdf_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"file": _meta(row)}
 
 
 @router.delete("/{pdf_id}")

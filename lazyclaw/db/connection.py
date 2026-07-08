@@ -8,7 +8,9 @@ safe and avoids the ~20-30ms overhead of connect/close per query.
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -22,8 +24,74 @@ logger = logging.getLogger(__name__)
 _pool: dict[str, aiosqlite.Connection] = {}
 
 
+class DatabaseCorruptionError(RuntimeError):
+    """Raised by ``init_db`` when an existing DB file fails integrity check.
+
+    Deliberately NOT a subclass of ``sqlite3.DatabaseError`` — this is a
+    startup-guard signal, not a raw driver error, so callers (and process
+    supervisors reading logs) can tell "we detected corruption and backed
+    it up" apart from "executescript blew up mid-write" (the 2026-07-03
+    outage: the latter crash-looped with no recovery path).
+    """
+
+
 def get_db_path(config: Config) -> Path:
     return config.database_dir / "lazyclaw.db"
+
+
+def _backup_corrupt_db(db_path: Path) -> Path:
+    """Copy (never move/delete) a malformed DB file aside for forensics.
+
+    Timestamped so repeated crash-loop attempts against the same corrupt
+    file don't clobber each other's backup.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup_path = db_path.with_name(f"{db_path.name}.corrupt-{timestamp}.bak")
+    shutil.copy2(db_path, backup_path)
+    return backup_path
+
+
+async def _guard_against_corrupt_db(db_path: Path) -> None:
+    """Fail safe on a malformed on-disk DB instead of crash-looping.
+
+    Fresh installs (no file yet) are unaffected — this only runs the
+    integrity check against a pre-existing file. On corruption, the file
+    is preserved (copied aside, never deleted/replaced) and a precise,
+    actionable error is raised instead of letting a raw
+    ``sqlite3.DatabaseError`` surface out of ``executescript`` mid-restart-
+    loop (2026-07-03 production outage root cause).
+    """
+    if not db_path.exists():
+        return  # new install — nothing to check yet
+
+    corrupt_reason: str | None = None
+    try:
+        async with aiosqlite.connect(db_path) as check_db:
+            cursor = await check_db.execute("PRAGMA quick_check")
+            row = await cursor.fetchone()
+            result = row[0] if row else None
+            if result != "ok":
+                corrupt_reason = str(result)
+    except aiosqlite.Error as exc:
+        # quick_check itself can raise (not just report a non-"ok" row)
+        # when the image is malformed badly enough that SQLite can't even
+        # walk the btree to run the check — this is the exact exception
+        # shape from the outage (`database disk image is malformed`).
+        corrupt_reason = str(exc)
+
+    if corrupt_reason is not None:
+        backup_path = _backup_corrupt_db(db_path)
+        raise DatabaseCorruptionError(
+            f"Database at {db_path} failed integrity check "
+            f"({corrupt_reason}). The corrupt file was left in place and "
+            f"a backup copy was saved to {backup_path}. Refusing to "
+            "auto-repair or auto-replace it — do NOT just restart the "
+            "process (it will crash-loop). Manual recovery: run "
+            f"`sqlite3 {backup_path} \".recover\" | sqlite3 "
+            f"{db_path.with_suffix('.recovered.db')}`, verify row counts "
+            "(not just `PRAGMA integrity_check`), then swap the recovered "
+            "file into place."
+        )
 
 
 async def init_db(config: Config) -> None:
@@ -32,6 +100,8 @@ async def init_db(config: Config) -> None:
     schema_sql = schema_path.read_text()
 
     db_path = get_db_path(config)
+    await _guard_against_corrupt_db(db_path)
+
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(schema_sql)
 
@@ -266,6 +336,18 @@ async def init_db(config: Config) -> None:
             )
         except Exception:
             logger.debug("tasks.updated_at backfill skipped", exc_info=True)
+
+        # PDF version index — created HERE (post-migration) not in schema.sql,
+        # because on an existing DB the `version_of` column only exists after the
+        # ALTER migration above runs; a CREATE INDEX on it inside the schema
+        # executescript (which runs first) would crash with "no such column".
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pdf_files_version_of "
+                "ON pdf_files(user_id, version_of)"
+            )
+        except Exception:
+            logger.debug("pdf_files.version_of index skipped", exc_info=True)
 
         # ── Progress templates — bundled function + learned skill ─────────
         # Schema cloned from browser_templates: name + playbook are encrypted,

@@ -62,6 +62,7 @@ class RunBackgroundSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
+            "LEGACY — prefer `agent` with run_in_background=true. "
             "Start a long-running action that should continue while the user keeps chatting. "
             "The background agent has ALL your tools (browser, web_search, memory, etc). "
             "USE ONLY WHEN: the task takes >30s AND is a concrete action "

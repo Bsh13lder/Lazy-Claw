@@ -44,6 +44,87 @@ from .crawler_summarizer import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Browser-launch leak/OOM hardening (2026-07-03 incident)
+#
+# `async with AsyncWebCrawler(...) as crawler:` skips __aexit__ (and thus
+# crawler.close(), which reaps the underlying Chromium/Playwright process)
+# whenever __aenter__ (crawler.start(), the browser launch) raises. A launch
+# that fails its CDP handshake or otherwise errors mid-start therefore
+# orphaned its browser process forever. Repeated failed launches (every
+# fallback stage retries with a new browser) accumulated until the
+# container's cgroup memory limit triggered an OOM kill.
+#
+# _run_stage_with_browser() replaces the bare `async with` with an explicit
+# start()/close() pair so close() always runs, adds a short fail-fast
+# timeout on the launch phase itself (separate from the much longer
+# per-stage crawl timeout), and caps how many browsers may be alive at once
+# process-wide so a burst of concurrent crawl_url calls (e.g. several
+# EXPLORE specialists hitting mcp-scraper at once) can't multiply the leak.
+# ---------------------------------------------------------------------------
+
+_BROWSER_LAUNCH_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(os.getenv("MCP_SCRAPER_MAX_CONCURRENT_BROWSERS", "2")))
+)
+_BROWSER_LAUNCH_TIMEOUT_SECONDS = float(
+    os.getenv("MCP_SCRAPER_BROWSER_LAUNCH_TIMEOUT", "15")
+)
+
+
+async def _safe_close_crawler(crawler) -> None:
+    """Best-effort crawler.close(). Reaping must never itself become a new
+    failure path, so any error here is logged and swallowed."""
+    try:
+        await crawler.close()
+    except Exception as close_error:
+        print(f"Warning: failed to close crawler during cleanup: {close_error}")
+
+
+async def _run_stage_with_browser(
+    current_browser_config: Dict[str, Any],
+    request: CrawlRequest,
+    config: "CrawlerRunConfig",
+):
+    """Launch one browser, run a single crawl attempt, and guarantee the
+    browser is reaped afterward — on success, on a launch failure, and on a
+    crawl failure alike.
+
+    Raises on any failure (launch timeout, launch error, crawl error) so the
+    caller's browsers_to_try fallback loop behaves exactly as before; the
+    only behavior change is that the browser is never left running.
+    """
+    crawler = AsyncWebCrawler(**current_browser_config)
+
+    async with _BROWSER_LAUNCH_SEMAPHORE:
+        try:
+            await asyncio.wait_for(
+                crawler.start(), timeout=_BROWSER_LAUNCH_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            await _safe_close_crawler(crawler)
+            raise RuntimeError(
+                f"Browser launch timed out after {_BROWSER_LAUNCH_TIMEOUT_SECONDS}s "
+                f"(browser_type={current_browser_config.get('browser_type')!r}) — "
+                "aborting this stage instead of waiting on the full crawl timeout"
+            ) from None
+        except Exception:
+            await _safe_close_crawler(crawler)
+            raise
+
+        try:
+            if request.execute_js and hasattr(config, 'js_code'):
+                config.js_code = request.execute_js
+
+            arun_params = {"url": request.url, "config": config}
+
+            return await asyncio.wait_for(
+                crawler.arun(**arun_params),
+                timeout=request.timeout
+            )
+        finally:
+            await _safe_close_crawler(crawler)
+
+
 async def _internal_crawl_url(request: CrawlRequest) -> CrawlResponse:
     """
     Crawl a URL and extract content using various methods, with optional deep crawling.
@@ -272,17 +353,10 @@ async def _internal_crawl_url(request: CrawlRequest) -> CrawlResponse:
                     current_browser_config = browser_config.copy()
                     current_browser_config["browser_type"] = browser_type
 
-                    async with AsyncWebCrawler(**current_browser_config) as crawler:
-                        if request.execute_js and hasattr(config, 'js_code'):
-                            config.js_code = request.execute_js
-
-                        arun_params = {"url": request.url, "config": config}
-
-                        result = await asyncio.wait_for(
-                            crawler.arun(**arun_params),
-                            timeout=request.timeout
-                        )
-                        break
+                    result = await _run_stage_with_browser(
+                        current_browser_config, request, config
+                    )
+                    break
 
                 except asyncio.TimeoutError:
                     error_msg = f"Crawl timeout after {request.timeout}s for {request.url}"

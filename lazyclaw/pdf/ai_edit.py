@@ -1,8 +1,16 @@
 """PDF strategy for the in-editor AI specialist.
 
-PDFs can't be reflow-edited, so the specialist drives the *manage* ops. Every op
-produces a NEW encrypted PDF (immutable, matching the skill layer) and the
-specialist returns its id so the viewer can switch to it. Plan shape:
+PDFs can't be reflow-edited, so the specialist drives the *manage* ops. To feel
+as seamless as the Docs/Sheets ✨ (which edit the open document in place), the
+single-output ops — ``add_text`` / ``fill_form`` / ``rotate`` / ``merge`` —
+replace the OPEN PDF in place: same id, same name, the viewer just reloads. The
+pre-edit bytes are stashed as a hidden recoverable version (see
+:func:`lazyclaw.pdf.store.archive_and_replace`) so the sidebar never accumulates
+``foo - signed - filled.pdf`` clutter. ``generate`` (a brand-new document from
+text) and ``split`` (one PDF → many) inherently create NEW files. On success the
+specialist returns ``new_id`` — equal to the open ``doc_id`` for an in-place
+edit, or a fresh id for generate/split — so the viewer knows whether to reload
+or switch. Plan shape:
 
     {"op": "add_text", "items": [{"page": 1, "x": 72, "y": 700, "text": "Signed"}]}
     {"op": "fill_form", "values": {"Name": "Ada"}, "flatten": false}
@@ -18,7 +26,7 @@ from typing import Any
 
 from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.pdf import ops
-from lazyclaw.pdf.store import get_pdf, list_pdfs, save_pdf
+from lazyclaw.pdf.store import archive_and_replace, get_pdf, list_pdfs, save_pdf
 
 PLAN_SHAPE = (
     '{"op": "add_text"|"fill_form"|"rotate"|"split"|"generate"|"merge", ...args}'
@@ -143,8 +151,7 @@ async def apply(
         if not isinstance(items, list) or not items:
             raise ValueError("add_text needs a non-empty 'items' list")
         out = ops.overlay_text(data, items)
-        row = await save_pdf(config, user_id, f"{base} - signed.pdf", out)
-        return _ok(f"Stamped {len(items)} item(s)", row)
+        return await _replace(config, user_id, doc_id, ctx, out, f"Stamped {len(items)} item(s)")
 
     if op == "fill_form":
         values = plan.get("values")
@@ -153,15 +160,13 @@ async def apply(
         out = ops.fill_form(data, values)
         if plan.get("flatten"):
             out = ops.flatten(out)
-        row = await save_pdf(config, user_id, f"{base} - filled.pdf", out)
-        return _ok(f"Filled {len(values)} field(s)", row)
+        return await _replace(config, user_id, doc_id, ctx, out, f"Filled {len(values)} field(s)")
 
     if op == "rotate":
         degrees = int(plan.get("degrees", 90))
         pages = plan.get("pages") if isinstance(plan.get("pages"), list) else None
         out = ops.rotate(data, degrees, pages)
-        row = await save_pdf(config, user_id, f"{base} - rotated.pdf", out)
-        return _ok(f"Rotated {degrees}°", row)
+        return await _replace(config, user_id, doc_id, ctx, out, f"Rotated {degrees}°")
 
     if op == "split":
         raw = plan.get("ranges")
@@ -198,13 +203,32 @@ async def apply(
             if other:
                 parts.append(other["bytes"])
         out = ops.merge(parts)
-        row = await save_pdf(config, user_id, f"{base} - merged.pdf", out)
-        return _ok(f"Merged {len(parts)} PDFs", row)
+        return await _replace(config, user_id, doc_id, ctx, out, f"Merged {len(parts)} PDFs")
 
     raise ValueError(f"unknown pdf op: {op!r}")
 
 
+async def _replace(
+    config: Any,
+    user_id: str,
+    doc_id: str,
+    ctx: dict[str, Any],
+    out: bytes,
+    summary: str,
+) -> dict[str, Any]:
+    """Overwrite the OPEN PDF in place (keeping its name), archiving the prior
+    bytes as a recoverable version. Returns ``new_id == doc_id`` so the viewer
+    reloads the same file instead of switching to a fork."""
+    row = await archive_and_replace(config, user_id, doc_id, out, name=ctx["name"])
+    return {
+        "summary": f"{summary} → {row['name']}.",
+        "snapshot": None,
+        "new_id": doc_id,
+    }
+
+
 def _ok(summary: str, row: dict) -> dict[str, Any]:
+    """For ops that legitimately create a NEW file (generate / split)."""
     return {
         "summary": f"{summary} → {row['name']}.",
         "snapshot": None,

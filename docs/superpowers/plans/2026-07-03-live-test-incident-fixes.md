@@ -19,3 +19,27 @@ Evidence ledger: `<scratchpad>/monitoring/findings.md`.
 
 ## Already done (live, no deploy)
 - Monitoring cron stopped. DB settings re-applied: blck full_brain/worker=MiniMax-M2.7, full_fallback=claude-haiku-4-5-20251001 (kills scrub+guard log spam at source).
+
+## Progress
+- [x] #5 Notes route ordering — committed 282d7dc (17 tests)
+- [x] #4 DB isolation + startup guard — committed 1f2c116 (62 tests green incl. explicit-Config coexistence)
+- [ ] #1 scraper leak — agent running
+- [ ] #2 upwork selectors — agent running (editing messages.py)
+- [ ] #3 task routing — agent running
+
+## Cross-scope landmine (flagged by DB agent, for review pass)
+`tests/test_claude_provider_isolation.py` may itself write to cwd / real paths — relates to [[project_sdk_session_isolation_leak]]. Verify it respects the new conftest tmp-dir isolation; fix in a follow-up if it hardcodes a path. NOT a wave-1 blocker.
+
+## ALL 5 COMMITTED (branch fix/live-test-incidents)
+- 282d7dc #5 notes route ordering (17 tests)
+- 1f2c116 #4 DB isolation + startup guard (62 tests)
+- 763c506 #3 task routing exempt (447 runtime tests, 1 known pre-existing fail)
+- e058b60 #2 upwork fail-fast nav (27 tests; widened room selector needs live-DOM confirm)
+- ceb2588 #1 scraper OOM reap (agent-verified live 0-leak; host can't run scraper deps)
+
+## Deeper root causes surfaced by agents (follow-ups, NOT in wave 1)
+- SCRAPER: (a) AsyncWebCrawler gets **kwargs not config=BrowserConfig(...) → stage browser settings silently dropped + failed launches doubled; (b) webkit tried FIRST in escalation but never installed in the image → every webkit stage = guaranteed failed launch (a big chunk of the leak feeder). Fixing these would cut most failed launches at the source.
+- UPWORK: widened room-item selector is defensive/unverified vs live DOM — confirm with a live capture; the networkidle→domcontentloaded timeout fix stands alone.
+
+## Deploy + verify
+make rebuild (docker compose build lazyclaw && up -d). Live checks: (1) boot healthy + startup guard passes on recovered DB; (2) GET /api/lazybrain/notes/changes → 200; (3) probe task create+delete → real create + real delete (no bail/fabrication); (4) upwork read fails fast <10s not 60s; (5) web_search: watch mem stays flat + no orphaned Chromium + no OOM.

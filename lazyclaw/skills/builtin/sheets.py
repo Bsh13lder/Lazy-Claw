@@ -50,7 +50,18 @@ async def _resolve_sheet_id(
     if len(exact) == 1:
         return exact[0]["id"], None
     if len(exact) > 1:
-        return None, f"Multiple sheets named '{ref}' — use the sheet id."
+        # List the candidate ids so the caller can retry with a concrete id.
+        # Without them the model is told to "use the sheet id" it doesn't have,
+        # and just repeats the name-based call forever (stuck loop).
+        opts = "; ".join(
+            f"id={r['id']}"
+            + (f" (updated {r['updated_at']})" if r.get("updated_at") else "")
+            for r in exact
+        )
+        return None, (
+            f"Multiple sheets named '{ref}'. Retry with ONE of these ids as the "
+            f"sheet reference — {opts}"
+        )
     subs = [r for r in rows if low in r["name"].lower()]
     if len(subs) == 1:
         return subs[0]["id"], None
@@ -111,9 +122,21 @@ class CreateSheetSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.sheets.store import create_sheet
+        from lazyclaw.sheets.store import create_sheet, list_sheets
 
         name = (params.get("name") or "Untitled sheet").strip() or "Untitled sheet"
+        # Idempotent create: reuse an existing live sheet of the same name rather
+        # than spawning a silent duplicate. Duplicate names make _resolve_sheet_id
+        # ambiguous and (before the id-listing fix) sent specialists into a stuck
+        # loop — the 2026-07-06 "ClubBay Expenses" incident where a blank second
+        # copy was created and later confused every edit.
+        for s in await list_sheets(self._config, user_id):
+            if s["name"].strip().lower() == name.lower():
+                return (
+                    f"A sheet named **{s['name']}** already exists (id `{s['id']}`) "
+                    f"— reusing it instead of creating a duplicate. Add data with "
+                    f"set_cells, or choose a different name to force a separate sheet."
+                )
         row = await create_sheet(self._config, user_id, name)
         return f"Created sheet **{row['name']}** (id `{row['id']}`)."
 

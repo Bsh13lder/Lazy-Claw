@@ -52,7 +52,17 @@ async def _resolve_pdf_id(
     if len(exact) == 1:
         return exact[0]["id"], None
     if len(exact) > 1:
-        return None, f"Multiple PDFs named '{ref}' — use the PDF id."
+        # List candidate ids so the caller can retry with a concrete id instead
+        # of repeating the ambiguous name-based call forever (stuck loop).
+        opts = "; ".join(
+            f"id={r['id']}"
+            + (f" (updated {r['updated_at']})" if r.get("updated_at") else "")
+            for r in exact
+        )
+        return None, (
+            f"Multiple PDFs named '{ref}'. Retry with ONE of these ids as the "
+            f"PDF reference — {opts}"
+        )
     subs = [r for r in rows if low in r["name"].lower()]
     if len(subs) == 1:
         return subs[0]["id"], None

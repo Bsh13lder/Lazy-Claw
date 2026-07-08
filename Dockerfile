@@ -32,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11vnc \
         python3-websockify \
         novnc \
+        tesseract-ocr \
+        tesseract-ocr-spa \
+        tesseract-ocr-ita \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

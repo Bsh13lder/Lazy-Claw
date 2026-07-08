@@ -49,6 +49,34 @@ export function ProjectBudgetRail({ categories, selectedKey, onSelect, reloadKey
     return () => { alive = false; };
   }, [reloadKey, tick]);
 
+  // Refetch when the user returns to this tab/window. Project budgets change
+  // out-of-band — a phone top-up (or the agent) bumps ``budget`` — and this
+  // rail is otherwise a one-shot fetch that stays stale until a full reload.
+  // Cheap: one GET when focus/visibility is regained. Mirrors ExpensesView.
+  useEffect(() => {
+    const refetch = () => setTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  // Poll while this tab is visible so a top-up made on another client shows up
+  // WITHOUT needing to refocus — the focus/visibility effect above only fires
+  // on return-to-tab, so a continuously-watched rail stayed stale. Mirrors the
+  // Tasks page's 30s poll; paused while hidden to avoid background throttling.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const removeProject = async (key: string, id: string, cascade: boolean) => {
     setBusy(true);
     try {

@@ -466,6 +466,24 @@ export default function Tasks() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, bucket, reloadTick]);
 
+  // Force-refetch when the tab regains focus/visibility. The 30s poll above is
+  // throttled in background tabs, so returning to a backgrounded tab would
+  // otherwise wait up to 30s to see phone-/agent-side task changes. Bumping
+  // reloadTick also refreshes the Projects rail (it takes reloadKey=reloadTick).
+  // Mirrors ExpensesView.
+  useEffect(() => {
+    const refetch = () => setReloadTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return tasks.filter((t) => {

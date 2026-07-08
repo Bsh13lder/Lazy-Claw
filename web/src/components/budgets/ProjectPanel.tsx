@@ -50,6 +50,33 @@ export function ProjectPanel({
     return () => { alive = false; };
   }, [projectKey, tick]);
 
+  // Refetch when the user returns to this tab/window. The budget bar reflects
+  // ``budget``/``spent`` which change out-of-band — a phone top-up (or the
+  // agent) bumps them — and this banner is otherwise a one-shot fetch that
+  // stays stale until a full reload. Mirrors ExpensesView.
+  useEffect(() => {
+    const refetch = () => setTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  // Poll while this tab is visible so a top-up made on another client updates
+  // the budget bar WITHOUT needing to refocus. Mirrors the Tasks page's 30s
+  // poll; paused while hidden to avoid background-tab throttling.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const refresh = () => { setTick((n) => n + 1); onChanged(); };
   const toggle = (p: Pane) => setPane((cur) => (cur === p ? "none" : p));
 
@@ -425,6 +452,33 @@ function ExpenseLog({
       .catch(() => { if (alive) { setExpenses([]); setCredits([]); } });
     return () => { alive = false; };
   }, [projectId, tick]);
+
+  // Refetch this ledger when the user returns to the tab/window. A phone
+  // top-up (or the agent) lands a new budget-entry credit row out-of-band, and
+  // this log is otherwise a one-shot fetch that stays stale until a full
+  // reload. Mirrors ExpensesView.
+  useEffect(() => {
+    const refetch = () => setTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  // Poll while this tab is visible so a top-up's credit row (or a new expense)
+  // shows up WITHOUT needing to refocus. Mirrors the Tasks page's 30s poll;
+  // paused while hidden to avoid background-tab throttling.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Bumped after any mutation so the log refetches AND the parent panel
   // refreshes its budget bar (a delete/edit changes project.budget).

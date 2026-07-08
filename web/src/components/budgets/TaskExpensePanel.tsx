@@ -67,6 +67,33 @@ export function TaskExpensePanel({
     return () => { alive = false; };
   }, [cat, catKey, taskId, tick]);
 
+  // Refetch when the user returns to this tab/window. The project budget bar
+  // and this task's expenses change out-of-band — a phone-added expense (or
+  // the agent) lands without a web reload — and this panel is otherwise a
+  // one-shot fetch that stays stale. Mirrors ExpensesView.
+  useEffect(() => {
+    const refetch = () => setTick((n) => n + 1);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", refetch);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  // Poll while this tab is visible so an expense or top-up on another client
+  // shows up WITHOUT needing to refocus. Mirrors the Tasks page's 30s poll;
+  // paused while hidden to avoid background-tab throttling.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const project = projects.find((p) => p.name_key === catKey) ?? null;
   const refresh = () => { setTick((n) => n + 1); onChanged?.(); };
 

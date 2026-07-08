@@ -55,6 +55,18 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     };
   }, []);
 
+  // Poll while this tab is visible so an expense added on another client (a
+  // phone sync push, or the agent) shows up WITHOUT needing to refocus — the
+  // focus/visibility effect above only fires on return-to-tab, so a
+  // continuously-watched tab stayed stale. Mirrors the Tasks page's 30s poll;
+  // paused while hidden to avoid needless load and background-tab throttling.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const refresh = () => { setTick((n) => n + 1); onChanged?.(); };
 
   const currencyByProject = useMemo(() => {

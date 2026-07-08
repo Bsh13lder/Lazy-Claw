@@ -177,7 +177,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           description: _notesController.text.trim(),
           priority: _priority,
           category: categoryArg,
-          dueDate: _composedDue,
+          // Send the `''` clear sentinel (not null) when the due date was
+          // removed, so the clear reaches the cache + outbox and syncs — a null
+          // is read as "field untouched" and would silently no-op the clear.
+          dueDate: _composedDue ?? '',
           steps: stepsArg,
           reminderAt: _composedReminderAt,
           recurring: recurringArg,

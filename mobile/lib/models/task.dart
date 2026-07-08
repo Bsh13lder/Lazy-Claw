@@ -110,6 +110,10 @@ class Task {
         'allocated_budget': allocatedBudget,
       };
 
+  /// Returns a copy with the given fields replaced. A null argument means
+  /// "unchanged" for every field — so to CLEAR the (nullable) due date, pass
+  /// [clearDueDate]`: true` (a plain `dueDate: null` can't be distinguished from
+  /// "leave it alone"). Mirrors how the DAO's `''` clear sentinel is realized.
   Task copyWith({
     String? id,
     String? userId,
@@ -120,6 +124,7 @@ class Task {
     String? status,
     String? owner,
     String? dueDate,
+    bool clearDueDate = false,
     String? reminderAt,
     String? recurring,
     String? tags,
@@ -143,7 +148,7 @@ class Task {
         priority: priority ?? this.priority,
         status: status ?? this.status,
         owner: owner ?? this.owner,
-        dueDate: dueDate ?? this.dueDate,
+        dueDate: clearDueDate ? null : (dueDate ?? this.dueDate),
         reminderAt: reminderAt ?? this.reminderAt,
         recurring: recurring ?? this.recurring,
         tags: tags ?? this.tags,

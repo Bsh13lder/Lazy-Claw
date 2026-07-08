@@ -294,13 +294,21 @@ class TaskDao {
     if (existing == null) return null;
 
     final now = _now();
+    // due_date uses the `''` empty-string clear sentinel (same shape the other
+    // clearable columns use). A cleared due date must NOT be dropped like an
+    // unchanged (null) field: it nulls the local cache row AND rides the outbox
+    // patch so the clear SYNCS to the server. A non-empty value is a normal set;
+    // a null means "field untouched".
+    final clearDue = dueDate != null && dueDate.isEmpty;
+
     final updated = existing.copyWith(
       title: title,
       description: description,
       category: category,
       priority: priority,
       status: status,
-      dueDate: dueDate,
+      dueDate: clearDue ? null : dueDate,
+      clearDueDate: clearDue,
       reminderAt: reminderAt,
       steps: steps,
       recurring: recurring,
@@ -319,9 +327,14 @@ class TaskDao {
     };
 
     await _db.transaction((txn) async {
+      final cacheUpdates = {..._fieldUpdates(patch), 'updated_at': now, 'dirty': 1};
+      // The `''` sentinel rides the outbox patch verbatim (server clears on an
+      // empty value), but the local cache column is stored as a true null so
+      // reads see a cleared — not empty-string — due date.
+      if (clearDue) cacheUpdates['due_date'] = null;
       await txn.update(
         'task_cache',
-        {..._fieldUpdates(patch), 'updated_at': now, 'dirty': 1},
+        cacheUpdates,
         where: 'id = ?',
         whereArgs: [id],
       );

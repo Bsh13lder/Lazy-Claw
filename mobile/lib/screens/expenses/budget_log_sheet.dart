@@ -7,6 +7,34 @@ import '../../providers/budgets_provider.dart';
 import '../../ui/ui.dart';
 import 'money_helpers.dart';
 
+/// HTTP statuses where the server DEFINITIVELY rejected the top-up WITHOUT
+/// processing it — bad request / auth / not-found / conflict / validation. The
+/// money never moved server-side, so there is nothing to retry and no
+/// double-credit risk: these surface as a hard error. Every OTHER failure falls
+/// back offline (see [shouldFallbackOfflineForBudget]).
+const _definitiveClientRejectStatuses = <int>{400, 401, 403, 404, 409, 422};
+
+/// Whether a FAILED "Add to budget" top-up should fall back to the offline-safe
+/// [BudgetsNotifier.creditProjectBudget] (which queues + syncs) instead of
+/// surfacing a hard error and silently dropping the money (budget entries have
+/// NO outbox, so a dropped top-up is lost forever).
+///
+/// Pure decision — no widget, no context — so it is unit-testable without
+/// pumping a widget (this sheet's widget tests hang).
+///
+/// Returns false ONLY for a definitive client 4xx rejection
+/// ([_definitiveClientRejectStatuses]); returns true for everything else:
+/// network errors (`ApiError.status == 0`), retryable server errors
+/// (`status >= 500`), and unknown / unexpected error shapes. The tradeoff is
+/// deliberate: losing a top-up is worse than a rare double-credit on a 5xx that
+/// actually landed server-side.
+bool shouldFallbackOfflineForBudget(Object e) {
+  if (e is ApiError) {
+    return !_definitiveClientRejectStatuses.contains(e.status);
+  }
+  return true;
+}
+
 /// Opens the Budget ledger sheet for [projectId] and refreshes the budgets
 /// provider whenever a ledger mutation lands (so the project's traffic-light
 /// budget bar reflects the new total). Mirrors the web "+ Add budget" / "📋 Log"
@@ -134,13 +162,14 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
       _sourceCtrl.clear();
       await _afterMutation();
     } catch (e) {
-      // Offline / server-unreachable: don't silently lose the top-up (the old
-      // behavior just surfaced an error and dropped it). Fall back to an
-      // offline-safe project-budget credit that queues + syncs via the project
-      // update path. ONLY on a network error — a definitive server rejection may
-      // have already been processed server-side, and a local credit on top would
-      // double-count the money.
-      if (_isNetworkError(e)) {
+      // Offline / server-unreachable / transient 5xx / unknown blip: don't
+      // silently lose the top-up (the old behavior just surfaced an error and
+      // dropped it — budget entries have NO outbox, so a dropped top-up is money
+      // lost forever). Fall back to an offline-safe project-budget credit that
+      // queues + syncs via the project update path. We surface a hard error ONLY
+      // for a DEFINITIVE client 4xx rejection, where the request was rejected
+      // (not processed) so a local credit on top could double-count the money.
+      if (shouldFallbackOfflineForBudget(e)) {
         final ok = await ref
             .read(budgetsProvider.notifier)
             .creditProjectBudget(widget.projectId, amount);
@@ -205,12 +234,6 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
     if (e is ApiError) return e.message;
     return 'Something went wrong. Try again.';
   }
-
-  /// True when [e] is a transport-level failure (no HTTP response reached us),
-  /// so the top-up definitely didn't land server-side and an offline credit is
-  /// safe. `ApiError(status: 0)` is the network shape the budgets transport
-  /// surfaces (see BudgetsSync._isNetworkError).
-  static bool _isNetworkError(Object e) => e is ApiError && e.status == 0;
 
   @override
   Widget build(BuildContext context) {

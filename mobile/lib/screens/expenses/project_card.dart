@@ -84,8 +84,15 @@ class _ProjectCardState extends State<ProjectCard> {
             ],
           ),
         ),
-        confirmDismiss: (_) => _confirmDelete(context, project.name),
-        onDismissed: (_) => widget.onDelete(),
+        // Freeze-proof: confirm, delete via the provider, then return FALSE so
+        // Dismissible never auto-removes the card (the list rebuild does, once
+        // the provider drops it from state). Avoids the "dismissed Dismissible
+        // widget is still part of the tree" freeze. Mirrors memory_screen.dart.
+        confirmDismiss: (_) async {
+          final ok = await _confirmDelete(context, project.name);
+          if (ok) widget.onDelete();
+          return false;
+        },
         child: LzCard(
           padding: EdgeInsets.zero,
           onTap: widget.expenses.isNotEmpty

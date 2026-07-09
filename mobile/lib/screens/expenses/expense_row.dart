@@ -72,8 +72,18 @@ class ExpenseRow extends StatelessWidget {
           ],
         ),
       ),
-      confirmDismiss: (_) => _confirmDelete(context),
-      onDismissed: (_) => onDelete!(),
+      // Confirm, delete via the provider, then return FALSE so Dismissible
+      // never auto-removes the tile itself — the list rebuild (after the
+      // provider drops the row from state) is what makes it vanish. The
+      // auto-remove path (return true + onDismissed) races the async list
+      // rebuild into "A dismissed Dismissible widget is still part of the tree"
+      // and freezes the Money screen. Freeze-proof pattern; mirrors
+      // memory_screen.dart / vault_screen.dart.
+      confirmDismiss: (_) async {
+        final ok = await _confirmDelete(context);
+        if (ok) onDelete!();
+        return false;
+      },
       child: content,
     );
   }

@@ -11,31 +11,43 @@ import 'lz_button.dart';
 abstract final class LzDialog {
   LzDialog._();
 
+  /// [actions] are pre-built widgets. [actionsBuilder] instead receives the
+  /// dialog's OWN build context — use it when the actions must pop the dialog
+  /// (`Navigator.of(dialogContext).pop(...)`). Popping via the caller's context
+  /// is a bug when the dialog and the caller live on different navigators (e.g.
+  /// a confirm popup — root navigator — shown over a modal bottom sheet — nested
+  /// navigator): the caller's context resolves to the wrong navigator and pops
+  /// the underlying sheet, leaving the popup frozen. [actionsBuilder] wins when
+  /// both are supplied.
   static Future<T?> show<T>(
     BuildContext context, {
     required String title,
     required Widget content,
     List<Widget> actions = const [],
+    List<Widget> Function(BuildContext dialogContext)? actionsBuilder,
     bool barrierDismissible = true,
   }) {
     return showDialog<T>(
       context: context,
       barrierDismissible: barrierDismissible,
       barrierColor: Colors.black.withValues(alpha: 0.6),
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.bgSurfaceElevated,
-        surfaceTintColor: Colors.transparent,
-        shape: const RoundedRectangleBorder(borderRadius: AppRadii.rXl),
-        title: Text(title, style: AppText.titleL),
-        content: DefaultTextStyle.merge(style: AppText.body, child: content),
-        actionsPadding: const EdgeInsets.fromLTRB(
-          AppSpacing.lg,
-          0,
-          AppSpacing.lg,
-          AppSpacing.lg,
-        ),
-        actions: actions.isEmpty ? null : actions,
-      ),
+      builder: (ctx) {
+        final resolvedActions = actionsBuilder?.call(ctx) ?? actions;
+        return AlertDialog(
+          backgroundColor: AppColors.bgSurfaceElevated,
+          surfaceTintColor: Colors.transparent,
+          shape: const RoundedRectangleBorder(borderRadius: AppRadii.rXl),
+          title: Text(title, style: AppText.titleL),
+          content: DefaultTextStyle.merge(style: AppText.body, child: content),
+          actionsPadding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            0,
+            AppSpacing.lg,
+            AppSpacing.lg,
+          ),
+          actions: resolvedActions.isEmpty ? null : resolvedActions,
+        );
+      },
     );
   }
 }
@@ -59,21 +71,25 @@ abstract final class LzConfirm {
           ? const SizedBox.shrink()
           : Text(message, style: AppText.body.copyWith(
               color: AppColors.textSecondary)),
-      actions: [
+      // Pop via the dialog's OWN context, not the caller's — otherwise a confirm
+      // shown over a modal bottom sheet resolves to the sheet's (nested)
+      // navigator and pops the sheet instead of the popup, hanging this future
+      // and freezing the popup on screen.
+      actionsBuilder: (dialogContext) => [
         LzButton.ghost(
           label: cancelLabel,
-          onPressed: () => Navigator.of(context).pop(false),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
         ),
         const SizedBox(width: AppSpacing.sm),
         if (danger)
           LzButton.danger(
             label: confirmLabel,
-            onPressed: () => Navigator.of(context).pop(true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
           )
         else
           LzButton.primary(
             label: confirmLabel,
-            onPressed: () => Navigator.of(context).pop(true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
           ),
       ],
     );

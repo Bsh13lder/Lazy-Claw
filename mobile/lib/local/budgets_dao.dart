@@ -759,6 +759,127 @@ class BudgetsDao {
     return true;
   }
 
+  // ── Local mutations: budget ledger (top-ups) ──────────────────────────────
+
+  /// Add money to a project's budget locally (optimistic), recording it as a
+  /// real ledger entry. Mints a client UUID when [id] is omitted so the same id
+  /// replays idempotently to the server (a retried POST returns the existing row
+  /// WITHOUT re-bumping the budget).
+  ///
+  /// Also optimistically bumps the cached `project_cache.budget` by [amount] so
+  /// the budget bar moves immediately (online OR offline). Crucially this does
+  /// NOT mark the project dirty and does NOT enqueue a project op: the SERVER
+  /// derives `projects.budget` from the ledger entry itself, so queuing a budget
+  /// update too would double-count. On the next pull the server-authoritative
+  /// project budget (which now includes this entry) overwrites the optimistic
+  /// value with the same total. Returns the stored [BudgetEntry].
+  Future<BudgetEntry> applyLocalBudgetEntryCreate(
+    String projectId,
+    double amount, {
+    String? id,
+    String? source,
+    String currency = 'USD',
+    String kind = 'credit',
+  }) async {
+    final entryId = id ?? newLocalId();
+    final now = _now();
+    final entry = BudgetEntry(
+      id: entryId,
+      projectId: projectId,
+      amount: amount,
+      currency: currency,
+      source: source,
+      kind: kind,
+      createdAt: now,
+    );
+
+    await _db.transaction((txn) async {
+      final row = _rowFromBudgetEntry(entry)
+        ..['updated_at'] = now
+        ..['created_at'] = now
+        ..['dirty'] = 1
+        ..['deleted'] = 0
+        ..['last_synced_at'] = null;
+      await txn.insert(
+        'budget_entry_cache',
+        row,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await _optimisticBudgetBumpTxn(txn, projectId, amount);
+      final payload = <String, dynamic>{
+        'id': entryId,
+        'project_id': projectId,
+        'amount': amount,
+        'currency': currency,
+        'kind': kind,
+        'source': ?source,
+      };
+      await _enqueueTxn(
+          txn, BudgetsOutboxOp.create, kBudgetEntryEntity, entryId, payload, now);
+    });
+
+    return (await _getBudgetEntry(entryId))!;
+  }
+
+  /// Delete a ledger entry locally. Rolls back the optimistic budget bump and,
+  /// as with expenses, COLLAPSES a still-unsynced create (never-synced row with
+  /// a pending create op) — cancelling the queued create + hard-removing the row
+  /// so an offline add-then-delete round-trips to nothing (no server churn, no
+  /// reappearance). A server-backed row is tombstoned + a `delete` op queued.
+  Future<bool> applyLocalBudgetEntryDelete(String id) async {
+    final row = await getBudgetEntryRow(id);
+    if (row == null) return false;
+
+    final amount = (row['amount'] as num?)?.toDouble() ?? 0.0;
+    final projectId = row['project_id'] as String? ?? '';
+    final neverSynced = row['last_synced_at'] == null;
+    final hasPendingCreate = (await readBudgetsOutbox()).any((o) =>
+        o.isBudgetEntry && o.entityId == id && o.op == BudgetsOutboxOp.create);
+
+    final now = _now();
+    await _db.transaction((txn) async {
+      // Roll back the optimistic bump this entry applied to the project budget.
+      await _optimisticBudgetBumpTxn(txn, projectId, -amount);
+
+      if (neverSynced && hasPendingCreate) {
+        await txn.delete('outbox',
+            where: 'entity = ? AND entity_id = ?',
+            whereArgs: [kBudgetEntryEntity, id]);
+        await txn.delete('budget_entry_cache', where: 'id = ?', whereArgs: [id]);
+        return;
+      }
+      await txn.update(
+        'budget_entry_cache',
+        {'deleted': 1, 'updated_at': now, 'dirty': 1},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await _enqueueTxn(
+          txn, BudgetsOutboxOp.delete, kBudgetEntryEntity, id, {'id': id}, now);
+    });
+    return true;
+  }
+
+  /// Adjust the cached project budget by [delta] WITHOUT touching dirty/
+  /// updated_at (a display-only optimistic bump — the server is authoritative).
+  /// A no-op when the project row isn't cached.
+  Future<void> _optimisticBudgetBumpTxn(
+    Transaction txn,
+    String projectId,
+    double delta,
+  ) async {
+    if (projectId.isEmpty || delta == 0) return;
+    await txn.rawUpdate(
+      'UPDATE project_cache SET budget = COALESCE(budget, 0) + ? WHERE id = ?',
+      [delta, projectId],
+    );
+  }
+
+  Future<BudgetEntry?> _getBudgetEntry(String id) async {
+    final row = await getBudgetEntryRow(id);
+    return row == null ? null : _budgetEntryFromRow(row);
+  }
+
   // ── clearDirty (per entity) ───────────────────────────────────────────────
 
   /// Mark a row clean after its mutation pushed successfully. For a delete that
@@ -811,13 +932,14 @@ class BudgetsDao {
 
   // ── Outbox ─────────────────────────────────────────────────────────────────
 
-  /// Only the budgets-domain outbox items (project + expense), in seq order.
-  /// Used by the sync engine so it never touches another domain's queue rows.
+  /// Only the budgets-domain outbox items (project + expense + budget ledger),
+  /// in seq order. Used by the sync engine so it never touches another domain's
+  /// queue rows.
   Future<List<BudgetsOutboxItem>> readBudgetsOutbox() async {
     final rows = await _db.query(
       'outbox',
-      where: 'entity IN (?, ?)',
-      whereArgs: [kProjectEntity, kExpenseEntity],
+      where: 'entity IN (?, ?, ?)',
+      whereArgs: [kProjectEntity, kExpenseEntity, kBudgetEntryEntity],
       orderBy: 'seq ASC',
     );
     return rows.map(BudgetsOutboxItem.fromRow).toList();
@@ -853,11 +975,17 @@ class BudgetsDao {
       for (final o in pending)
         if (o.isExpense) o.entityId,
     };
+    final pendingEntryIds = <String>{
+      for (final o in pending)
+        if (o.isBudgetEntry) o.entityId,
+    };
     final rejected = await _createRejectedIds();
 
     const orphanWhere = 'dirty = 1 AND deleted = 0 AND last_synced_at IS NULL';
     final projRows = await _db.query('project_cache', where: orphanWhere);
     final expRows = await _db.query('expense_cache', where: orphanWhere);
+    final entryRows =
+        await _db.query('budget_entry_cache', where: orphanWhere);
 
     var healed = 0;
     await _db.transaction((txn) async {
@@ -901,6 +1029,31 @@ class BudgetsDao {
         };
         await _enqueueTxn(
             txn, BudgetsOutboxOp.create, kExpenseEntity, id, payload, now);
+        healed++;
+      }
+      // Budget-ledger creates last — they too reference a project that must
+      // exist server-side first. A stranded ledger create is money-in that never
+      // reached the server (invisible to web/agent) — the same data-loss class
+      // as a stranded expense. The idempotent client id means a re-push can't
+      // double-bump the budget.
+      for (final row in entryRows) {
+        final id = row['id'] as String? ?? '';
+        if (id.isEmpty ||
+            pendingEntryIds.contains(id) ||
+            rejected.contains(id)) {
+          continue;
+        }
+        final be = _budgetEntryFromRow(row);
+        final payload = <String, dynamic>{
+          'id': be.id,
+          'project_id': be.projectId,
+          'amount': be.amount,
+          'currency': be.currency,
+          'kind': be.kind,
+          if (be.source != null) 'source': be.source,
+        };
+        await _enqueueTxn(
+            txn, BudgetsOutboxOp.create, kBudgetEntryEntity, id, payload, now);
         healed++;
       }
     });
@@ -987,8 +1140,8 @@ class BudgetsDao {
 
   Future<int> outboxCount() async {
     final rows = await _db.rawQuery(
-      'SELECT COUNT(*) AS c FROM outbox WHERE entity IN (?, ?)',
-      [kProjectEntity, kExpenseEntity],
+      'SELECT COUNT(*) AS c FROM outbox WHERE entity IN (?, ?, ?)',
+      [kProjectEntity, kExpenseEntity, kBudgetEntryEntity],
     );
     return (rows.first['c'] as int?) ?? 0;
   }

@@ -701,6 +701,113 @@ void main() {
     });
   });
 
+  group('BudgetsDao budget-entry ledger (local write)', () {
+    test(
+        'applyLocalBudgetEntryCreate: dirty row + create op + optimistic budget '
+        'bump', () async {
+      final dao = await _freshDao();
+      // Seed a synced project with a known budget so the bump is observable.
+      await dao.upsertProjectFromServer(_serverProject(id: 'p1', budget: 1000));
+
+      final entry = await dao.applyLocalBudgetEntryCreate(
+        'p1',
+        200,
+        source: 'Deposit',
+        currency: 'USD',
+      );
+
+      // Row is present, dirty (un-pushed), never-synced.
+      final row = await dao.getBudgetEntryRow(entry.id);
+      expect(row, isNotNull);
+      expect(row!['dirty'], 1);
+      expect(row['last_synced_at'], isNull);
+      expect(await dao.dirtyBudgetEntryIds(), contains(entry.id));
+      expect((await dao.listBudgetEntries(projectId: 'p1')).single.source,
+          'Deposit');
+
+      // A create op is queued for the budget_entry entity.
+      final ops = await dao.readBudgetsOutbox();
+      final createOp = ops.singleWhere((o) => o.isBudgetEntry);
+      expect(createOp.op, BudgetsOutboxOp.create);
+      expect(createOp.entityId, entry.id);
+      expect(createOp.payload['amount'], 200);
+
+      // Optimistic bump so the budget bar moves offline (server derives the
+      // real total from the entry, so NO project op is queued → no double-count).
+      expect((await dao.getProject('p1'))!.budget, 1200);
+      expect(await dao.dirtyProjectIds(), isEmpty,
+          reason: 'the optimistic bump must NOT mark the project dirty');
+    });
+
+    test(
+        'applyLocalBudgetEntryDelete on a never-synced create annihilates it + '
+        'un-bumps the budget (net zero, nothing queued)', () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(_serverProject(id: 'p1', budget: 1000));
+      final entry =
+          await dao.applyLocalBudgetEntryCreate('p1', 200, currency: 'USD');
+      expect((await dao.getProject('p1'))!.budget, 1200);
+
+      await dao.applyLocalBudgetEntryDelete(entry.id);
+
+      expect(await dao.getBudgetEntryRow(entry.id), isNull); // hard-removed
+      expect(await dao.readBudgetsOutbox(), isEmpty); // create op cancelled
+      expect((await dao.getProject('p1'))!.budget, 1000); // bump rolled back
+    });
+
+    test(
+        'applyLocalBudgetEntryDelete on a synced entry tombstones + queues a '
+        'delete + un-bumps the budget', () async {
+      final dao = await _freshDao();
+      // Server already reflects the +200 in the project budget (1200).
+      await dao.upsertProjectFromServer(_serverProject(id: 'p1', budget: 1200));
+      await dao.upsertBudgetEntryFromServer(
+        _serverBudgetEntry(id: 'be1', projectId: 'p1', amount: 200),
+        serverUpdatedAt: '2026-07-01T10:00:00Z',
+      );
+
+      await dao.applyLocalBudgetEntryDelete('be1');
+
+      final row = await dao.getBudgetEntryRow('be1');
+      expect(row!['deleted'], 1);
+      expect(row['dirty'], 1);
+      expect((await dao.listBudgetEntries()).map((e) => e.id),
+          isNot(contains('be1')));
+      final ops = await dao.readBudgetsOutbox();
+      final delOp = ops.singleWhere((o) => o.isBudgetEntry);
+      expect(delOp.op, BudgetsOutboxOp.delete);
+      // Optimistic rollback so the bar drops immediately.
+      expect((await dao.getProject('p1'))!.budget, 1000);
+    });
+
+    test('outboxCount + readBudgetsOutbox include budget_entry ops', () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(_serverProject(id: 'p1', budget: 0));
+      await dao.applyLocalBudgetEntryCreate('p1', 50, currency: 'USD');
+      expect(await dao.outboxCount(), 1);
+      expect((await dao.readBudgetsOutbox()).single.isBudgetEntry, isTrue);
+    });
+
+    test('reenqueueOrphanedCreates re-enqueues a stranded ledger create',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(_serverProject(id: 'p1', budget: 0));
+      final entry =
+          await dao.applyLocalBudgetEntryCreate('p1', 75, currency: 'USD');
+      // Simulate the create op being dropped (dead-lettered / drained by an old
+      // build) — the dirty, never-synced row is now orphaned.
+      await dao.deleteOutboxForEntity(kBudgetEntryEntity, entry.id);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+
+      final healed = await dao.reenqueueOrphanedCreates();
+      expect(healed, 1);
+      final ops = await dao.readBudgetsOutbox();
+      expect(ops.single.isBudgetEntry, isTrue);
+      expect(ops.single.op, BudgetsOutboxOp.create);
+      expect(ops.single.entityId, entry.id);
+    });
+  });
+
   group('BudgetsDao cursor + conflicts', () {
     test('the shared budgets cursor round-trips', () async {
       final dao = await _freshDao();

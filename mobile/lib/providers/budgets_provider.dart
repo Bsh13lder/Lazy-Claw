@@ -366,6 +366,59 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  // ── Budget ledger (top-ups) — offline-first ────────────────────────────────
+
+  /// Add money to a project's budget as a real ledger entry (optimistic,
+  /// offline-first). Lands in the cache + outbox and bumps the project budget
+  /// immediately (online OR offline), then best-effort syncs. Unlike the old
+  /// online-only top-up this NEVER loses the money offline AND records the
+  /// where-from note. Returns true on success, false (with `state.error` set)
+  /// when the local write throws.
+  Future<bool> addBudgetEntryLocal(
+    String projectId,
+    double amount, {
+    String? source,
+  }) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      // Inherit the project's currency so an offline top-up isn't mislabelled
+      // USD until the next pull.
+      final match =
+          state.projects.where((p) => p.id == projectId).firstOrNull;
+      final currency = match?.currency ?? 'USD';
+      await _dao.applyLocalBudgetEntryCreate(
+        projectId,
+        amount,
+        source: source,
+        currency: currency,
+      );
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Delete a ledger entry (optimistic, offline-first). Drops it from state
+  /// synchronously (Dismissible-safe), rolls back its budget bump, then queues
+  /// the server delete + best-effort syncs.
+  Future<void> removeBudgetEntry(String id) async {
+    final prev = state.budgetEntries;
+    state = state.copyWith(
+      budgetEntries: prev.where((e) => e.id != id).toList(),
+    );
+    try {
+      await _dao.applyLocalBudgetEntryDelete(id);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
+    } catch (e) {
+      state = state.copyWith(budgetEntries: prev, error: e.toString());
+    }
+  }
+
   Future<void> deleteProject(String id) async {
     // Same Dismissible-safe optimistic removal as removeExpense.
     final prev = state.projects;

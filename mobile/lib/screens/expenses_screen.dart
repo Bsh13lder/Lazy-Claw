@@ -667,7 +667,15 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     );
     if (!mounted || gen != _loadGen) return;
     setState(() {
-      _entries = anyOk ? [for (final l in lists) ...l] : null;
+      // Online round succeeded → show fresh server credits. All-failed (genuine
+      // offline) → fall back to the synced local cache so the Ledger tab still
+      // shows top-ups offline, instead of nulling to the connect hint. Only when
+      // the cache is ALSO empty do we fall through to null (no misleading zero).
+      _entries = anyOk
+          ? [for (final l in lists) ...l]
+          : (widget.state.budgetEntries.isNotEmpty
+              ? widget.state.budgetEntries
+              : null);
       _entriesLoading = false;
     });
   }

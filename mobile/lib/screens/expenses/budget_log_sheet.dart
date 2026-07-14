@@ -7,39 +7,11 @@ import '../../providers/budgets_provider.dart';
 import '../../ui/ui.dart';
 import 'money_helpers.dart';
 
-/// HTTP statuses where the server DEFINITIVELY rejected the top-up WITHOUT
-/// processing it — bad request / auth / not-found / conflict / validation. The
-/// money never moved server-side, so there is nothing to retry and no
-/// double-credit risk: these surface as a hard error. Every OTHER failure falls
-/// back offline (see [shouldFallbackOfflineForBudget]).
-const _definitiveClientRejectStatuses = <int>{400, 401, 403, 404, 409, 422};
-
-/// Whether a FAILED "Add to budget" top-up should fall back to the offline-safe
-/// [BudgetsNotifier.creditProjectBudget] (which queues + syncs) instead of
-/// surfacing a hard error and silently dropping the money (budget entries have
-/// NO outbox, so a dropped top-up is lost forever).
-///
-/// Pure decision — no widget, no context — so it is unit-testable without
-/// pumping a widget (this sheet's widget tests hang).
-///
-/// Returns false ONLY for a definitive client 4xx rejection
-/// ([_definitiveClientRejectStatuses]); returns true for everything else:
-/// network errors (`ApiError.status == 0`), retryable server errors
-/// (`status >= 500`), and unknown / unexpected error shapes. The tradeoff is
-/// deliberate: losing a top-up is worse than a rare double-credit on a 5xx that
-/// actually landed server-side.
-bool shouldFallbackOfflineForBudget(Object e) {
-  if (e is ApiError) {
-    return !_definitiveClientRejectStatuses.contains(e.status);
-  }
-  return true;
-}
-
-/// Opens the Budget ledger sheet for [projectId] and refreshes the budgets
-/// provider whenever a ledger mutation lands (so the project's traffic-light
-/// budget bar reflects the new total). Mirrors the web "+ Add budget" / "📋 Log"
-/// controls; this is the only place the `budget_entries` ledger surfaces in the
-/// app.
+/// Opens the Budget ledger sheet for [projectId]. Reads + writes flow through
+/// the offline-first budgets provider (shared with the rest of the screen), so
+/// the project's traffic-light budget bar re-renders automatically. Mirrors the
+/// web "+ Add budget" / "📋 Log" controls; this is the primary place the
+/// `budget_entries` ledger surfaces in the app.
 Future<void> showBudgetLogSheet(
   BuildContext context,
   WidgetRef ref, {
@@ -52,35 +24,30 @@ Future<void> showBudgetLogSheet(
     builder: (_) => BudgetLogSheet(
       projectId: projectId,
       currency: currency,
-      onBudgetChanged: () => ref.read(budgetsProvider.notifier).refresh(),
     ),
   );
 }
 
-/// Online-only Budget ledger surface: an "Add to budget" top-up form on top and
-/// the credits/debits Log below (each entry shows date · source · signed amount,
-/// with edit + delete). Reads/writes go straight to the backend via
-/// [budgetsRepositoryProvider] — the ledger is NOT part of the offline sync
-/// table (it mirrors the web, which is also online for these controls).
+/// Offline-first Budget ledger surface: an "Add to budget" top-up form on top
+/// and the credits/debits Log below (each entry shows date · source · signed
+/// amount, with edit + delete).
 ///
-/// After any mutation it refetches the ledger AND fires [onBudgetChanged] so the
-/// parent can re-sync the (offline-cached) project budget bar.
+/// Reads come from the synced local cache via [budgetsProvider] (instant, works
+/// offline, reflects cross-device top-ups after a sync). A top-up / delete is
+/// written optimistically to the cache + outbox and best-effort synced — so an
+/// offline top-up is NEVER lost and records its where-from note. (Editing a
+/// ledger entry is still an online PATCH.)
 class BudgetLogSheet extends ConsumerStatefulWidget {
   const BudgetLogSheet({
     super.key,
     required this.projectId,
     required this.currency,
-    this.onBudgetChanged,
   });
 
   final String projectId;
 
   /// Currency to render amounts in (the owning project's currency).
   final String currency;
-
-  /// Fired after every successful ledger mutation so the caller can refresh the
-  /// budgets provider (and thus the project's budget bar).
-  final Future<void> Function()? onBudgetChanged;
 
   @override
   ConsumerState<BudgetLogSheet> createState() => _BudgetLogSheetState();
@@ -90,16 +57,15 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
   final _amountCtrl = TextEditingController();
   final _sourceCtrl = TextEditingController();
 
-  /// null = loading. Set to a list (possibly empty) on success.
-  List<BudgetEntry>? _entries;
-  String? _loadError;
   bool _adding = false;
   String? _amountError;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    // Revalidate on open so a cross-device top-up shows even if the last sync
+    // predates it. Best-effort — failures are silent (the cache already paints).
+    Future.microtask(() => ref.read(budgetsProvider.notifier).refresh());
   }
 
   @override
@@ -107,37 +73,6 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
     _amountCtrl.dispose();
     _sourceCtrl.dispose();
     super.dispose();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _entries = null;
-      _loadError = null;
-    });
-    try {
-      final entries = await ref
-          .read(budgetsRepositoryProvider)
-          .listBudgetEntries(widget.projectId);
-      if (!mounted) return;
-      setState(() => _entries = entries);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loadError = _friendly(e));
-    }
-  }
-
-  /// Fire the parent refresh (best-effort) then refetch the ledger.
-  Future<void> _afterMutation() async {
-    final cb = widget.onBudgetChanged;
-    if (cb != null) {
-      try {
-        await cb();
-      } catch (_) {
-        // Provider refresh is best-effort; the ledger refetch below is the
-        // source of truth for THIS sheet.
-      }
-    }
-    await _load();
   }
 
   Future<void> _add() async {
@@ -151,45 +86,27 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
       _adding = true;
       _amountError = null;
     });
-    try {
-      await ref.read(budgetsRepositoryProvider).addBudgetEntry(
-            widget.projectId,
-            amount,
-            source: source.isEmpty ? null : source,
-            currency: widget.currency,
-          );
+    // Offline-first: optimistic ledger row + budget bump, queued for sync. Never
+    // loses the money offline (unlike the old online-only POST) and always
+    // records the where-from note.
+    final ok = await ref.read(budgetsProvider.notifier).addBudgetEntryLocal(
+          widget.projectId,
+          amount,
+          source: source.isEmpty ? null : source,
+        );
+    if (!mounted) return;
+    if (ok) {
       _amountCtrl.clear();
       _sourceCtrl.clear();
-      await _afterMutation();
-    } catch (e) {
-      // Offline / server-unreachable / transient 5xx / unknown blip: don't
-      // silently lose the top-up (the old behavior just surfaced an error and
-      // dropped it — budget entries have NO outbox, so a dropped top-up is money
-      // lost forever). Fall back to an offline-safe project-budget credit that
-      // queues + syncs via the project update path. We surface a hard error ONLY
-      // for a DEFINITIVE client 4xx rejection, where the request was rejected
-      // (not processed) so a local credit on top could double-count the money.
-      if (shouldFallbackOfflineForBudget(e)) {
-        final ok = await ref
-            .read(budgetsProvider.notifier)
-            .creditProjectBudget(widget.projectId, amount);
-        if (ok) {
-          _amountCtrl.clear();
-          _sourceCtrl.clear();
-          _snack('Saved offline — will sync. (No ledger note while offline.)');
-          await _afterMutation();
-        } else {
-          _snack(_friendly(e));
-        }
-      } else {
-        _snack(_friendly(e));
-      }
-    } finally {
-      if (mounted) setState(() => _adding = false);
+    } else {
+      _snack(ref.read(budgetsProvider).error ?? 'Could not add to budget.');
     }
+    setState(() => _adding = false);
   }
 
   Future<void> _saveEdit(BudgetEntry entry, double amount, String source) async {
+    // Editing a ledger entry remains an online PATCH (rarer than add/delete);
+    // it works for a synced entry. A refresh pulls the change back into cache.
     try {
       await ref.read(budgetsRepositoryProvider).updateBudgetEntry(
             entry.id,
@@ -197,7 +114,7 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
             // Empty string clears the source server-side; null would leave it.
             source: source,
           );
-      await _afterMutation();
+      await ref.read(budgetsProvider.notifier).refresh();
     } catch (e) {
       _snack(_friendly(e));
     }
@@ -212,12 +129,9 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
       danger: true,
     );
     if (!confirmed) return;
-    try {
-      await ref.read(budgetsRepositoryProvider).deleteBudgetEntry(entry.id);
-      await _afterMutation();
-    } catch (e) {
-      _snack(_friendly(e));
-    }
+    // Offline-first delete: drops it from state + rolls back the budget bump +
+    // queues the server delete.
+    await ref.read(budgetsProvider.notifier).removeBudgetEntry(entry.id);
   }
 
   void _snack(String msg) {
@@ -238,6 +152,8 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
   @override
   Widget build(BuildContext context) {
     final maxListHeight = MediaQuery.of(context).size.height * 0.42;
+    // Reactive: entries come from the synced cache, newest first (DAO order).
+    final entries = ref.watch(budgetsProvider).entriesForProject(widget.projectId);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -283,9 +199,9 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
             Text('Log', style: AppText.label.copyWith(
                 color: AppColors.textSecondary)),
             const Spacer(),
-            if (_entries != null && _entries!.isNotEmpty)
+            if (entries.isNotEmpty)
               Text(
-                _netLabel(_entries!),
+                _netLabel(entries),
                 style: AppText.caption.copyWith(color: AppColors.textMuted),
               ),
           ],
@@ -294,7 +210,7 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
         // ── Ledger body ─────────────────────────────────────────────────────
         ConstrainedBox(
           constraints: BoxConstraints(maxHeight: maxListHeight),
-          child: _buildBody(),
+          child: _buildBody(entries),
         ),
       ],
     );
@@ -306,17 +222,7 @@ class _BudgetLogSheetState extends ConsumerState<BudgetLogSheet> {
     return '$sign${fmtMoney(widget.currency, net.abs())} net';
   }
 
-  Widget _buildBody() {
-    if (_loadError != null) {
-      return LzErrorState(message: _loadError!, onRetry: _load);
-    }
-    final entries = _entries;
-    if (entries == null) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: AppSpacing.xl),
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-      );
-    }
+  Widget _buildBody(List<BudgetEntry> entries) {
     if (entries.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: AppSpacing.xl),

@@ -249,5 +249,54 @@ void main() {
       expect(outbox.map((o) => o.entity),
           containsAll([kProjectEntity, kExpenseEntity]));
     });
+
+    test(
+        'addBudgetEntryLocal creates a ledger row + bumps the budget offline '
+        '(no money lost, audit note kept)', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Gig', budget: 1000.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final proj = n.state.projects.firstWhere((p) => p.name == 'Gig');
+
+      final ok = await n.addBudgetEntryLocal(proj.id, 500.0, source: 'deposit');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(ok, isTrue);
+      // A real ledger row exists (the B5 gap — offline credit used to skip it).
+      expect(n.state.budgetEntries, hasLength(1));
+      expect(n.state.entriesForProject(proj.id).single.source, 'deposit');
+      expect(n.state.dirtyBudgetEntryIds, hasLength(1));
+      // Budget bar moved immediately (optimistic bump), no double-count risk
+      // because no project op was queued.
+      expect(n.state.projects.firstWhere((p) => p.id == proj.id).budget, 1500.0);
+      final outbox = await dao.readBudgetsOutbox();
+      expect(outbox.where((o) => o.isBudgetEntry), hasLength(1));
+      expect(outbox.where((o) => o.isProject && o.op == BudgetsOutboxOp.update),
+          isEmpty);
+    });
+
+    test('removeBudgetEntry drops it from state + rolls back the budget',
+        () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Gig', budget: 1000.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final proj = n.state.projects.firstWhere((p) => p.name == 'Gig');
+      await n.addBudgetEntryLocal(proj.id, 500.0);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final entryId = n.state.budgetEntries.single.id;
+      expect(n.state.projects.firstWhere((p) => p.id == proj.id).budget, 1500.0);
+
+      await n.removeBudgetEntry(entryId);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(n.state.budgetEntries, isEmpty);
+      expect(n.state.projects.firstWhere((p) => p.id == proj.id).budget, 1000.0);
+    });
   });
 }

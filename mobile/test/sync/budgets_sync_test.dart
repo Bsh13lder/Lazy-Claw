@@ -1318,6 +1318,81 @@ void main() {
       expect(await dao.getCursor(), '2026-06-06T09:00:00Z');
     });
   });
+
+  group('BudgetsSync push — budget ledger (top-ups)', () {
+    test('a local budget-entry create POSTs to /budget-entries with the id',
+        () async {
+      final dao = await _freshDao();
+      // Seed a SYNCED project so only the ledger op is in the outbox.
+      await dao.upsertProjectFromServer(
+          Project.fromJson(_serverProjectJson(id: 'p1', budget: 0)));
+      await dao.applyLocalBudgetEntryCreate('p1', 200,
+          id: 'be1', source: 'Deposit', currency: 'USD');
+
+      final transport = _FakeTransport();
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.pushed, 1);
+
+      final post = transport.calls.firstWhere((c) => c.method == 'POST');
+      expect(post.path, contains('/projects/p1/budget-entries'));
+      expect(post.body!['id'], 'be1'); // idempotent replay id
+      expect(post.body!['amount'], 200);
+      expect(post.body!['source'], 'Deposit');
+      // Drained + the create row is now clean (not re-pushed).
+      expect(await dao.outboxCount(), 0);
+      expect(await dao.dirtyBudgetEntryIds(), isEmpty);
+    });
+
+    test('a local budget-entry delete DELETEs /entries/{id} then hard-removes',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(
+          Project.fromJson(_serverProjectJson(id: 'p1', budget: 1200)));
+      await dao.upsertBudgetEntryFromServer(
+        BudgetEntry(
+            id: 'be1', projectId: 'p1', amount: 200, currency: 'USD'),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      await dao.applyLocalBudgetEntryDelete('be1');
+
+      final transport = _FakeTransport();
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.pushed, 1);
+
+      final del = transport.calls.firstWhere((c) => c.method == 'DELETE');
+      expect(del.path, contains('/entries/be1'));
+      // Delete pushed → tombstone hard-removed; nothing left queued.
+      expect(await dao.outboxCount(), 0);
+      expect(await dao.getBudgetEntryRow('be1'), isNull);
+    });
+
+    test(
+        'an offline create-then-delete round-trips to nothing (no POST, no '
+        'DELETE)', () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(
+          Project.fromJson(_serverProjectJson(id: 'p1', budget: 0)));
+      final entry = await dao.applyLocalBudgetEntryCreate('p1', 200,
+          source: 'oops', currency: 'USD');
+      await dao.applyLocalBudgetEntryDelete(entry.id); // collapses the create
+
+      final transport = _FakeTransport();
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      await sync.sync();
+      // The create was annihilated before any push — the server never hears
+      // about a top-up the user immediately undid.
+      expect(transport.calls.any((c) => c.method == 'POST'), isFalse);
+      expect(transport.calls.any((c) => c.method == 'DELETE'), isFalse);
+      expect(await dao.outboxCount(), 0);
+      // And the optimistic bump was fully rolled back.
+      expect((await dao.getProject('p1'))!.budget, 0);
+    });
+  });
 }
 
 // ── test helpers ─────────────────────────────────────────────────────────────

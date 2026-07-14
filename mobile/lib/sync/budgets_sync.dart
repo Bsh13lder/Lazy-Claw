@@ -229,6 +229,34 @@ class BudgetsSync {
           default:
             break;
         }
+      } else if (item.isBudgetEntry) {
+        switch (item.op) {
+          case BudgetsOutboxOp.create:
+            // Idempotent on the client id: a retried POST returns the existing
+            // row WITHOUT re-bumping the project budget — so a re-push after an
+            // interrupted drain can't double-credit.
+            await _repo.addBudgetEntry(
+              (p['project_id'] ?? '').toString(),
+              _asDouble(p['amount']) ?? 0.0,
+              id: p['id']?.toString() ?? item.entityId,
+              source: p['source']?.toString(),
+              currency: p['currency']?.toString(),
+            );
+            break;
+          case BudgetsOutboxOp.update:
+            await _repo.updateBudgetEntry(
+              item.entityId,
+              amount: _asDouble(p['amount']),
+              source: p['source']?.toString(),
+              currency: p['currency']?.toString(),
+            );
+            break;
+          case BudgetsOutboxOp.delete:
+            await _repo.deleteBudgetEntry(item.entityId);
+            break;
+          default:
+            break;
+        }
       }
       // Server accepted the op → the caller commits the retire.
       return true;
@@ -338,9 +366,14 @@ class BudgetsSync {
   /// diagnosis.
   Future<void> _logCreateRejected(BudgetsOutboxItem item, int status) async {
     final p = item.payload;
-    final label = item.isExpense
-        ? (p['description']?.toString() ?? p['amount']?.toString() ?? '')
-        : (p['name']?.toString() ?? '');
+    final String label;
+    if (item.isExpense) {
+      label = p['description']?.toString() ?? p['amount']?.toString() ?? '';
+    } else if (item.isBudgetEntry) {
+      label = p['source']?.toString() ?? p['amount']?.toString() ?? '';
+    } else {
+      label = p['name']?.toString() ?? '';
+    }
     final descriptor = label.isEmpty ? item.entity : '${item.entity}: $label';
     await _dao.logConflict(
       id: item.entityId,

@@ -76,6 +76,15 @@ class ServerExpense {
   const ServerExpense(this.expense, this.updatedAt);
 }
 
+/// A server budget-ledger entry paired with its authoritative `updated_at` —
+/// the timestamp last-write-wins compares against. Keeps [BudgetEntry] free of
+/// sync-only fields (it surfaces only `created_at`).
+class ServerBudgetEntry {
+  final BudgetEntry entry;
+  final String? updatedAt;
+  const ServerBudgetEntry(this.entry, this.updatedAt);
+}
+
 /// One server-side delta page from `GET /api/budgets/changes`. Carries BOTH
 /// entities + both tombstone lists + the server `now` (the next shared cursor).
 class BudgetChanges {
@@ -91,6 +100,13 @@ class BudgetChanges {
   /// Ids of expenses the server soft-deleted since the cursor.
   final List<String> deletedExpenses;
 
+  /// Budget-ledger entries (top-ups) created/updated server-side since the
+  /// cursor. Defaulted so older construction sites stay valid.
+  final List<ServerBudgetEntry> budgetEntries;
+
+  /// Ids of ledger entries the server soft-deleted since the cursor.
+  final List<String> deletedBudgetEntries;
+
   /// Server "now" timestamp — becomes the next cursor (avoids clock skew).
   final String now;
 
@@ -99,6 +115,8 @@ class BudgetChanges {
     required this.expenses,
     required this.deletedProjects,
     required this.deletedExpenses,
+    this.budgetEntries = const [],
+    this.deletedBudgetEntries = const [],
     required this.now,
   });
 }
@@ -119,6 +137,8 @@ class BudgetsRepository {
     final rawExpenses = json['expenses'] as List? ?? const [];
     final rawDelProjects = json['deleted_projects'] as List? ?? const [];
     final rawDelExpenses = json['deleted_expenses'] as List? ?? const [];
+    final rawEntries = json['budget_entries'] as List? ?? const [];
+    final rawDelEntries = json['deleted_budget_entries'] as List? ?? const [];
     return BudgetChanges(
       projects: rawProjects.map((e) {
         final map = Map<String, dynamic>.from(e as Map);
@@ -132,6 +152,13 @@ class BudgetsRepository {
       }).toList(),
       deletedProjects: rawDelProjects.map((e) => e.toString()).toList(),
       deletedExpenses: rawDelExpenses.map((e) => e.toString()).toList(),
+      budgetEntries: rawEntries.map((e) {
+        final map = Map<String, dynamic>.from(e as Map);
+        return ServerBudgetEntry(
+            BudgetEntry.fromJson(map), map['updated_at']?.toString());
+      }).toList(),
+      deletedBudgetEntries:
+          rawDelEntries.map((e) => e.toString()).toList(),
       now: (json['now'] ?? '').toString(),
     );
   }
@@ -273,10 +300,12 @@ class BudgetsRepository {
   Future<BudgetEntry> addBudgetEntry(
     String projectId,
     double amount, {
+    String? id,
     String? source,
     String? currency,
   }) async {
     final body = <String, dynamic>{'amount': amount};
+    if (id != null) body['id'] = id;
     if (source != null) body['source'] = source;
     if (currency != null) body['currency'] = currency;
 

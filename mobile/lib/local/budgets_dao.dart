@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import 'app_db.dart';
@@ -16,9 +17,14 @@ class BudgetsOutboxOp {
   static const delete = 'delete';
 }
 
-/// Outbox `entity` discriminators for the two budgets entities.
+/// Outbox `entity` discriminators for the budgets entities.
 const String kProjectEntity = 'project';
 const String kExpenseEntity = 'expense';
+
+/// The budget LEDGER entity (top-ups / "+ Add budget"). Distinct from
+/// `expense` (money OUT) — a `budget_entry` is money IN, and the server derives
+/// `projects.budget` from these rows.
+const String kBudgetEntryEntity = 'budget_entry';
 
 /// The ONE shared sync cursor for the budgets domain. A single
 /// `GET /api/budgets/changes` call returns BOTH projects and expenses, so they
@@ -62,6 +68,7 @@ class BudgetsOutboxItem {
 
   bool get isProject => entity == kProjectEntity;
   bool get isExpense => entity == kExpenseEntity;
+  bool get isBudgetEntry => entity == kBudgetEntryEntity;
 
   static Map<String, dynamic> _decodePayload(String? raw) {
     if (raw == null || raw.isEmpty) return <String, dynamic>{};
@@ -206,6 +213,30 @@ class BudgetsDao {
     return _expenseFromRow(rows.first);
   }
 
+  // ── Reads: budget ledger (top-ups) ────────────────────────────────────────
+
+  /// Non-deleted ledger entries, newest first. Pass [projectId] to scope to one
+  /// project's Log; omit for the whole domain.
+  Future<List<BudgetEntry>> listBudgetEntries({String? projectId}) async {
+    final rows = await _db.query(
+      'budget_entry_cache',
+      where: projectId == null ? 'deleted = 0' : 'deleted = 0 AND project_id = ?',
+      whereArgs: projectId == null ? null : [projectId],
+      orderBy: 'created_at DESC, id ASC',
+    );
+    return rows.map(_budgetEntryFromRow).toList();
+  }
+
+  /// Ids of non-deleted ledger entries with un-pushed local changes (dirty=1).
+  Future<Set<String>> dirtyBudgetEntryIds() async {
+    final rows = await _db.query(
+      'budget_entry_cache',
+      columns: ['id'],
+      where: 'dirty = 1 AND deleted = 0',
+    );
+    return rows.map((r) => r['id'] as String).toSet();
+  }
+
   // ── Raw rows (sync engine LWW) ────────────────────────────────────────────
 
   Future<Map<String, Object?>?> getProjectRow(String id) =>
@@ -213,6 +244,9 @@ class BudgetsDao {
 
   Future<Map<String, Object?>?> getExpenseRow(String id) =>
       _getRowOn(_db, 'expense_cache', id);
+
+  Future<Map<String, Object?>?> getBudgetEntryRow(String id) =>
+      _getRowOn(_db, 'budget_entry_cache', id);
 
   Future<Map<String, Object?>?> _getRowOn(
     DatabaseExecutor exec,
@@ -314,6 +348,36 @@ class BudgetsDao {
     );
   }
 
+  /// Write a server-authoritative budget-ledger entry into the cache, clearing
+  /// local dirty state.
+  Future<void> upsertBudgetEntryFromServer(
+    BudgetEntry entry, {
+    String? serverUpdatedAt,
+    String? syncedAt,
+  }) =>
+      _upsertBudgetEntryOn(_db, entry,
+          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+
+  Future<void> _upsertBudgetEntryOn(
+    DatabaseExecutor exec,
+    BudgetEntry entry, {
+    String? serverUpdatedAt,
+    String? syncedAt,
+  }) async {
+    final now = syncedAt ?? _now();
+    final updatedAt = serverUpdatedAt ?? now;
+    final row = _rowFromBudgetEntry(entry)
+      ..['updated_at'] = updatedAt
+      ..['dirty'] = 0
+      ..['deleted'] = 0
+      ..['last_synced_at'] = now;
+    await exec.insert(
+      'budget_entry_cache',
+      row,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
   /// Apply a server tombstone to a project. Idempotent if the row is absent.
   Future<void> applyServerProjectDelete(String id, {String? syncedAt}) =>
       _applyServerDeleteOn(_db, 'project_cache', id, syncedAt: syncedAt);
@@ -321,6 +385,11 @@ class BudgetsDao {
   /// Apply a server tombstone to an expense. Idempotent if the row is absent.
   Future<void> applyServerExpenseDelete(String id, {String? syncedAt}) =>
       _applyServerDeleteOn(_db, 'expense_cache', id, syncedAt: syncedAt);
+
+  /// Apply a server tombstone to a ledger entry. Idempotent if the row is
+  /// absent (a delete for an id we never cached is a no-op, not an error).
+  Future<void> applyServerBudgetEntryDelete(String id, {String? syncedAt}) =>
+      _applyServerDeleteOn(_db, 'budget_entry_cache', id, syncedAt: syncedAt);
 
   Future<void> _applyServerDeleteOn(
     DatabaseExecutor exec,
@@ -729,8 +798,16 @@ class BudgetsDao {
   }
 
   /// Which cache table an outbox entity maps to.
-  static String _tableForEntity(String entity) =>
-      entity == kExpenseEntity ? 'expense_cache' : 'project_cache';
+  static String _tableForEntity(String entity) {
+    switch (entity) {
+      case kExpenseEntity:
+        return 'expense_cache';
+      case kBudgetEntryEntity:
+        return 'budget_entry_cache';
+      default:
+        return 'project_cache';
+    }
+  }
 
   // ── Outbox ─────────────────────────────────────────────────────────────────
 
@@ -1097,6 +1174,28 @@ class BudgetsDao {
         // sqflite has no bool column type — persist as INTEGER 0/1.
         'is_favorite': e.isFavorite ? 1 : 0,
       };
+
+  BudgetEntry _budgetEntryFromRow(Map<String, Object?> row) => BudgetEntry(
+        id: row['id'] as String? ?? '',
+        projectId: row['project_id'] as String? ?? '',
+        amount: (row['amount'] as num?)?.toDouble() ?? 0.0,
+        currency: row['currency'] as String? ?? 'USD',
+        source: row['source'] as String?,
+        kind: row['kind'] as String? ?? 'credit',
+        createdAt: row['created_at'] as String?,
+      );
+
+  Map<String, Object?> _rowFromBudgetEntry(BudgetEntry e) => {
+        'id': e.id,
+        'project_id': e.projectId,
+        'amount': e.amount,
+        'currency': e.currency,
+        'source': e.source,
+        'kind': e.kind,
+        // Server-authoritative created_at (preserved on pull upserts). A local
+        // create overrides this with `now`.
+        'created_at': e.createdAt,
+      };
 }
 
 /// Transaction-scoped façade over a [BudgetsDao] handed out by
@@ -1112,6 +1211,9 @@ class BudgetsTxn {
 
   Future<Map<String, Object?>?> getExpenseRow(String id) =>
       _dao._getRowOn(_txn, 'expense_cache', id);
+
+  Future<Map<String, Object?>?> getBudgetEntryRow(String id) =>
+      _dao._getRowOn(_txn, 'budget_entry_cache', id);
 
   /// Non-tombstoned expense rows belonging to [projectId] on this transaction
   /// (used by the project-tombstone cascade to sweep orphaned children).
@@ -1134,11 +1236,23 @@ class BudgetsTxn {
       _dao._upsertExpenseOn(_txn, expense,
           serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
 
+  Future<void> upsertBudgetEntryFromServer(
+    BudgetEntry entry, {
+    String? serverUpdatedAt,
+    String? syncedAt,
+  }) =>
+      _dao._upsertBudgetEntryOn(_txn, entry,
+          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+
   Future<void> applyServerProjectDelete(String id, {String? syncedAt}) =>
       _dao._applyServerDeleteOn(_txn, 'project_cache', id, syncedAt: syncedAt);
 
   Future<void> applyServerExpenseDelete(String id, {String? syncedAt}) =>
       _dao._applyServerDeleteOn(_txn, 'expense_cache', id, syncedAt: syncedAt);
+
+  Future<void> applyServerBudgetEntryDelete(String id, {String? syncedAt}) =>
+      _dao._applyServerDeleteOn(_txn, 'budget_entry_cache', id,
+          syncedAt: syncedAt);
 
   Future<void> logConflict({
     required String id,

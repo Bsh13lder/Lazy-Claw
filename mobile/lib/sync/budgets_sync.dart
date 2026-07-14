@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 
 import '../core/api/api_exceptions.dart';
 import '../local/budgets_dao.dart';
+import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../repositories/budgets_repository.dart';
@@ -457,18 +458,34 @@ class BudgetsSync {
       if (applied.conflict) conflicts++;
     }
 
+    // 3) Budget-ledger upserts (top-ups). Also reference a project, so they
+    //    follow the project upserts.
+    for (final sbe in changes.budgetEntries) {
+      final applied = await _mergeServerBudgetEntry(sbe, syncedAt: nowIso);
+      if (applied.written) pulled++;
+      if (applied.conflict) conflicts++;
+    }
+
     var deletedApplied = 0;
 
-    // 3) Project tombstones.
+    // 4) Project tombstones.
     for (final id in changes.deletedProjects) {
       final logged = await _applyServerProjectTombstone(id, syncedAt: nowIso);
       if (logged) conflicts++;
       deletedApplied++;
     }
 
-    // 4) Expense tombstones.
+    // 5) Expense tombstones.
     for (final id in changes.deletedExpenses) {
       final logged = await _applyServerExpenseTombstone(id, syncedAt: nowIso);
+      if (logged) conflicts++;
+      deletedApplied++;
+    }
+
+    // 6) Budget-ledger tombstones.
+    for (final id in changes.deletedBudgetEntries) {
+      final logged =
+          await _applyServerBudgetEntryTombstone(id, syncedAt: nowIso);
       if (logged) conflicts++;
       deletedApplied++;
     }
@@ -509,6 +526,10 @@ class BudgetsSync {
     }
     for (final se in changes.expenses) {
       final ua = se.updatedAt ?? '';
+      if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
+    }
+    for (final sbe in changes.budgetEntries) {
+      final ua = sbe.updatedAt ?? '';
       if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
     }
     return best.isEmpty ? null : best;
@@ -699,6 +720,82 @@ class BudgetsSync {
     return any;
   }
 
+  // ── Budget-ledger merge (LWW) ──────────────────────────────────────────────
+
+  Future<_MergeOutcome> _mergeServerBudgetEntry(
+    ServerBudgetEntry sbe, {
+    required String syncedAt,
+  }) {
+    final serverEntry = sbe.entry;
+    final serverUpdatedAt = sbe.updatedAt;
+
+    return _dao.runInTransaction<_MergeOutcome>((txn) async {
+      final localRow = await txn.getBudgetEntryRow(serverEntry.id);
+
+      if (localRow == null) {
+        await txn.upsertBudgetEntryFromServer(
+          serverEntry,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localDirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+      if (!localDirty) {
+        await txn.upsertBudgetEntryFromServer(
+          serverEntry,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
+      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+
+      if (serverWins) {
+        final logged = await _logBudgetEntryFieldConflicts(
+            txn, localRow, serverEntry, at: syncedAt);
+        await txn.upsertBudgetEntryFromServer(
+          serverEntry,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return _MergeOutcome(written: true, conflict: logged);
+      }
+
+      // Local strictly newer — keep it; it re-pushes next sync.
+      return const _MergeOutcome(written: false, conflict: false);
+    });
+  }
+
+  Future<bool> _logBudgetEntryFieldConflicts(
+    BudgetsTxn txn,
+    Map<String, Object?> localRow,
+    BudgetEntry serverEntry, {
+    required String at,
+  }) async {
+    const fields = <String>['amount', 'currency', 'source', 'kind'];
+    final serverJson = serverEntry.toJson();
+    var any = false;
+    for (final col in fields) {
+      final localVal = localRow[col]?.toString();
+      final serverVal = serverJson[col]?.toString();
+      if (localVal != serverVal) {
+        any = true;
+        await txn.logConflict(
+          id: serverEntry.id,
+          field: col,
+          local: localVal,
+          server: serverVal,
+          at: at,
+        );
+      }
+    }
+    return any;
+  }
+
   // ── Tombstones (H1: server delete vs unsynced local edit) ──────────────────
 
   Future<bool> _applyServerProjectTombstone(String id,
@@ -796,6 +893,34 @@ class BudgetsSync {
       }
 
       await txn.applyServerExpenseDelete(id, syncedAt: syncedAt);
+      return loggedConflict;
+    });
+  }
+
+  Future<bool> _applyServerBudgetEntryTombstone(String id,
+      {required String syncedAt}) {
+    return _dao.runInTransaction<bool>((txn) async {
+      final localRow = await txn.getBudgetEntryRow(id);
+      var loggedConflict = false;
+
+      if (localRow != null) {
+        final dirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+        final alreadyDeleted = ((localRow['deleted'] as int?) ?? 0) == 1;
+        if (dirty && !alreadyDeleted) {
+          await _logTombstoneConflict(
+            txn,
+            localRow,
+            cols: const ['amount', 'currency', 'source', 'kind'],
+            at: syncedAt,
+          );
+          loggedConflict = true;
+        }
+        if (dirty) {
+          await txn.deleteOutboxForEntity(kBudgetEntryEntity, id);
+        }
+      }
+
+      await txn.applyServerBudgetEntryDelete(id, syncedAt: syncedAt);
       return loggedConflict;
     });
   }

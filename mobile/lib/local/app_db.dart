@@ -34,7 +34,13 @@ import 'uuid.dart';
 /// v8: adds `expense_cache.is_favorite` (INTEGER 0/1, default 0) so a starred
 ///     expense round-trips through the budgets sync — the per-expense mirror of
 ///     the v5 per-project favorite flag. Feeds the Money "★ Starred only" total.
-const int kAppDbVersion = 8;
+/// v9: adds `budget_entry_cache` — the budget LEDGER (top-ups / "+ Add budget")
+///     as an offline-first sync source, mirroring `expense_cache`. The backend
+///     already serves ledger rows in `/api/budgets/changes` (`budget_entries` +
+///     `deleted_budget_entries`); this table lets the Log render offline and
+///     reflect cross-device top-ups, and (Phase 1B) lets a top-up be queued
+///     offline as a real audit row instead of a silent budget bump.
+const int kAppDbVersion = 9;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -209,6 +215,27 @@ const List<String> kAppDbSchema = [
     cached_at TEXT NOT NULL
   )
   ''',
+  // Budget LEDGER cache + sync source (top-ups / "+ Add budget"). Mirrors the
+  // sync columns of `expense_cache`. `amount` is the signed delta applied to the
+  // project budget; `kind` is `credit` (a sourced top-up) or `edit` (a direct-
+  // set audit row). The server derives `projects.budget` from these rows, so the
+  // client NEVER pushes a budget update alongside a ledger op (avoids double-
+  // counting) — see budgets_sync.dart.
+  '''
+  CREATE TABLE IF NOT EXISTS budget_entry_cache (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    amount REAL,
+    currency TEXT,
+    source TEXT,
+    kind TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT
+  )
+  ''',
 ];
 
 /// Apply the full schema to [db]. Used by both [openAppDb] (via onCreate) and
@@ -294,6 +321,13 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
         'ALTER TABLE expense_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
       );
     }
+  }
+  // v8 → v9: add the budget ledger cache. It's a brand-new table, so the
+  // idempotent `CREATE TABLE IF NOT EXISTS` in the schema is all that's needed —
+  // re-running createAppDbSchema only creates what's missing and leaves every
+  // existing table untouched.
+  if (oldVersion < 9) {
+    await createAppDbSchema(db);
   }
 }
 

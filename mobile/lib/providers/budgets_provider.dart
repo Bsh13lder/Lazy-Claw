@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../local/budgets_dao.dart';
+import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../repositories/budgets_repository.dart';
@@ -37,11 +38,18 @@ class BudgetsState {
   final List<Project> projects;
   final List<Expense> expenses;
 
+  /// Budget-ledger entries (top-ups) across all projects, synced offline-first.
+  /// The Log surfaces filter this by project id.
+  final List<BudgetEntry> budgetEntries;
+
   /// Project ids with un-pushed local edits — the UI shows a cloud-off badge.
   final Set<String> dirtyProjectIds;
 
   /// Expense ids with un-pushed local edits.
   final Set<String> dirtyExpenseIds;
+
+  /// Ledger-entry ids with un-pushed local edits.
+  final Set<String> dirtyBudgetEntryIds;
 
   final bool isLoading;
   final bool isSubmitting;
@@ -50,8 +58,10 @@ class BudgetsState {
   const BudgetsState({
     this.projects = const [],
     this.expenses = const [],
+    this.budgetEntries = const [],
     this.dirtyProjectIds = const {},
     this.dirtyExpenseIds = const {},
+    this.dirtyBudgetEntryIds = const {},
     this.isLoading = false,
     this.isSubmitting = false,
     this.error,
@@ -60,8 +70,10 @@ class BudgetsState {
   BudgetsState copyWith({
     List<Project>? projects,
     List<Expense>? expenses,
+    List<BudgetEntry>? budgetEntries,
     Set<String>? dirtyProjectIds,
     Set<String>? dirtyExpenseIds,
+    Set<String>? dirtyBudgetEntryIds,
     bool? isLoading,
     bool? isSubmitting,
     String? error,
@@ -70,12 +82,19 @@ class BudgetsState {
       BudgetsState(
         projects: projects ?? this.projects,
         expenses: expenses ?? this.expenses,
+        budgetEntries: budgetEntries ?? this.budgetEntries,
         dirtyProjectIds: dirtyProjectIds ?? this.dirtyProjectIds,
         dirtyExpenseIds: dirtyExpenseIds ?? this.dirtyExpenseIds,
+        dirtyBudgetEntryIds: dirtyBudgetEntryIds ?? this.dirtyBudgetEntryIds,
         isLoading: isLoading ?? this.isLoading,
         isSubmitting: isSubmitting ?? this.isSubmitting,
         error: clearError ? null : (error ?? this.error),
       );
+
+  /// Ledger entries belonging to [projectId], newest first (already ordered by
+  /// the DAO read).
+  List<BudgetEntry> entriesForProject(String projectId) =>
+      budgetEntries.where((e) => e.projectId == projectId).toList();
 }
 
 // ── Notifier ───────────────────────────────────────────────────────────────
@@ -369,13 +388,17 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   Future<void> _refreshFromCache({bool loading = false}) async {
     final projects = await _dao.listProjects();
     final expenses = await _dao.listExpenses();
+    final budgetEntries = await _dao.listBudgetEntries();
     final dirtyProjects = await _dao.dirtyProjectIds();
     final dirtyExpenses = await _dao.dirtyExpenseIds();
+    final dirtyEntries = await _dao.dirtyBudgetEntryIds();
     state = state.copyWith(
       projects: projects,
       expenses: expenses,
+      budgetEntries: budgetEntries,
       dirtyProjectIds: dirtyProjects,
       dirtyExpenseIds: dirtyExpenses,
+      dirtyBudgetEntryIds: dirtyEntries,
       isLoading: loading,
     );
   }

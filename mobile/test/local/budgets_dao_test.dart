@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/budgets_dao.dart';
+import 'package:lazyclaw_mobile/models/budget_entry.dart';
 import 'package:lazyclaw_mobile/models/expense.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -50,6 +51,24 @@ Expense _serverExpense({
       currency: 'USD',
       description: description,
       status: 'posted',
+    );
+
+BudgetEntry _serverBudgetEntry({
+  String id = 'be1',
+  String projectId = 'p1',
+  double amount = 200.0,
+  String? source = 'Client payment',
+  String kind = 'credit',
+  String? createdAt = '2026-07-01T10:00:00Z',
+}) =>
+    BudgetEntry(
+      id: id,
+      projectId: projectId,
+      amount: amount,
+      currency: 'USD',
+      source: source,
+      kind: kind,
+      createdAt: createdAt,
     );
 
 void main() {
@@ -622,6 +641,63 @@ void main() {
       await dao.upsertExpenseFromServer(_serverExpense(id: 'srv'));
       await dao.applyServerExpenseDelete('srv');
       expect((await dao.listExpenses()).map((e) => e.id), isNot(contains('srv')));
+    });
+  });
+
+  group('BudgetsDao budget-entry ledger (server pull)', () {
+    test('upsertBudgetEntryFromServer writes a clean synced row', () async {
+      final dao = await _freshDao();
+      await dao.upsertBudgetEntryFromServer(
+        _serverBudgetEntry(id: 'srv', amount: 300, source: 'Deposit'),
+        serverUpdatedAt: '2026-07-02T09:00:00Z',
+      );
+      final entries = await dao.listBudgetEntries();
+      expect(entries, hasLength(1));
+      expect(entries.single.id, 'srv');
+      expect(entries.single.amount, 300);
+      expect(entries.single.source, 'Deposit');
+      // Clean (server-authoritative) → not dirty, updated_at is the server one.
+      expect(await dao.dirtyBudgetEntryIds(), isEmpty);
+      final row = await dao.getBudgetEntryRow('srv');
+      expect(row!['updated_at'], '2026-07-02T09:00:00Z');
+      expect(row['dirty'], 0);
+      expect(row['deleted'], 0);
+      expect(row['last_synced_at'], isNotNull);
+    });
+
+    test('listBudgetEntries filters by projectId and orders newest-first',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertBudgetEntryFromServer(_serverBudgetEntry(
+          id: 'a', projectId: 'p1', createdAt: '2026-07-01T10:00:00Z'));
+      await dao.upsertBudgetEntryFromServer(_serverBudgetEntry(
+          id: 'b', projectId: 'p1', createdAt: '2026-07-03T10:00:00Z'));
+      await dao.upsertBudgetEntryFromServer(_serverBudgetEntry(
+          id: 'c', projectId: 'p2', createdAt: '2026-07-02T10:00:00Z'));
+
+      // created_at DESC: b (07-03), c (07-02), a (07-01).
+      final all = await dao.listBudgetEntries();
+      expect(all.map((e) => e.id), ['b', 'c', 'a']);
+
+      final p1 = await dao.listBudgetEntries(projectId: 'p1');
+      expect(p1.map((e) => e.id), ['b', 'a']); // c is p2, excluded
+    });
+
+    test('applyServerBudgetEntryDelete tombstones the row (excluded from list)',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertBudgetEntryFromServer(_serverBudgetEntry(id: 'srv'));
+      await dao.applyServerBudgetEntryDelete('srv');
+      expect((await dao.listBudgetEntries()).map((e) => e.id),
+          isNot(contains('srv')));
+    });
+
+    test('applyServerBudgetEntryDelete is idempotent when the row is absent',
+        () async {
+      final dao = await _freshDao();
+      // Must not throw on a delete for an id we never cached.
+      await dao.applyServerBudgetEntryDelete('ghost');
+      expect(await dao.listBudgetEntries(), isEmpty);
     });
   });
 

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/budgets_dao.dart';
+import 'package:lazyclaw_mobile/models/budget_entry.dart';
 import 'package:lazyclaw_mobile/models/expense.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
@@ -198,6 +199,26 @@ Map<String, dynamic> _serverExpenseJson({
       'currency': 'USD',
       'description': description,
       'status': 'posted',
+      'created_at': createdAt,
+      'updated_at': updatedAt ?? createdAt,
+    };
+
+Map<String, dynamic> _serverBudgetEntryJson({
+  String id = 'sbe1',
+  String projectId = 'sp1',
+  double amount = 200.0,
+  String? source = 'Client payment',
+  String kind = 'credit',
+  String? updatedAt,
+  String createdAt = '2026-06-05T10:00:00Z',
+}) =>
+    {
+      'id': id,
+      'project_id': projectId,
+      'amount': amount,
+      'currency': 'USD',
+      'source': source,
+      'kind': kind,
       'created_at': createdAt,
       'updated_at': updatedAt ?? createdAt,
     };
@@ -1212,6 +1233,89 @@ void main() {
           reason: 'both e1 and the mid-drain e2 must reach the server');
       expect(await dao.readBudgetsOutbox(), isEmpty,
           reason: 'the coalesced re-run must fully drain the outbox');
+    });
+  });
+
+  group('BudgetsSync pull — budget ledger (top-ups)', () {
+    test('a server budget entry is pulled into the local cache', () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'budget_entries': [
+          _serverBudgetEntryJson(
+              id: 'be1', projectId: 'p1', amount: 250, source: 'Deposit'),
+        ],
+        'deleted_budget_entries': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.pulled, 1);
+
+      final entries = await dao.listBudgetEntries(projectId: 'p1');
+      expect(entries, hasLength(1));
+      expect(entries.single.id, 'be1');
+      expect(entries.single.amount, 250);
+      expect(entries.single.source, 'Deposit');
+      // Server-authoritative → clean, so it never re-pushes.
+      expect(await dao.dirtyBudgetEntryIds(), isEmpty);
+    });
+
+    test('a deleted_budget_entries id tombstones the cached row', () async {
+      final dao = await _freshDao();
+      // Seed a cached entry (as if pulled earlier).
+      await dao.upsertBudgetEntryFromServer(
+        BudgetEntry(
+          id: 'be1',
+          projectId: 'p1',
+          amount: 100,
+          currency: 'USD',
+          source: 'Old',
+        ),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      expect(await dao.listBudgetEntries(), hasLength(1));
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'budget_entries': [],
+        'deleted_budget_entries': ['be1'],
+        'now': '2026-06-05T13:00:00Z',
+      });
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.deletedApplied, 1);
+      expect(await dao.listBudgetEntries(), isEmpty);
+    });
+
+    test('the cursor advances when only budget entries are present', () async {
+      final dao = await _freshDao();
+      // No `now` — the cursor must fall back to the newest observed updated_at,
+      // which now includes budget entries (else the pull would report failure).
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'budget_entries': [
+          _serverBudgetEntryJson(id: 'be1', updatedAt: '2026-06-06T09:00:00Z'),
+        ],
+        'deleted_budget_entries': [],
+        'now': '',
+      });
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.pullFailed, isFalse);
+      expect(await dao.getCursor(), '2026-06-06T09:00:00Z');
     });
   });
 }

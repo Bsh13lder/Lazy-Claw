@@ -159,7 +159,14 @@ async def update_project_route(
     body: UpdateProjectBody,
     user: User = Depends(get_current_user),
 ):
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    # ``exclude_unset`` keeps an explicit ``null`` (clear the field) but drops a
+    # truly-omitted field (leave it untouched). A stray null on a NOT-NULL
+    # column (name/budget/currency/status) is guarded out so it can never blank
+    # a required field → 500. Nullable fields (description, color) clear fine.
+    fields = body.model_dump(exclude_unset=True)
+    for required in ("name", "budget", "currency", "status"):
+        if required in fields and fields[required] is None:
+            fields.pop(required)
     if not fields:
         raise HTTPException(status_code=400, detail="no fields to update")
     ok = await store.update_project(_config, user.id, project_id, **fields)
@@ -279,7 +286,15 @@ async def update_expense_route(
     body: UpdateExpenseBody,
     user: User = Depends(get_current_user),
 ):
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    # ``exclude_unset`` keeps an explicit ``null`` (clear the field) but drops a
+    # truly-omitted field (leave it untouched). A stray null on a NOT-NULL
+    # column (amount/currency/status) is guarded out so it can never blank a
+    # required field or corrupt the SUM rollup. Nullable fields (vendor, notes,
+    # description, task_id, spent_at) clear fine.
+    fields = body.model_dump(exclude_unset=True)
+    for required in ("amount", "currency", "status"):
+        if required in fields and fields[required] is None:
+            fields.pop(required)
     if not fields:
         raise HTTPException(status_code=400, detail="no fields to update")
     ok = await store.update_expense(_config, user.id, expense_id, **fields)

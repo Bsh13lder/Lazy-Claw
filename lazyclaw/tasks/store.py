@@ -738,6 +738,20 @@ async def update_task(
             set_clauses.append("reminder_offset_minutes = ?")
             params.append(offset)
 
+            # Re-derive advance ``pre_reminders`` against the NEW reminder time
+            # so a reschedule doesn't leave them pinned to the old instant (T4).
+            # Skip when the caller passed ``pre_reminders`` explicitly (its value
+            # was already appended above and wins verbatim). Clearing
+            # ``reminder_at`` resolves to [] → NULL, dropping stale advance nags.
+            if "pre_reminders" not in fields:
+                from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
+
+                recomputed = await resolve_pre_reminders(
+                    config, user_id, reminder_at=new_rem, explicit=None,
+                )
+                set_clauses.append("pre_reminders = ?")
+                params.append(json.dumps(sorted(set(recomputed))) if recomputed else None)
+
     # Reset nag state on any reminder_at change so the user gets a fresh
     # escalation series instead of jumping mid-sequence.
     if "reminder_at" in fields:

@@ -289,6 +289,9 @@ class TaskDao {
     String? reminderAt,
     String? steps,
     String? recurring,
+    String? tags,
+    double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) async {
     final existing = await getById(id);
     if (existing == null) return null;
@@ -312,6 +315,9 @@ class TaskDao {
       reminderAt: reminderAt,
       steps: steps,
       recurring: recurring,
+      tags: tags,
+      allocatedBudget: allocatedBudget,
+      clearAllocatedBudget: clearAllocatedBudget,
     );
 
     final patch = <String, dynamic>{
@@ -324,7 +330,19 @@ class TaskDao {
       'reminder_at': ?reminderAt,
       'steps': ?steps,
       'recurring': ?recurring,
+      // tags rides as a JSON-array STRING (same as the cache column); it's
+      // decoded to a list at push time (task_sync), mirroring `steps`.
+      'tags': ?tags,
     };
+    // allocated_budget: distinguish "set to N" (a number) from "clear" (explicit
+    // null, so the server's exclude_unset PATCH nulls it) from "untouched"
+    // (absent → the ?-syntax would drop a null, so a clear needs the explicit
+    // flag). A plain number rides via the number; a clear rides via null.
+    if (allocatedBudget != null) {
+      patch['allocated_budget'] = allocatedBudget;
+    } else if (clearAllocatedBudget) {
+      patch['allocated_budget'] = null;
+    }
 
     await _db.transaction((txn) async {
       final cacheUpdates = {..._fieldUpdates(patch), 'updated_at': now, 'dirty': 1};

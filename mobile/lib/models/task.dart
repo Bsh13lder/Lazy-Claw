@@ -138,6 +138,7 @@ class Task {
     String? lazybrainNoteId,
     String? steps,
     double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) =>
       Task(
         id: id ?? this.id,
@@ -161,7 +162,8 @@ class Task {
         traceSessionId: traceSessionId ?? this.traceSessionId,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
         steps: steps ?? this.steps,
-        allocatedBudget: allocatedBudget ?? this.allocatedBudget,
+        allocatedBudget:
+            clearAllocatedBudget ? null : (allocatedBudget ?? this.allocatedBudget),
       );
 
   @override

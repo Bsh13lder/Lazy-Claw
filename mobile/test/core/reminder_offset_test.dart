@@ -129,10 +129,11 @@ void main() {
   });
 
   group('kReminderOffsetOptions', () {
-    test('exposes the five UI options in display order with valid wire values',
+    test('exposes the six UI options in display order with valid wire values',
         () {
+      // Includes -2h so the user can pick the server's default lead time.
       expect(kReminderOffsetOptions.map((o) => o.value).toList(),
-          ['0m', '-10m', '-30m', '-1h', '-1d']);
+          ['0m', '-10m', '-30m', '-1h', '-2h', '-1d']);
       for (final o in kReminderOffsetOptions) {
         expect(parseReminderOffset(o.value), isNotNull,
             reason: '${o.value} must parse');
@@ -140,8 +141,13 @@ void main() {
       }
     });
 
-    test('default matches the legacy single-select default (30 min before)', () {
-      expect(kDefaultReminderOffsets, ['-30m']);
+    test('default matches the server default (settings.general → -2h, -1h)', () {
+      // Source of truth: lazyclaw/settings/general.py DEFAULT_GENERAL
+      // "reminder_offsets": ["-2h", "-1h"]. Mobile's fallback (used when the
+      // backend hasn't sent reminder_offsets yet) MUST match so an
+      // un-customised task fires the same advance reminders on the phone as
+      // the backend/Telegram side.
+      expect(kDefaultReminderOffsets, ['-2h', '-1h']);
     });
   });
 

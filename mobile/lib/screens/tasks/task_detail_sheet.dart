@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
@@ -47,7 +49,22 @@ class TaskDetailSheet extends ConsumerStatefulWidget {
 class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late final TextEditingController _titleController;
   late final TextEditingController _notesController;
+  late final TextEditingController _budgetController;
   late String _priority;
+
+  /// Working copy of the task's tags. Edited in-sheet (add/remove chips) and
+  /// committed on Save. [_originalTagsJson] snapshots the on-open serialization
+  /// so Save only writes `tags` when they actually changed (no churn on a
+  /// title-only edit). The wire/cache shape is a JSON-array string.
+  late List<String> _tags;
+  late String _originalTagsJson;
+  final TextEditingController _tagController = TextEditingController();
+
+  /// The task's allocated budget on open (null = none). Save compares the
+  /// parsed field against this to decide set / clear / untouched.
+  double? _originalBudget;
+
+  static const int _maxTagLength = 40;
 
   /// The due date is split into a date-only day string (`_dueDay`) and a
   /// separate time-of-day (`_dueTime`), pre-filled from the task's stored
@@ -90,6 +107,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final t = widget.task;
     _titleController = TextEditingController(text: t.title);
     _notesController = TextEditingController(text: t.description ?? '');
+    _tags = _parseTags(t.tags);
+    _originalTagsJson = jsonEncode(_tags);
+    _originalBudget = t.allocatedBudget;
+    _budgetController = TextEditingController(text: _formatBudget(t.allocatedBudget));
     _priority = _priorities.contains(t.priority) ? t.priority : 'medium';
     final raw = t.dueDate;
     _dueDay = (raw == null || raw.isEmpty) ? null : dueDateDayPart(raw);
@@ -144,13 +165,70 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   void dispose() {
     _titleController.dispose();
     _notesController.dispose();
+    _budgetController.dispose();
+    _tagController.dispose();
     super.dispose();
+  }
+
+  /// Parse the task's stored `tags` (a JSON-array string) into a list. Tolerant:
+  /// null / empty / malformed → `[]`.
+  static List<String> _parseTags(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.map((e) => e.toString()).toList();
+    } catch (_) {}
+    return [];
+  }
+
+  /// Format a budget for the numeric field: null → empty; a whole number drops
+  /// the trailing `.0` (`250.0` → `250`).
+  static String _formatBudget(double? v) {
+    if (v == null) return '';
+    if (v == v.roundToDouble()) return v.toInt().toString();
+    return v.toString();
+  }
+
+  void _addTag(String raw) {
+    final tag = raw.trim();
+    if (tag.isEmpty) return;
+    final clamped =
+        tag.length > _maxTagLength ? tag.substring(0, _maxTagLength) : tag;
+    if (_tags.contains(clamped)) {
+      _tagController.clear();
+      return;
+    }
+    setState(() => _tags = [..._tags, clamped]);
+    _tagController.clear();
+  }
+
+  void _removeTag(String tag) {
+    setState(() => _tags = _tags.where((t) => t != tag).toList());
   }
 
   Future<void> _save() async {
     final title = _titleController.text.trim();
     if (title.isEmpty || _saving || _deleting) return;
+    // Fold any un-committed text in the tag field into the list before saving.
+    if (_tagController.text.trim().isNotEmpty) _addTag(_tagController.text);
     setState(() => _saving = true);
+    // Only write `tags` when they changed. Serialized as the JSON-array string
+    // the DAO/cache carry; task_sync decodes it to a list for the PATCH. An
+    // empty list ('[]') is a deliberate clear (differs from the on-open snapshot
+    // only when the task actually had tags).
+    final nextTagsJson = jsonEncode(_tags);
+    final tagsArg = nextTagsJson == _originalTagsJson ? null : nextTagsJson;
+    // Budget: empty field clears a previously-set budget; a parsed number that
+    // differs sets it; otherwise leave untouched.
+    final budgetText = _budgetController.text.trim();
+    final parsedBudget = budgetText.isEmpty ? null : double.tryParse(budgetText);
+    double? budgetArg;
+    bool clearBudget = false;
+    if (budgetText.isEmpty && _originalBudget != null) {
+      clearBudget = true;
+    } else if (parsedBudget != null && parsedBudget != _originalBudget) {
+      budgetArg = parsedBudget;
+    }
     // Only write `steps` when the checklist changed. An empty string (not null)
     // force-clears the column when every sub-task was removed.
     final nextSteps = serializeSubtasks(_subtasks);
@@ -184,6 +262,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           steps: stepsArg,
           reminderAt: _composedReminderAt,
           recurring: recurringArg,
+          tags: tagsArg,
+          allocatedBudget: budgetArg,
+          clearAllocatedBudget: clearBudget,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -307,6 +388,45 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               category: _category,
               onTap: _pickProject,
             ),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Tags ───────────────────────────────────────────────────────
+          _SectionLabel('TAGS'),
+          const SizedBox(height: AppSpacing.sm),
+          if (_tags.isNotEmpty) ...[
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: [
+                for (final tag in _tags)
+                  _TaskTagChip(tag: tag, onDelete: () => _removeTag(tag)),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+          ],
+          LzTextField(
+            controller: _tagController,
+            fieldKey: const Key('task-detail-tag-input'),
+            hint: 'Add a tag',
+            prefixIcon: Icons.label_outline,
+            textInputAction: TextInputAction.done,
+            onSubmitted: _addTag,
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Allocated budget ───────────────────────────────────────────
+          _SectionLabel('BUDGET'),
+          const SizedBox(height: AppSpacing.sm),
+          LzTextField(
+            controller: _budgetController,
+            fieldKey: const Key('task-detail-budget'),
+            hint: 'Allocated budget (optional)',
+            prefixIcon: Icons.account_balance_wallet_outlined,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            textInputAction: TextInputAction.done,
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -638,6 +758,58 @@ class _ProjectChip extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.sm),
               Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A removable tag chip (tap to delete) shown in the detail sheet's TAGS row.
+class _TaskTagChip extends StatelessWidget {
+  const _TaskTagChip({required this.tag, required this.onDelete});
+
+  final String tag;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AppRadii.rPill,
+      child: InkWell(
+        key: ValueKey('task-detail-tag-$tag'),
+        borderRadius: AppRadii.rPill,
+        onTap: onDelete,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md,
+            AppSpacing.xs,
+            AppSpacing.xs,
+            AppSpacing.xs,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.accent.withValues(alpha: 0.14),
+            borderRadius: AppRadii.rPill,
+            border: Border.all(color: AppColors.accent.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                tag,
+                style: AppText.caption.copyWith(
+                  color: AppColors.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.xs),
+              Icon(
+                Icons.close_rounded,
+                size: 14,
+                color: AppColors.accent.withValues(alpha: 0.7),
+              ),
             ],
           ),
         ),

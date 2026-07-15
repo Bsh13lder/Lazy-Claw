@@ -279,6 +279,65 @@ void main() {
       expect(updateItem.payload['steps'], stepsJson);
     });
 
+    test('update persists tags + allocated_budget to cache + enqueues them',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Tag + budget me');
+      const tagsJson = '["work","urgent"]';
+
+      final updated = await dao.applyLocalUpdate(
+        t.id,
+        tags: tagsJson,
+        allocatedBudget: 250.0,
+      );
+      expect(updated!.tags, tagsJson);
+      expect(updated.allocatedBudget, 250.0);
+
+      // Round-trips back out of the cache verbatim.
+      final stored = await dao.getById(t.id);
+      expect(stored!.tags, tagsJson);
+      expect(stored.allocatedBudget, 250.0);
+
+      // Both ride the update op payload for the server push.
+      final outbox = await dao.readOutbox();
+      final updateItem = outbox.firstWhere((o) => o.op == OutboxOp.update);
+      expect(updateItem.payload['tags'], tagsJson);
+      expect(updateItem.payload['allocated_budget'], 250.0);
+    });
+
+    test('clearAllocatedBudget nulls the budget + queues an explicit null',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Had a budget');
+      await dao.applyLocalUpdate(t.id, allocatedBudget: 100.0);
+
+      final updated =
+          await dao.applyLocalUpdate(t.id, clearAllocatedBudget: true);
+      expect(updated!.allocatedBudget, isNull);
+
+      final stored = await dao.getById(t.id);
+      expect(stored!.allocatedBudget, isNull);
+
+      // An explicit null must survive to the outbox (not be dropped as
+      // "untouched") so the clear reaches the server (which now honours an
+      // explicit null via exclude_unset).
+      final outbox = await dao.readOutbox();
+      final updateItem = outbox.lastWhere((o) => o.op == OutboxOp.update);
+      expect(updateItem.payload.containsKey('allocated_budget'), isTrue);
+      expect(updateItem.payload['allocated_budget'], isNull);
+    });
+
+    test('a title-only edit does not queue tags/budget keys (untouched)',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Title only');
+      await dao.applyLocalUpdate(t.id, title: 'renamed');
+      final outbox = await dao.readOutbox();
+      final updateItem = outbox.firstWhere((o) => o.op == OutboxOp.update);
+      expect(updateItem.payload.containsKey('tags'), isFalse);
+      expect(updateItem.payload.containsKey('allocated_budget'), isFalse);
+    });
+
     test('complete marks done + enqueues a complete', () async {
       final dao = await _freshDao();
       final t = await dao.applyLocalCreate('Finish me');

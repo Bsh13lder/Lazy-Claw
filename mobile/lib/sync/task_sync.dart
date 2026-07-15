@@ -281,6 +281,12 @@ class TaskSync {
     final rawSteps = payload['steps'];
     final patch = _patchFrom(payload)..remove('steps');
 
+    // tags is stored/queued as a JSON-array STRING (like steps) but the server's
+    // UpdateTaskBody.tags is `list[str]`, so decode it to a list before PATCH.
+    if (patch.containsKey('tags')) {
+      patch['tags'] = _decodeTags(patch['tags']);
+    }
+
     // Only PATCH when there is a real field to change. A steps-only edit leaves
     // just the synthetic client `updated_at` behind, and an otherwise-empty
     // UpdateTaskBody is rejected with a 400 — so skip the no-op PATCH entirely.
@@ -322,6 +328,24 @@ class TaskSync {
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
+  }
+
+  /// Decode the outbox `tags` payload into the `List<String>` the server's
+  /// `UpdateTaskBody.tags` (`list[str]`) expects. The DAO stores `tags` as a
+  /// JSON-array STRING; this also tolerates an already-decoded list. Null /
+  /// malformed / empty input yields `[]` (a deliberate "clear the tags" PATCH).
+  static List<String> _decodeTags(Object? raw) {
+    dynamic decoded = raw;
+    if (raw is String) {
+      if (raw.trim().isEmpty) return const [];
+      try {
+        decoded = jsonDecode(raw);
+      } catch (_) {
+        return const [];
+      }
+    }
+    if (decoded is! List) return const [];
+    return decoded.map((e) => e.toString()).toList();
   }
 
   /// Replace an item's payload (used for the coalesced update head).

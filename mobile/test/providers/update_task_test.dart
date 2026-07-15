@@ -77,6 +77,9 @@ class _RecordingDao extends TaskDao {
     String? reminderAt,
     String? steps,
     String? recurring,
+    String? tags,
+    double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) async {
     updateCalls.add({
       'id': id,
@@ -87,6 +90,9 @@ class _RecordingDao extends TaskDao {
       'dueDate': dueDate,
       'steps': steps,
       'recurring': recurring,
+      'tags': tags,
+      'allocatedBudget': allocatedBudget,
+      'clearAllocatedBudget': clearAllocatedBudget,
     });
     if (throwOnUpdate) throw StateError('db boom');
     return null;

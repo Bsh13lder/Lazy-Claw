@@ -7,6 +7,8 @@
 // isolate is spun up (its timer would hang pumpAndSettle under FakeAsync); the
 // overridden methods never touch the DAO anyway.
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -72,6 +74,9 @@ class _StubTasksNotifier extends TasksNotifier {
     String? steps,
     String? reminderAt,
     String? recurring,
+    String? tags,
+    double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) async {
     updateCalls.add({
       'id': id,
@@ -83,6 +88,9 @@ class _StubTasksNotifier extends TasksNotifier {
       'steps': steps,
       'reminderAt': reminderAt,
       'recurring': recurring,
+      'tags': tags,
+      'allocatedBudget': allocatedBudget,
+      'clearAllocatedBudget': clearAllocatedBudget,
     });
   }
 
@@ -154,7 +162,7 @@ void main() {
     // subtasks + footer) is taller than the 800×600 default, so give it a
     // roomier surface to keep the footer buttons on-screen and tappable.
     tester.view.devicePixelRatio = 1.0;
-    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.physicalSize = const Size(800, 2200);
     addTearDown(tester.view.reset);
 
     await tester.pumpWidget(host(stub, projects: projects));
@@ -204,6 +212,54 @@ void main() {
     expect(stub.updateCalls.single['title'], 'Edited title');
     // The sheet closed after saving.
     expect(find.byKey(const Key('task-detail-title')), findsNothing);
+  });
+
+  testWidgets('adding a tag + budget then Save passes them to updateTask', (
+    tester,
+  ) async {
+    final stub = _stub();
+    await openSheet(tester, stub);
+
+    // Type a tag and submit it (onSubmitted adds the chip).
+    await tester.enterText(
+      find.byKey(const Key('task-detail-tag-input')),
+      'work',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('task-detail-tag-work')), findsOneWidget);
+
+    // Enter an allocated budget.
+    await tester.enterText(
+      find.byKey(const Key('task-detail-budget')),
+      '250',
+    );
+
+    await tester.ensureVisible(find.byKey(const Key('task-detail-save')));
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    final call = stub.updateCalls.single;
+    // tags ride as the JSON-array string the DAO/cache carry.
+    expect(jsonDecode(call['tags'] as String), ['work']);
+    expect(call['allocatedBudget'], 250.0);
+    expect(call['clearAllocatedBudget'], false);
+  });
+
+  testWidgets('an un-submitted tag is folded in on Save', (tester) async {
+    final stub = _stub();
+    await openSheet(tester, stub);
+
+    // Type a tag but DON'T submit — Save must still capture it.
+    await tester.enterText(
+      find.byKey(const Key('task-detail-tag-input')),
+      'urgent',
+    );
+    await tester.ensureVisible(find.byKey(const Key('task-detail-save')));
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(jsonDecode(stub.updateCalls.single['tags'] as String), ['urgent']);
   });
 
   testWidgets('Delete asks to confirm then invokes deleteTask', (tester) async {
@@ -306,7 +362,7 @@ void main() {
       createdAt: '2026-06-06T00:00:00Z',
     );
     tester.view.devicePixelRatio = 1.0;
-    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.physicalSize = const Size(800, 2200);
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       ProviderScope(

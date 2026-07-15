@@ -40,12 +40,17 @@ const List<ReminderOffsetOption> kReminderOffsetOptions = <ReminderOffsetOption>
   ReminderOffsetOption('-10m', '10 min before'),
   ReminderOffsetOption('-30m', '30 min before'),
   ReminderOffsetOption('-1h', '1 hour before'),
+  ReminderOffsetOption('-2h', '2 hours before'),
   ReminderOffsetOption('-1d', '1 day before'),
 ];
 
-/// Default offset set when nothing is stored. Matches the legacy single-select
-/// default ("30 min before") so scheduling behaviour doesn't regress.
-const List<String> kDefaultReminderOffsets = <String>['-30m'];
+/// Default offset set when nothing is stored (the backend hasn't sent
+/// `reminder_offsets` yet, or prefs are absent/unparseable). MUST match the
+/// server default — `lazyclaw/settings/general.py` DEFAULT_GENERAL
+/// `"reminder_offsets": ["-2h", "-1h"]` — so an un-customised task fires the
+/// same advance reminders on the phone as the backend/Telegram side. Was
+/// `['-30m']`, which silently diverged from the server (T5).
+const List<String> kDefaultReminderOffsets = <String>['-2h', '-1h'];
 
 final RegExp _kOffsetGroup = RegExp(r'(\d+)([dhm])');
 

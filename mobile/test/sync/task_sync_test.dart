@@ -237,6 +237,25 @@ void main() {
       expect(createCall.body!.containsKey('steps'), isFalse);
     });
 
+    test('update PATCH decodes tags to a list + carries allocated_budget',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('T', id: 'tb1');
+      await dao.applyLocalUpdate(
+        t.id,
+        tags: '["work","urgent"]',
+        allocatedBudget: 250.0,
+      );
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+
+      final patchCall = transport.calls.firstWhere((c) => c.method == 'PATCH');
+      // tags ride the PATCH as the decoded list the server's UpdateTaskBody
+      // (tags: list[str]) expects — NOT the raw JSON string.
+      expect(patchCall.body!['tags'], ['work', 'urgent']);
+      expect(patchCall.body!['allocated_budget'], 250.0);
+    });
+
     test('stops at the first network failure and keeps the rest queued',
         () async {
       final dao = await _freshDao();

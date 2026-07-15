@@ -70,6 +70,9 @@ class _StubTasksNotifier extends TasksNotifier {
     String? steps,
     String? reminderAt,
     String? recurring,
+    String? tags,
+    double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) async {
     updateCalls.add({'id': id, 'title': title, 'steps': steps});
   }

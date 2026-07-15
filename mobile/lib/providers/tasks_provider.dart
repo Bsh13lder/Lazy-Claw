@@ -261,6 +261,9 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? steps,
     String? reminderAt,
     String? recurring,
+    String? tags,
+    double? allocatedBudget,
+    bool clearAllocatedBudget = false,
   }) async {
     try {
       final updated = await _dao.applyLocalUpdate(
@@ -273,6 +276,9 @@ class TasksNotifier extends StateNotifier<TasksState> {
         steps: steps,
         reminderAt: reminderAt,
         recurring: recurring,
+        tags: tags,
+        allocatedBudget: allocatedBudget,
+        clearAllocatedBudget: clearAllocatedBudget,
       );
       await _refreshFromCache();
       // Reschedule against the new fields (cancels too, if the time was removed

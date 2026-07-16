@@ -74,6 +74,10 @@ async def run_verification_pump(
             )
             candidate_ids = [r[0] for r in await rows.fetchall()]
 
+        logger.debug(
+            "[lesson] verify pump user=%s now_turn=%d candidates=%d",
+            user_id, now_turn, len(candidate_ids),
+        )
         promoted = 0
         for note_id in candidate_ids:
             note = await lb_store.get_note(config, user_id, note_id)
@@ -107,12 +111,14 @@ async def run_verification_pump(
 
         if promoted:
             logger.info(
-                "lesson_verifier: promoted %d shape(s) to verified for user=%s",
+                "[lesson] verify pump promoted %d shape(s) user=%s",
                 promoted, user_id,
             )
         return promoted
     except Exception:
-        logger.warning("lesson_verifier pump failed", exc_info=True)
+        logger.warning(
+            "[lesson] verify pump failed user=%s", user_id, exc_info=True,
+        )
         return 0
 
 
@@ -189,13 +195,20 @@ async def _flip_latest_shape(
                 frontmatter_updates=updates,
             )
             logger.info(
-                "lesson_verifier: %s → %s on note=%s for user=%s",
+                "[lesson] flip %s -> %s note=%s user=%s",
                 current, to_outcome, note_id, user_id,
             )
             return note_id
+        logger.debug(
+            "[lesson] flip no eligible shape user=%s from=%s to=%s "
+            "checked=%d", user_id, from_outcomes, to_outcome, len(candidates),
+        )
         return None
     except Exception:
-        logger.warning("lesson_verifier flip failed", exc_info=True)
+        logger.warning(
+            "[lesson] flip failed user=%s to=%s",
+            user_id, to_outcome, exc_info=True,
+        )
         return None
 
 
@@ -210,6 +223,7 @@ def _decode_tags_json(raw: Any) -> list[str]:
         parsed = json.loads(raw)
         return [str(t) for t in parsed if t]
     except Exception:
+        logger.debug("[lesson] _decode_tags_json failed, treating as empty", exc_info=True)
         return []
 
 
@@ -241,6 +255,11 @@ async def demote_on_failure(
             row = await rows.fetchone()
 
         if not row:
+            logger.debug(
+                "[lesson] demote_on_failure no verified shape for "
+                "title_key=%s user=%s",
+                title_key[:16] if title_key else None, user_id,
+            )
             return False
         note_id, raw_tags = row
         tags = [str(t) for t in _decode_tags_json(raw_tags)]
@@ -259,12 +278,15 @@ async def demote_on_failure(
             },
         )
         logger.info(
-            "lesson_verifier: demoted verified→pending on note=%s",
-            note_id,
+            "[lesson] demoted verified->pending note=%s user=%s",
+            note_id, user_id,
         )
         return True
     except Exception:
-        logger.warning("lesson_verifier demotion failed", exc_info=True)
+        logger.warning(
+            "[lesson] demote_on_failure failed title_key=%s user=%s",
+            title_key[:16] if title_key else None, user_id, exc_info=True,
+        )
         return False
 
 

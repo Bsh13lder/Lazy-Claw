@@ -38,13 +38,20 @@ async def get_bg_streaming(config: Any, user_id: str) -> bool:
             )
             row = await cursor.fetchone()
     except Exception:
-        logger.debug("get_bg_streaming db read failed", exc_info=True)
+        logger.debug(
+            "[stream] get_bg_streaming db read failed user=%s",
+            user_id[:8] if user_id else None, exc_info=True,
+        )
         return True
     if not row or not row[0]:
         return True
     try:
         settings = json.loads(row[0])
     except (TypeError, json.JSONDecodeError):
+        logger.debug(
+            "[stream] get_bg_streaming settings JSON parse failed user=%s, "
+            "defaulting to on", user_id[:8] if user_id else None, exc_info=True,
+        )
         return True
     value = settings.get(_SETTING_KEY)
     if value is None:
@@ -71,6 +78,11 @@ async def set_bg_streaming(
                 try:
                     settings = json.loads(row[0]) or {}
                 except (TypeError, json.JSONDecodeError):
+                    logger.debug(
+                        "[stream] set_bg_streaming existing settings JSON "
+                        "parse failed user=%s, starting fresh",
+                        user_id[:8], exc_info=True,
+                    )
                     settings = {}
             settings[_SETTING_KEY] = flag
             await db.execute(
@@ -78,8 +90,15 @@ async def set_bg_streaming(
                 (json.dumps(settings), user_id),
             )
             await db.commit()
+        logger.debug(
+            "[stream] set_bg_streaming applied key=%s user=%s",
+            _SETTING_KEY, user_id[:8],
+        )
     except Exception:
-        logger.warning("set_bg_streaming db write failed", exc_info=True)
+        logger.warning(
+            "[stream] set_bg_streaming db write failed user=%s",
+            user_id[:8], exc_info=True,
+        )
         return await get_bg_streaming(config, user_id)
     return flag
 

@@ -139,6 +139,10 @@ def apply_mode_posture(
 
     if new_level == level:
         return resolved
+    logger.debug(
+        "[mode] posture applied skill=%s mode=%s %s->%s",
+        resolved.skill_name, mode.value, level, new_level,
+    )
     return ResolvedPermission(
         skill_name=resolved.skill_name,
         level=new_level,
@@ -164,8 +168,17 @@ async def get_agent_mode(config: Config, user_id: str) -> AgentMode:
         general = await get_general_settings(config, user_id)
         mode = parse_mode(general.get("agent_mode"))
     except Exception:
-        logger.debug("get_agent_mode failed; defaulting", exc_info=True)
+        logger.debug(
+            "[mode] get_agent_mode failed user=%s; defaulting",
+            user_id[:8] if user_id else None, exc_info=True,
+        )
         mode = DEFAULT_MODE
+    prior = cached[1] if cached is not None else None
+    if prior is not None and prior != mode:
+        logger.info(
+            "[mode] transition user=%s from=%s to=%s",
+            user_id[:8] if user_id else None, prior.value, mode.value,
+        )
     _MODE_CACHE[user_id] = (now, mode)
     return mode
 
@@ -173,8 +186,10 @@ async def get_agent_mode(config: Config, user_id: str) -> AgentMode:
 def invalidate_mode_cache(user_id: str | None = None) -> None:
     """Drop the cached mode so a settings change takes effect immediately."""
     if user_id is None:
+        logger.debug("[mode] cache invalidated (all users)")
         _MODE_CACHE.clear()
     else:
+        logger.debug("[mode] cache invalidated user=%s", user_id[:8])
         _MODE_CACHE.pop(user_id, None)
 
 

@@ -87,15 +87,31 @@ async def inject(
     """Return ``text`` with known page titles rewrapped as ``[[wikilinks]]``."""
     if not text or "[[" in text and "]]" in text and len(text) < 200:
         # Short messages already containing wikilinks → skip
+        logger.debug(
+            "[wikilink] skip-guard matched (short text with existing "
+            "wikilinks) text_len=%d", len(text or ""),
+        )
         pass
 
     try:
         titles = await _titles_for(config, user_id)
-    except Exception:
-        logger.debug("wikilink_injector title fetch failed", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[wikilink] title fetch failed user=%s error_type=%s: %s",
+            (user_id or "")[:8], type(exc).__name__, exc, exc_info=True,
+        )
         return text
     if not titles:
+        logger.debug(
+            "[wikilink] no known titles for user=%s — skipping injection",
+            (user_id or "")[:8],
+        )
         return text
+
+    logger.debug(
+        "[wikilink] scan start user=%s text_len=%d known_titles=%d",
+        (user_id or "")[:8], len(text), len(titles),
+    )
 
     protected = _protected_spans(text)
     # Longest titles first — avoid over-matching shorter substrings
@@ -138,6 +154,11 @@ async def inject(
         # Protected spans just shifted — recompute cheaply
         protected = _protected_spans(out)
 
+    logger.debug(
+        "[wikilink] scan done user=%s rewrites=%d titles_matched=%d "
+        "candidates_scanned=%d",
+        (user_id or "")[:8], rewrites, len(already_done), len(sorted_titles),
+    )
     return out
 
 
@@ -146,5 +167,7 @@ def invalidate_cache(user_id: str | None = None) -> None:
     with _lock:
         if user_id is None:
             _cache.clear()
+            logger.debug("[wikilink] cache cleared (all users)")
         else:
             _cache.pop(user_id, None)
+            logger.debug("[wikilink] cache cleared user=%s", (user_id or "")[:8])

@@ -145,15 +145,23 @@ async def extract_lesson(
             domain=domain if lesson_type == "site" else None,
             importance=importance,
         )
+        # NOTE: never log `lesson.content` — it may carry paraphrased user
+        # text; keep the diagnostic surface to keys/counts only.
         logger.info(
-            "Extracted lesson: [%s] %s (domain=%s, importance=%d)",
-            lesson.lesson_type, lesson.content[:60], lesson.domain, lesson.importance,
+            "[lesson] extract_lesson ok type=%s domain=%s importance=%d len=%d",
+            lesson.lesson_type, lesson.domain, lesson.importance, len(lesson.content),
         )
         return lesson
 
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        logger.debug("Lesson extraction parse error: %s", e)
+        logger.debug(
+            "[lesson] extract_lesson parse error user=%s: %s",
+            user_id[:8] if user_id else None, e,
+        )
         return None
     except Exception as e:
-        logger.warning("Lesson extraction failed: %s", e)
+        logger.warning(
+            "[lesson] extract_lesson failed user=%s: %s",
+            user_id[:8] if user_id else None, e, exc_info=True,
+        )
         return None

@@ -148,6 +148,7 @@ def parse_quote_lines(reply_text: str) -> list[QuoteTuple]:
             content=content,
             line_no=line_no,
         ))
+    logger.debug("[f1] parse_quote_lines: found=%d", len(quotes))
     return quotes
 
 
@@ -194,12 +195,14 @@ def verify_quotes_against_tool_results(
         else:
             unverified.append((q, "content not found in any tool result"))
 
-    return VerificationReport(
+    report = VerificationReport(
         total_quotes=len(quote_list),
         verified_count=verified,
         unverified_count=len(unverified),
         unverified_quotes=tuple(unverified),
     )
+    logger.debug("[f1] verify_quotes_against_tool_results: %s", report.summary())
+    return report
 
 
 # ─── Channel-read enforcement gate ────────────────────────────────────────
@@ -286,12 +289,20 @@ def phase2_enforcement_verdict(
         if report.unverified_quotes:
             q, why = report.unverified_quotes[0]
             sample = f"line {q.line_no} ({q.sender}): {q.content[:60]!r} — {why}"
+        logger.debug(
+            "[f1] phase2_enforcement_verdict: should_block=True %s",
+            report.summary(),
+        )
         return True, (
             f"channel-read turn with {report.unverified_count}/"
             f"{report.total_quotes} unverified quotes; first: {sample}"
         )
-    except Exception:  # noqa: BLE001 — gate must never crash the loop
-        logger.debug("phase2_enforcement_verdict raised; degrading", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — gate must never crash the loop
+        logger.warning(
+            "[f1] phase2_enforcement_verdict raised; degrading to "
+            "should_block=False error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return False, ""
 
 
@@ -316,12 +327,19 @@ def observe_or_enforce(
         report = verify_quotes_against_tool_results(
             quotes, tool_results or [],
         )
-    except Exception:  # noqa: BLE001 — verifier must never crash the loop
-        logger.debug("F1 phase-2 verifier raised; ignoring", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — verifier must never crash the loop
+        logger.warning(
+            "[f1] phase-2 verifier raised; ignoring (observation-only) "
+            "error_type=%s: %s", type(exc).__name__, exc, exc_info=True,
+        )
         empty = VerificationReport(0, 0, 0, ())
         return empty, False
 
     if report.unverified_count > 0:
+        # This observation-mode WARN intentionally samples the fabricated quote
+        # (bounded to 60 chars, first 2) — it is F1 telemetry for calibrating
+        # phase-2 before enforcement is enabled. Kept as-is (pre-existing design,
+        # pinned by test_observe_logs_warning_on_unverified_quotes).
         samples = "; ".join(
             f"line {q.line_no} ({q.sender}): {q.content[:60]!r} — {reason}"
             for q, reason in report.unverified_quotes[:2]
@@ -333,4 +351,8 @@ def observe_or_enforce(
         )
 
     should_block = F1_PHASE2_ENFORCE and report.unverified_count > 0
+    logger.debug(
+        "[f1] observe_or_enforce: enforce=%s should_block=%s %s",
+        F1_PHASE2_ENFORCE, should_block, report.summary(),
+    )
     return report, should_block

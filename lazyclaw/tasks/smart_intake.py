@@ -204,6 +204,15 @@ async def suggest_intake(
         and needs_clarif_hint
     )
 
+    # PII-free outcome trace — booleans/enums only, never the title or reason.
+    logger.debug(
+        "[tasks] smart_intake user=%s confidence=%s source=%s "
+        "has_deadline=%s has_category=%s needs_clarif=%s",
+        user_id, confidence,
+        "llm" if (deadline_iso or category) else "none",
+        deadline_iso is not None, category is not None, needs_clarif,
+    )
+
     return IntakeSuggestion(
         deadline_iso=deadline_iso,
         category=category,

@@ -259,7 +259,16 @@ def _detect_conflicts(memories: list[dict]) -> list[tuple[dict, dict]]:
                 continue
             conflicts.append((a, b))
             if len(conflicts) >= 3:
+                logger.debug(
+                    "[context] conflict detection capped at 3 pairs "
+                    "(memories=%d)", len(memories),
+                )
                 return conflicts
+    if conflicts:
+        logger.debug(
+            "[context] conflict detection: memories=%d conflicts=%d",
+            len(memories), len(conflicts),
+        )
     return conflicts
 
 
@@ -310,7 +319,14 @@ def _pick_hybrid_memories(
     Falls back to pure importance when there's no message or no overlap.
     """
     if not pool:
+        logger.debug("[context] pick_hybrid_memories: empty pool")
         return []
+
+    logger.debug(
+        "[context] pick_hybrid_memories start: pool=%d n_importance=%d "
+        "n_relevant=%d has_message=%s",
+        len(pool), n_importance, n_relevant, bool(user_message),
+    )
 
     by_importance = pool[:n_importance]
 
@@ -329,6 +345,11 @@ def _pick_hybrid_memories(
                     scored.append((-overlap, idx, mem))
             scored.sort()
             relevant = [m for _, _, m in scored[:n_relevant]]
+            logger.debug(
+                "[context] keyword-overlap pick: remainder=%d matched=%d "
+                "picked=%d",
+                len(remainder), len(scored), len(relevant),
+            )
 
     # Token-budget loop — interleave importance and relevance so neither
     # category gets starved when the budget is tight.
@@ -372,6 +393,10 @@ def _pick_hybrid_memories(
             cost = len(content) + 4  # bullet + newline overhead
             if spent + cost > budget and chosen:
                 # Stop adding new picks once budget is gone.
+                logger.debug(
+                    "[context] memory budget exhausted: chosen=%d spent=%d "
+                    "budget=%d", len(chosen), spent, budget,
+                )
                 return chosen
             seen_ids.add(m["id"])
             picked_this_round = True
@@ -380,6 +405,10 @@ def _pick_hybrid_memories(
         if not picked_this_round:
             break
 
+    logger.debug(
+        "[context] pick_hybrid_memories done: chosen=%d spent=%d budget=%d",
+        len(chosen), spent, budget,
+    )
     return chosen
 
 
@@ -403,6 +432,11 @@ async def build_context(
             keyword overlap so context-relevant facts surface even when they
             sit below the importance cutoff.
     """
+    logger.debug(
+        "[context] build_context start user=%s channel=%s project=%s has_message=%s",
+        (user_id or "")[:8], bool(channel_id), bool(project_id), bool(user_message),
+    )
+
     personality = load_personality()
 
     # 1. Capabilities (cached 60s)
@@ -419,8 +453,12 @@ async def build_context(
             channel_id=channel_id,
             project_id=project_id,
         )
-    except Exception:
-        logger.debug("Failed to load session context layers", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to load session context layers user=%s "
+            "error_type=%s: %s", (user_id or "")[:8], type(exc).__name__, exc,
+            exc_info=True,
+        )
 
     # 2b. LazyBrain pinned notes + today's journal (Phase 18 — shared PKM)
     #     Runs in parallel isolation: failures never block prompt build.
@@ -457,8 +495,8 @@ async def build_context(
         pinned, excluded_pinned = filter_pinned_for_cache(pinned_raw)
         if excluded_pinned:
             logger.debug(
-                "lazybrain pinned cache filter excluded %d notes: %s",
-                len(excluded_pinned), excluded_pinned,
+                "[context] lazybrain pinned cache filter: kept=%d excluded=%d",
+                len(pinned), len(excluded_pinned),
             )
         today = await lb_journal.get_journal(config, user_id)
         parts: list[str] = []
@@ -468,19 +506,28 @@ async def build_context(
                 title = n.get("title") or "(untitled)"
                 snippet = (n.get("content") or "").strip().splitlines()[0][:160]
                 parts.append(f"- **{title}** — {snippet}")
-        if should_inject_journal(today):
+        _journal_included = should_inject_journal(today)
+        if _journal_included:
             parts.append("### 📓 Today's journal")
             parts.append(today["content"][:600])
         elif today:
             logger.debug(
-                "lazybrain journal cache filter excluded today's "
-                "journal title=%r — fetch on-demand via recall skill",
-                today.get("title"),
+                "[context] lazybrain journal cache filter excluded today's "
+                "journal — fetch on-demand via recall skill",
             )
         if parts:
             lazybrain_section = "## Second Brain (LazyBrain)\n" + "\n".join(parts)
-    except Exception:
-        logger.debug("Failed to load lazybrain context section", exc_info=True)
+        logger.debug(
+            "[context] lazybrain section: pinned=%d excluded_pinned=%d "
+            "journal_included=%s parts=%d",
+            len(pinned), len(excluded_pinned), _journal_included, len(parts),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to load lazybrain context section user=%s "
+            "error_type=%s: %s", (user_id or "")[:8], type(exc).__name__, exc,
+            exc_info=True,
+        )
 
     # 3. Personal memories — hybrid pick: always-on facts (importance) +
     #    context-relevant facts (keyword overlap with the current message).
@@ -497,6 +544,7 @@ async def build_context(
     from lazyclaw.memory.personal import get_memories
 
     pool = await get_memories(config, user_id, limit=40)
+    logger.debug("[context] personal memory pool fetched: count=%d", len(pool))
     try:
         from lazyclaw.lazybrain import store as _lb_store
         from lazyclaw.lazybrain.memory_types import is_auto_inject_type
@@ -542,10 +590,18 @@ async def build_context(
         # Re-sort merged pool by importance DESC so _pick_hybrid_memories
         # still sees a properly-ordered list.
         pool.sort(key=lambda m: int(m.get("importance") or 0), reverse=True)
-    except Exception:
-        logger.debug("Failed to merge lazybrain notes into memory pool", exc_info=True)
+        logger.debug(
+            "[context] merged pool total=%d (personal + lazybrain)", len(pool),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to merge lazybrain notes into memory pool "
+            "user=%s error_type=%s: %s",
+            (user_id or "")[:8], type(exc).__name__, exc, exc_info=True,
+        )
 
     memories = _pick_hybrid_memories(pool, user_message, n_importance=5, n_relevant=5)
+    logger.debug("[context] memories picked: count=%d", len(memories))
 
     # 4. Recent activity (daily/weekly logs — agent's "diary")
     # Summaries are sanitized to remove error details that could cause
@@ -575,8 +631,16 @@ async def build_context(
                     log_lines.append(f"**{log['date']}:** {summary[:150]}")
             if log_lines:
                 activity_section = "## Recent Activity\n" + "\n".join(log_lines)
-    except Exception:
-        logger.debug("Failed to load daily activity logs", exc_info=True)
+            logger.debug(
+                "[context] activity section: logs_fetched=%d lines_kept=%d",
+                len(recent_logs), len(log_lines),
+            )
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to load daily activity logs user=%s "
+            "error_type=%s: %s", (user_id or "")[:8], type(exc).__name__, exc,
+            exc_info=True,
+        )
 
     # Inject current date so the LLM knows what year/day it is
     from datetime import datetime, timezone
@@ -626,6 +690,8 @@ async def build_context(
         # Conflict scan — if two injected memories contradict, surface a
         # warning so the brain ASKS the user rather than guesses a merge.
         conflicts = _detect_conflicts(memories)
+        if conflicts:
+            logger.debug("[context] memory conflicts detected: count=%d", len(conflicts))
         warning_lines: list[str] = []
         for a, b in conflicts:
             a_snip = (a.get("content") or "")[:80]
@@ -639,7 +705,13 @@ async def build_context(
             body = "\n".join(warning_lines) + "\n" + body
         sections.append("## What I know about you\n" + body)
 
-    return "\n\n---\n\n".join(sections)
+    result = "\n\n---\n\n".join(sections)
+    logger.debug(
+        "[context] build_context done user=%s sections=%d memories=%d "
+        "prompt_chars=%d",
+        (user_id or "")[:8], len(sections), len(memories), len(result),
+    )
+    return result
 
 
 _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -685,12 +757,16 @@ async def _build_topic_lessons_section(
     scored.sort(reverse=True)
     # Cap at top-2 topics to bound total context injection.
     topics_hit: list[str] = [t for _, t in scored[:2]]
+    logger.debug("[context] topic-lesson topics matched: %s", topics_hit)
     try:
         from lazyclaw.runtime.skill_lesson import (
             recall_skill_lessons, format_lessons_as_exemplars,
         )
-    except Exception:
-        logger.debug("skill_lesson import failed", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[context] skill_lesson import failed error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return ""
 
     blocks: list[str] = []
@@ -699,14 +775,23 @@ async def _build_topic_lessons_section(
             hits = await recall_skill_lessons(
                 config, user_id, topic=topic, intent=user_message, k=2,
             )
-        except Exception:
-            logger.debug("recall failed for topic %s", topic, exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "[context] recall failed for topic=%s user=%s "
+                "error_type=%s: %s",
+                topic, (user_id or "")[:8], type(exc).__name__, exc,
+                exc_info=True,
+            )
             continue
         if not hits:
             continue
         block = format_lessons_as_exemplars(hits)
         if block:
             blocks.append(f"### Past working shapes for {topic}\n{block}")
+    logger.debug(
+        "[context] topic-lesson blocks built: topics=%d blocks=%d",
+        len(topics_hit), len(blocks),
+    )
     if not blocks:
         return ""
     return "## Learned skill shapes\n" + "\n\n".join(blocks)
@@ -783,6 +868,7 @@ async def _build_capabilities_section(
             ]
             lines.append(f"**{_category_label(cat)}:** {', '.join(display_names)}")
         lines.append("")
+        logger.debug("[context] capabilities: skill_categories=%d", len(categories))
 
     # Connected MCP servers (cached separately)
     mcp_lines = await _get_mcp_status_cached(config, user_id)
@@ -791,6 +877,7 @@ async def _build_capabilities_section(
         for mcp_line in mcp_lines:
             lines.append(f"  - {mcp_line}")
         lines.append("")
+    logger.debug("[context] capabilities: mcp_servers=%d", len(mcp_lines))
 
     # Current config — show ECO-resolved models
     eco_mode = "hybrid"
@@ -802,21 +889,32 @@ async def _build_capabilities_section(
         eco_mode = eco.get("mode", "hybrid")
         _m = get_mode_models(eco_mode)
         _brain_display = eco.get("brain_model") or _m["brain"]
-    except Exception:
-        logger.debug("Failed to load ECO settings for capabilities section", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to load ECO settings for capabilities section "
+            "user=%s error_type=%s: %s",
+            (user_id or "")[:8], type(exc).__name__, exc, exc_info=True,
+        )
     config_parts = [f"Model: {_brain_display}"]
 
     try:
         config_parts.append(f"ECO: {eco_mode}")
-    except Exception:
-        logger.debug("Failed to append ECO mode to config parts", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to append ECO mode to config parts "
+            "error_type=%s: %s", type(exc).__name__, exc, exc_info=True,
+        )
 
     try:
         from lazyclaw.teams.settings import get_team_settings
         team = await get_team_settings(config, user_id)
         config_parts.append(f"Team: {team.get('mode', 'never')}")
-    except Exception:
-        logger.debug("Failed to load team settings for capabilities section", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "[context] failed to load team settings for capabilities "
+            "section user=%s error_type=%s: %s",
+            (user_id or "")[:8], type(exc).__name__, exc, exc_info=True,
+        )
 
     # Ollama status — only check in hybrid mode (uses local models).
     # Skip in claude/full modes to avoid connection spam when Ollama isn't running.
@@ -835,8 +933,11 @@ async def _build_capabilities_section(
             else:
                 ollama_status = "not running"
             await provider.close()
-        except Exception:
-            logger.debug("Ollama health check failed", exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "[context] Ollama health check failed error_type=%s: %s",
+                type(exc).__name__, exc, exc_info=True,
+            )
             ollama_status = "unavailable"
 
     lines.append(f"**Config:** {' | '.join(config_parts)} | Ollama: {ollama_status}")
@@ -910,8 +1011,12 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
                         timeout=5,
                     )
                     tool_count = len(tools)
-                except (asyncio.TimeoutError, Exception):
-                    logger.debug("Failed to list tools for MCP server %s", name, exc_info=True)
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.warning(
+                        "[context] failed to list tools for MCP server=%s "
+                        "error_type=%s: %s", name, type(exc).__name__, exc,
+                        exc_info=True,
+                    )
                     tool_count = 0
                 status = "connected"
             else:
@@ -919,8 +1024,12 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
                 if cached:
                     try:
                         tool_count = len(_json.loads(cached))
-                    except Exception:
-                        logger.debug("Failed to parse cached MCP schema for %s", name, exc_info=True)
+                    except Exception as exc:
+                        logger.warning(
+                            "[context] failed to parse cached MCP schema "
+                            "for server=%s error_type=%s: %s",
+                            name, type(exc).__name__, exc, exc_info=True,
+                        )
                 status = "idle (lazy)"
 
             entry = f"{name}: {desc}" if desc else name
@@ -929,9 +1038,15 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
                 entry += " [favorite]"
             result.append(entry)
 
+        logger.debug(
+            "[context] mcp status resolved: servers=%d", len(result),
+        )
         return result
     except Exception as exc:
-        logger.debug("Failed to get MCP status: %s", exc)
+        logger.warning(
+            "[context] failed to get MCP status user=%s error_type=%s: %s",
+            (user_id or "")[:8], type(exc).__name__, exc, exc_info=True,
+        )
         return []
 
 

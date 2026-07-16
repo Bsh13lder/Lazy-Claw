@@ -6,9 +6,12 @@ callback data and formats it for display in different channels.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from lazyclaw.runtime.events import WorkSummary
+
+logger = logging.getLogger(__name__)
 
 
 def build_work_summary(
@@ -45,6 +48,12 @@ def build_work_summary(
             seen.add(tool)
             unique_tools.append(tool)
 
+    logger.debug(
+        "[summary] built duration_ms=%d llm_calls=%d tools=%d "
+        "specialists=%d tokens=%d mode=%s",
+        duration_ms, llm_calls, len(unique_tools), len(specialists),
+        total_tokens, "team" if specialists else "direct",
+    )
     return WorkSummary(
         duration_ms=duration_ms,
         llm_calls=llm_calls,

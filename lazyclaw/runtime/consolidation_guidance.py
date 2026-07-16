@@ -16,7 +16,10 @@ pieces task_runner injects/checks:
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Stable prefix of the synthetic consolidation-turn message that
 # task_runner._consolidate enqueues. Single-sourced here so the producer
@@ -35,7 +38,9 @@ def is_consolidation_turn(message: str | None) -> bool:
     """
     if not message:
         return False
-    return message.lstrip().startswith(CONSOLIDATION_TURN_PREFIX)
+    is_consolidation = message.lstrip().startswith(CONSOLIDATION_TURN_PREFIX)
+    logger.debug("[consolidate] is_consolidation_turn=%s", is_consolidation)
+    return is_consolidation
 
 
 FAILURE_GUIDANCE_HEADER = "[ORCHESTRATOR GUIDANCE — SUBAGENT FAILURE]"
@@ -84,6 +89,8 @@ def build_failure_guidance(*, can_redelegate: bool) -> str:
     the originating turn — the retry budget caps specialist ping-pong at
     one follow-up round (see TaskRunner._claim_retry_round).
     """
+    branch = "with_redelegate" if can_redelegate else "budget_exhausted"
+    logger.debug("[consolidate] build_failure_guidance: branch=%s", branch)
     if can_redelegate:
         return _GUIDANCE_WITH_REDELEGATE
     return _GUIDANCE_BUDGET_EXHAUSTED
@@ -116,5 +123,9 @@ def draft_claims_success(draft: str | None) -> bool:
         prefix = draft[max(0, match.start() - 60) : match.start()]
         if _NEGATION_RE.search(prefix):
             continue
+        logger.debug(
+            "%s draft_claims_success=True (draft_len=%d)",
+            COHERENCE_LOG_TAG, len(draft),
+        )
         return True
     return False

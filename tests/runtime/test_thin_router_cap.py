@@ -37,8 +37,9 @@ def test_thin_router_narrows_to_meta_only() -> None:
     idx = _AGENT_SRC.index("THIN-ROUTER")
     # Window widened 2026-06-24: the work-call budget trigger + dispatch-only
     # narrowing added lines between the block header and the narrow/suppress
-    # statements.
-    window = _AGENT_SRC[idx:idx + 3200]
+    # statements. Widened again 2026-07-16: a diagnostic cap-decision debug log
+    # was added between the header and the narrow block.
+    window = _AGENT_SRC[idx:idx + 3700]
     assert "_thin_router" in window
     assert "_META_TOOLS" in window
     assert "_suppressed_tool_names" in window, (

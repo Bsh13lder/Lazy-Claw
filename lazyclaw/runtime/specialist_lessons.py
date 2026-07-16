@@ -91,12 +91,16 @@ async def recall_specialist_lessons(
         )
     except Exception:
         logger.debug(
-            "recall_specialist_lessons failed for %s",
+            "[speclesson] recall_specialist_lessons failed specialist=%s",
             specialist_name,
             exc_info=True,
         )
         return ""
 
+    logger.debug(
+        "[speclesson] recall specialist=%s k=%d matched=%d",
+        specialist_name, k, len(lessons),
+    )
     if not lessons:
         return ""
     return _format_specialist_lessons(lessons)
@@ -163,6 +167,10 @@ def _sanitize(text: str) -> str:
         return strip_sender_timestamp_patterns(text)
     except Exception:
         # Sanitizer must never break recall — fall back to plain text.
+        logger.debug(
+            "[speclesson] _sanitize paraphrase strip failed, using raw line",
+            exc_info=True,
+        )
         return text
 
 
@@ -189,7 +197,13 @@ def should_promote_lesson(lesson: Mapping[str, Any]) -> bool:
     outcome = str(lesson.get("outcome") or "").strip()
     if outcome != OUTCOME_VERIFIED:
         return False
-    return _replay_count(lesson) >= PROMOTION_MIN_REPLAY_COUNT
+    replay_count = _replay_count(lesson)
+    eligible = replay_count >= PROMOTION_MIN_REPLAY_COUNT
+    logger.debug(
+        "[speclesson] should_promote outcome=%s replay_count=%d eligible=%s",
+        outcome, replay_count, eligible,
+    )
+    return eligible
 
 
 def _replay_count(lesson: Mapping[str, Any]) -> int:
@@ -215,6 +229,10 @@ def _replay_count(lesson: Mapping[str, Any]) -> int:
             if val is not None:
                 return max(0, val)
         except Exception:
+            logger.debug(
+                "[speclesson] _replay_count frontmatter parse failed",
+                exc_info=True,
+            )
             return 0
     return 0
 

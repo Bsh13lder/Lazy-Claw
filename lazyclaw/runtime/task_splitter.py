@@ -200,6 +200,9 @@ async def split_tasks(
     # Fast path: clearly single task
     if not _looks_compound(message):
         lane = "background" if _looks_enumerative(message) else "foreground"
+        logger.debug(
+            "[split] fast path: not compound -> 1 sub-task (lane=%s)", lane,
+        )
         return [SubTask(instruction=message, lane=lane, name="chat")]
 
     try:
@@ -232,7 +235,7 @@ async def split_tasks(
             except json.JSONDecodeError as exc:
                 if attempt == 0:
                     logger.debug(
-                        "Task split JSON parse failed (retrying once): %s", exc,
+                        "[split] JSON parse failed (retrying once): %s", exc,
                     )
                     continue
                 raise  # propagate to outer try/except → single-task fallback
@@ -242,6 +245,10 @@ async def split_tasks(
         if not tasks_data or len(tasks_data) < 2:
             # LLM says it's a single task
             lane = "background" if _looks_enumerative(message) else "foreground"
+            logger.debug(
+                "[split] LLM classified as single task -> 1 sub-task (lane=%s)",
+                lane,
+            )
             return [SubTask(instruction=message, lane=lane, name="chat")]
 
         result = []
@@ -252,14 +259,18 @@ async def split_tasks(
                 name=t.get("name", "task")[:20],
             ))
 
+        # NOTE: never log message/instruction content here (E2E-encrypted
+        # user content) — counts + lane enum values only.
         logger.info(
-            "Split '%s' into %d sub-tasks: %s",
-            message[:40], len(result),
-            [(s.name, s.lane) for s in result],
+            "[split] split into %d sub-tasks (lanes=%s)",
+            len(result), [s.lane for s in result],
         )
         return result
 
     except Exception as exc:
-        logger.debug("Task split failed (falling back to single): %s", exc)
+        logger.debug(
+            "[split] task split failed (falling back to single task): %s: %s",
+            type(exc).__name__, exc,
+        )
         lane = "background" if _looks_enumerative(message) else "foreground"
         return [SubTask(instruction=message, lane=lane, name="chat")]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import uuid
 
 import anthropic
@@ -485,9 +486,27 @@ class AnthropicProvider(BaseLLMProvider):
         _usage_cache_read = 0
         _any_usage_seen = False
 
+        # Provider call boundary — log which model + how many tools, never the
+        # prompt content. `_infer_paid_provider` maps model→anthropic/minimax
+        # upstream; here we just tag by the model name family.
+        _log.debug(
+            "[provider:anthropic] chat start model=%s tools=%d cache=%s",
+            model, len(tools_payload or []), not self._disable_prompt_cache,
+        )
+        _t0 = time.monotonic()
+
         _plan_retry_done = False
         while True:
-            response = await self._client.messages.create(**create_kwargs)
+            try:
+                response = await self._client.messages.create(**create_kwargs)
+            except Exception as exc:
+                _log.warning(
+                    "[provider:anthropic] messages.create failed model=%s "
+                    "after %dms: %s: %s",
+                    model, int((time.monotonic() - _t0) * 1000),
+                    type(exc).__name__, exc,
+                )
+                raise
 
             if response.usage:
                 _any_usage_seen = True
@@ -579,6 +598,16 @@ class AnthropicProvider(BaseLLMProvider):
                 "cache_read_input_tokens": _usage_cache_read,
             }
 
+        _log.debug(
+            "[provider:anthropic] chat done model=%s latency=%dms stop=%s "
+            "tool_calls=%d tokens_in=%d tokens_out=%d cache_read=%d retry=%s",
+            response.model, int((time.monotonic() - _t0) * 1000),
+            getattr(response, "stop_reason", None),
+            len(parsed_tool_calls or []),
+            _usage_input_tokens, _usage_output_tokens, _usage_cache_read,
+            _plan_retry_done,
+        )
+
         return LLMResponse(
             content=joined_text,
             model=response.model,
@@ -621,6 +650,11 @@ class AnthropicProvider(BaseLLMProvider):
             create_kwargs["tools"] = tools_payload
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
+
+        _log.debug(
+            "[provider:anthropic] stream start model=%s tools=%d",
+            model, len(tools_payload or []),
+        )
 
         async with self._client.messages.stream(**create_kwargs) as stream:
             collected_text = ""
@@ -757,4 +791,8 @@ class AnthropicProvider(BaseLLMProvider):
             )
             return True
         except anthropic.AuthenticationError:
+            _log.debug(
+                "[provider:anthropic] verify_key: authentication rejected "
+                "(model=%s)", self._default_model,
+            )
             return False

@@ -124,25 +124,36 @@ async def _ask_for_plan(
     (won't parse OR an empty/no-op plan).
     """
     model_used: str | None = ROLE_WORKER
+    logger.debug("[docspec] asking worker for plan model=%s", model_used)
     try:
         resp = await eco_router.chat(messages, user_id, role=ROLE_WORKER)
     except Exception as exc:  # noqa: BLE001 — surface as a friendly error
-        logger.warning("doc_specialist worker call failed: %s", exc)
+        logger.warning(
+            "[docspec] worker call failed type=%s: %s", type(exc).__name__, exc,
+            exc_info=True,
+        )
         return None, model_used
     model_used = getattr(resp, "model", None) or model_used
     if getattr(resp, "model", "") == "error":
-        logger.warning("doc_specialist worker returned error sentinel: %s", resp.content)
+        # Never log `resp.content` — it's raw LLM response text. Length only.
+        content_len = len(getattr(resp, "content", "") or "")
+        logger.warning(
+            "[docspec] worker returned error sentinel (content_len=%d)", content_len,
+        )
         return None, model_used
     plan = _extract_json(getattr(resp, "content", "") or "")
     if plan is None:
-        logger.info("doc_specialist: worker reply was not valid JSON")
+        logger.info("[docspec] worker reply was not valid JSON")
         return None, model_used
     if not _is_usable_plan(strategy, plan):
         logger.info(
-            "doc_specialist: worker returned an empty/no-op plan (op=%r)",
+            "[docspec] worker returned an empty/no-op plan (op=%r)",
             plan.get("op"),
         )
         return None, model_used
+    logger.debug(
+        "[docspec] plan parsed successfully keys=%s", list(plan.keys()),
+    )
     return plan, model_used
 
 
@@ -173,18 +184,24 @@ async def run_doc_specialist(
     instruction: str,
 ) -> SpecialistResult:
     """Run one specialist edit turn. Never raises — returns a SpecialistResult."""
+    logger.debug("[docspec] run_doc_specialist start kind=%s doc_id=%s", kind, doc_id)
     strategy = _STRATEGIES.get(kind)
     if strategy is None:
+        logger.warning("[docspec] unknown document kind=%s", kind)
         return SpecialistResult(ok=False, error=f"Unknown document kind '{kind}'.")
 
     if not isinstance(instruction, str) or not instruction.strip():
         return SpecialistResult(ok=False, error="Tell the AI what to change.")
     instruction = instruction.strip()[:_MAX_INSTRUCTION_CHARS]
+    logger.debug(
+        "[docspec] instruction_chars=%d kind=%s doc_id=%s",
+        len(instruction), kind, doc_id,
+    )
 
     try:
         ctx = await strategy.load(config, user_id, doc_id)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("doc_specialist load failed")
+        logger.exception("[docspec] load failed kind=%s doc_id=%s", kind, doc_id)
         return SpecialistResult(ok=False, error=f"Could not open the document: {exc}")
     if ctx is None:
         return SpecialistResult(ok=False, error="Document not found.")

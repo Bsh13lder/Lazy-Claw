@@ -391,7 +391,9 @@ class HeartbeatDaemon:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("HeartbeatDaemon tick failed")
+                logger.exception(
+                    "[heartbeat] tick #%d failed", self._tick_count,
+                )
             await asyncio.sleep(self._config.heartbeat_interval)
 
     async def _tick(self) -> None:
@@ -404,25 +406,47 @@ class HeartbeatDaemon:
             )
             user_ids = [r[0] for r in await cursor.fetchall()]
 
+        logger.debug(
+            "[heartbeat] tick #%d begin active_job_users=%d",
+            self._tick_count, len(user_ids),
+        )
+        # Per-tick failure tallies so a silent background problem shows up as
+        # a single WARNING summary even at INFO log level (each individual
+        # failure is also logged with full context below).
+        job_failures = 0
+        watcher_failures = 0
+        mcp_failures = 0
+
         for user_id in user_ids:
             try:
                 await self._check_due_jobs(user_id)
             except Exception:
+                job_failures += 1
                 logger.exception(
-                    "Failed checking due jobs for user %s", user_id
+                    "[heartbeat] check_due_jobs failed (user=%s)", user_id
                 )
             try:
                 await self._check_watchers(user_id)
             except Exception:
+                watcher_failures += 1
                 logger.exception(
-                    "Failed checking watchers for user %s", user_id
+                    "[heartbeat] check_watchers failed (user=%s)", user_id
                 )
             try:
                 await self._check_mcp_watchers(user_id)
             except Exception:
+                mcp_failures += 1
                 logger.exception(
-                    "Failed checking MCP watchers for user %s", user_id
+                    "[heartbeat] check_mcp_watchers failed (user=%s)", user_id
                 )
+
+        if job_failures or watcher_failures or mcp_failures:
+            logger.warning(
+                "[heartbeat] tick #%d had failures — jobs=%d watchers=%d mcp=%d "
+                "(across %d user(s))",
+                self._tick_count, job_failures, watcher_failures,
+                mcp_failures, len(user_ids),
+            )
 
         # Check task reminders that need nagging (Due App-style)
         await self._check_task_nagging()
@@ -478,10 +502,17 @@ class HeartbeatDaemon:
         # Skipped on the first tick to avoid sweeping before users are even
         # registered.
         if self._tick_count > 1 and self._tick_count % 5 == 0:
+            logger.debug(
+                "[heartbeat] tab-health sweep scheduled (tick #%d)",
+                self._tick_count,
+            )
             try:
                 await self._check_tab_health()
             except Exception:
-                logger.debug("tab health sweep failed", exc_info=True)
+                logger.debug(
+                    "[heartbeat] tab health sweep failed (tick #%d)",
+                    self._tick_count, exc_info=True,
+                )
 
     async def _reconcile_awake_mode(self) -> None:
         """Re-assert caffeinate + pmset schedule when they drift from settings.
@@ -751,11 +782,19 @@ class HeartbeatDaemon:
             )
             cron_jobs = await cursor.fetchall()
 
+        # Trace tallies — how many cron jobs were scanned vs due vs actually
+        # fired vs failed. Zero prod cost at WARNING default; invaluable when
+        # a cron silently stops firing.
+        due_count = 0
+        fired_count = 0
+        failed_count = 0
+
         for row in cron_jobs:
             job_id, enc_name, enc_instruction, cron_expression, last_run, next_run = row
             try:
                 if not is_due(cron_expression, last_run, next_run):
                     continue
+                due_count += 1
 
                 job_name = (
                     decrypt(enc_name, key)
@@ -776,6 +815,7 @@ class HeartbeatDaemon:
                         user_id, job_id, instruction, cron_expression,
                     )
                     if handled:
+                        fired_count += 1
                         continue
                     # Fall through if pulse couldn't be fired (template
                     # missing, task done) — orchestrator.mark_run pauses
@@ -789,11 +829,16 @@ class HeartbeatDaemon:
                         user_id, job_id, instruction, cron_expression,
                     )
                     if handled:
+                        fired_count += 1
                         continue
 
                 logger.info("Job '%s' (%s) is due, enqueueing", job_name, job_id)
                 if not self._lane_queue._running:
-                    logger.debug("LaneQueue not ready yet — skipping job '%s' this tick", job_name)
+                    logger.debug(
+                        "[heartbeat] LaneQueue not ready — deferring cron job %s "
+                        "this tick (user=%s)",
+                        job_id, user_id,
+                    )
                     continue
                 cb = (
                     self._notifier_factory(job_name, "⏰")
@@ -819,13 +864,22 @@ class HeartbeatDaemon:
                 except Exception as exc:
                     run_failed = True
                     run_error = f"{type(exc).__name__}: {exc}"
-                    logger.exception("Lane enqueue raised for cron job %s", job_id)
+                    logger.exception(
+                        "[heartbeat] lane enqueue raised for cron job %s "
+                        "(user=%s err_type=%s)",
+                        job_id, user_id, type(exc).__name__,
+                    )
                 else:
                     if isinstance(result_text, str) and result_text.startswith(
                         "Error processing message:"
                     ):
                         run_failed = True
                         run_error = result_text[:500]
+
+                if run_failed:
+                    failed_count += 1
+                else:
+                    fired_count += 1
 
                 next_run = calculate_next_run(cron_expression)
                 await orchestrator.mark_run(self._config, job_id, next_run)
@@ -845,7 +899,17 @@ class HeartbeatDaemon:
                         job_id, exc_info=True,
                     )
             except Exception:
-                logger.exception("Error processing job %s for user %s", job_id, user_id)
+                failed_count += 1
+                logger.exception(
+                    "[heartbeat] error processing cron job %s (user=%s)",
+                    job_id, user_id,
+                )
+
+        if cron_jobs:
+            logger.debug(
+                "[heartbeat] cron user=%s scanned=%d due=%d fired=%d failed=%d",
+                user_id, len(cron_jobs), due_count, fired_count, failed_count,
+            )
 
         # Check one-time reminders
         await self._check_due_reminders(user_id, key)
@@ -868,6 +932,8 @@ class HeartbeatDaemon:
             )
             reminders = await cursor.fetchall()
 
+        reminders_fired = 0
+        reminders_failed = 0
         for row in reminders:
             job_id, enc_name, enc_instruction, next_run = row
             try:
@@ -907,11 +973,20 @@ class HeartbeatDaemon:
 
                 # Auto-delete — one-shot reminder, done
                 await delete_job(self._config, user_id, job_id)
+                reminders_fired += 1
                 logger.info("Reminder '%s' auto-deleted after firing", job_name)
             except Exception:
+                reminders_failed += 1
                 logger.exception(
-                    "Error processing reminder %s for user %s", job_id, user_id,
+                    "[heartbeat] error processing reminder %s (user=%s)",
+                    job_id, user_id,
                 )
+
+        if reminders:
+            logger.debug(
+                "[heartbeat] reminders user=%s due=%d fired=%d failed=%d",
+                user_id, len(reminders), reminders_fired, reminders_failed,
+            )
 
     def _get_primary_cdp(self, user_id: str):
         """Return a CDPBackend pointing at the user's live Brave on the primary port.
@@ -1672,6 +1747,7 @@ class HeartbeatDaemon:
             )
             user_ids = [r[0] for r in await cursor.fetchall()]
 
+        nags_fired = 0
         for user_id in user_ids:
             key = await get_user_dek(self._config, user_id)
 
@@ -1739,6 +1815,12 @@ class HeartbeatDaemon:
                         task_id, nag_count + 1,
                     )
                     continue
+
+                nags_fired += 1
+                logger.debug(
+                    "[heartbeat] task nag claimed task=%s nag_step=%d (user=%s)",
+                    task_id, nag_count + 1, user_id,
+                )
 
                 # Decrypt title and get task details
                 try:
@@ -1825,6 +1907,12 @@ class HeartbeatDaemon:
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
                 )
 
+        if user_ids:
+            logger.debug(
+                "[heartbeat] task-nagging users=%d nags_fired=%d",
+                len(user_ids), nags_fired,
+            )
+
     async def _fire_due_pre_reminders(self, now, now_iso) -> None:
         """Fire any pending advance reminders whose timestamp has arrived.
 
@@ -1850,6 +1938,8 @@ class HeartbeatDaemon:
             )
             rows = await cursor.fetchall()
 
+        pre_fired = 0
+        pre_failed = 0
         for row in rows:
             task_id, user_id, enc_title, raw_pre, reminder_at, priority = row
             try:
@@ -1886,8 +1976,14 @@ class HeartbeatDaemon:
                 )
                 try:
                     await self._telegram_push(msg)
+                    pre_fired += 1
                 except Exception as exc:
-                    logger.warning("Pre-reminder push failed: %s", exc)
+                    pre_failed += 1
+                    logger.warning(
+                        "[heartbeat] pre-reminder push failed (task=%s user=%s "
+                        "err_type=%s): %s",
+                        task_id, user_id, type(exc).__name__, exc,
+                    )
 
             remaining = [t for t in pending if t and t > now_iso]
             try:
@@ -1897,9 +1993,16 @@ class HeartbeatDaemon:
                 )
             except Exception:
                 logger.warning(
-                    "Failed to persist pruned pre_reminders for task %s",
-                    task_id, exc_info=True,
+                    "[heartbeat] failed to persist pruned pre_reminders "
+                    "(task=%s user=%s)",
+                    task_id, user_id, exc_info=True,
                 )
+
+        if pre_fired or pre_failed:
+            logger.debug(
+                "[heartbeat] pre-reminders scanned=%d fired=%d failed=%d",
+                len(rows), pre_fired, pre_failed,
+            )
 
     @staticmethod
     def _format_lead_time(fired_iso: str, reminder_at: str | None) -> str:

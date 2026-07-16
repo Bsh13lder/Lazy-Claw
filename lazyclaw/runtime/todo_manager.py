@@ -59,6 +59,7 @@ class TodoManager:
             updated_at=datetime.now().isoformat(),
         )
         self._todos = [*self._todos, todo]
+        logger.debug("[todo] create_todo id=%s total=%d", todo.id, len(self._todos))
         self._save()
         self._notify()
         return todo
@@ -66,6 +67,7 @@ class TodoManager:
     def update_todo(self, todo_id: str, status: TodoStatus) -> None:
         """Update a single todo's status, enforcing single in_progress."""
         if status not in _VALID_STATUSES:
+            logger.debug("[todo] update_todo rejected id=%s invalid status", todo_id)
             raise ValueError(f"Invalid status: {status!r}")
         now = datetime.now().isoformat()
         new_todos: list[Todo] = []
@@ -86,6 +88,7 @@ class TodoManager:
             else:
                 new_todos.append(t)
         self._todos = new_todos
+        logger.debug("[todo] update_todo id=%s status=%s total=%d", todo_id, status, len(new_todos))
         self._save()
         self._notify()
 
@@ -129,6 +132,10 @@ class TodoManager:
             ))
 
         self._todos = new_todos
+        logger.debug(
+            "[todo] set_todos total=%d in_progress=%s",
+            len(new_todos), has_in_progress,
+        )
         self._save()
         self._notify()
 
@@ -141,6 +148,7 @@ class TodoManager:
         self._todos = [t for t in self._todos if t.status != "completed"]
         removed = before - len(self._todos)
         if removed:
+            logger.debug("[todo] clear_completed removed=%d remaining=%d", removed, len(self._todos))
             self._save()
             self._notify()
         return removed
@@ -153,17 +161,21 @@ class TodoManager:
 
     def _notify(self) -> None:
         todos = list(self._todos)
-        for fn in self._listeners:
+        for idx, fn in enumerate(self._listeners):
             try:
                 fn(todos)
             except Exception:
-                logger.debug("TodoManager listener error", exc_info=True)
+                logger.debug(
+                    "[todo] listener[%d] error, continuing", idx, exc_info=True,
+                )
 
     def _save(self) -> None:
         try:
             self._path.write_text(json.dumps([asdict(t) for t in self._todos], indent=2))
         except Exception:
-            logger.debug("TodoManager save failed", exc_info=True)
+            logger.debug(
+                "[todo] save failed path=%s", self._path, exc_info=True,
+            )
 
     def _load(self) -> None:
         try:
@@ -172,7 +184,10 @@ class TodoManager:
             data = json.loads(self._path.read_text())
             self._todos = [Todo(**item) for item in data]
         except Exception:
-            logger.debug("TodoManager load failed", exc_info=True)
+            logger.debug(
+                "[todo] load failed path=%s, starting empty", self._path,
+                exc_info=True,
+            )
 
 
 # ── Module-level registry ─────────────────────────────────────────────
@@ -184,5 +199,6 @@ def get_todo_manager(data_dir: Path, user_id: str) -> TodoManager:
     """Get or create the TodoManager for a given user."""
     key = f"{data_dir}:{user_id}"
     if key not in _registry:
+        logger.debug("[todo] creating new TodoManager user=%s", user_id[:8] if user_id else None)
         _registry[key] = TodoManager(data_dir, user_id)
     return _registry[key]

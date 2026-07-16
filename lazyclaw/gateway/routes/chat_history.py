@@ -112,6 +112,10 @@ async def create_session(
     user: User = Depends(get_current_user),
 ):
     """Create a new chat session."""
+    logger.debug(
+        "[route:chat] POST session user=%s fields=%s",
+        user.id, list(body.model_dump(exclude_unset=True).keys()),
+    )
     session_id = str(uuid4())
     async with db_session(_config) as db:
         await db.execute(
@@ -134,6 +138,10 @@ async def update_session(
     cross-channel history from the Web UI while Telegram / CLI keep writing
     into it — a confusing silent failure.
     """
+    logger.debug(
+        "[route:chat] PATCH session id=%s user=%s fields=%s",
+        session_id, user.id, list(body.model_dump(exclude_unset=True).keys()),
+    )
     async with db_session(_config) as db:
         row = await db.execute(
             "SELECT id, is_primary FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
@@ -141,9 +149,17 @@ async def update_session(
         )
         found = await row.fetchone()
         if not found:
+            logger.warning(
+                "[route:chat] PATCH session id=%s user=%s -> 404 session not found",
+                session_id, user.id,
+            )
             raise HTTPException(status_code=404, detail="Session not found")
 
         if body.archived is True and found[1]:
+            logger.warning(
+                "[route:chat] PATCH session id=%s user=%s -> 409 cannot archive primary session",
+                session_id, user.id,
+            )
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -184,9 +200,17 @@ async def delete_session(
         )
         found = await row.fetchone()
         if not found:
+            logger.warning(
+                "[route:chat] DELETE session id=%s user=%s -> 404 session not found",
+                session_id, user.id,
+            )
             raise HTTPException(status_code=404, detail="Session not found")
 
         if found[1]:  # is_primary = 1
+            logger.warning(
+                "[route:chat] DELETE session id=%s user=%s -> 409 cannot delete primary session",
+                session_id, user.id,
+            )
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -237,6 +261,10 @@ async def get_session_messages(
             (session_id, user.id),
         )
         if not await row.fetchone():
+            logger.warning(
+                "[route:chat] GET session messages id=%s user=%s -> 404 session not found",
+                session_id, user.id,
+            )
             raise HTTPException(status_code=404, detail="Session not found")
 
         if before:
@@ -276,4 +304,8 @@ async def get_session_messages(
                 "created_at": r[5],
             })
 
+    logger.debug(
+        "[route:chat] GET session messages id=%s user=%s limit=%d paged=%s -> count=%d",
+        session_id, user.id, limit, bool(before), len(messages),
+    )
     return {"messages": messages}

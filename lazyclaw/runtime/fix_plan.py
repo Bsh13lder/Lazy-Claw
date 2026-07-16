@@ -227,7 +227,10 @@ async def build_fix_plan(
         from lazyclaw.llm.providers.base import LLMMessage
         from lazyclaw.llm.router import LLMRouter
     except Exception as exc:  # pragma: no cover — import-only failure
-        logger.debug("fix_plan imports failed: %s", exc)
+        logger.warning(
+            "[fixplan] imports failed type=%s: %s", type(exc).__name__, exc,
+            exc_info=True,
+        )
         return None
 
     try:
@@ -248,10 +251,16 @@ async def build_fix_plan(
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        logger.debug("fix_plan brain LLM timed out after %.1fs", timeout_s)
+        logger.warning(
+            "[fixplan] brain LLM timed out after %.1fs for user=%s",
+            timeout_s, user_id[:8] if user_id else user_id,
+        )
         return None
     except Exception as exc:
-        logger.debug("fix_plan brain LLM failed: %s", exc)
+        logger.warning(
+            "[fixplan] brain LLM failed type=%s: %s", type(exc).__name__, exc,
+            exc_info=True,
+        )
         return None
 
     raw = (resp.content or "").strip()
@@ -260,12 +269,14 @@ async def build_fix_plan(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.debug("fix_plan JSON parse failed: %.200s", raw)
+        # Never log `raw` itself — it's the brain's raw LLM response, which
+        # may echo user content. Length only.
+        logger.warning("[fixplan] JSON parse failed (len=%d)", len(raw))
         return None
     if not isinstance(data, dict):
         return None
 
-    return FixPlan(
+    plan = FixPlan(
         summary=str(data.get("summary") or "")[:500],
         steps=[str(s) for s in (data.get("steps") or []) if s][:10],
         questions=[str(q) for q in (data.get("questions") or []) if q][:5],
@@ -278,6 +289,12 @@ async def build_fix_plan(
         ),
         research=research,
     )
+    logger.debug(
+        "[fixplan] built plan for user=%s steps=%d questions=%d risks=%d confidence=%s",
+        user_id[:8] if user_id else user_id,
+        len(plan.steps), len(plan.questions), len(plan.risks), plan.confidence,
+    )
+    return plan
 
 
 # ── Bypass + gating ────────────────────────────────────────────────────
@@ -293,8 +310,10 @@ async def should_enter_plan_mode(
     recently-approved slug, or globally disabled (``users.auto_plan=0``).
     """
     if not detect_fix_intent(message):
+        logger.debug("[fixplan] should_enter_plan_mode=False reason=no_fix_intent")
         return False
     if is_recently_approved(user_id, message):
+        logger.debug("[fixplan] should_enter_plan_mode=False reason=recently_approved")
         return False
 
     # Per-user global toggle — same column the existing plan_checkpoint
@@ -307,12 +326,17 @@ async def should_enter_plan_mode(
             )
             row = await cursor.fetchone()
         if row is not None and not int(row[0] or 0):
+            logger.debug("[fixplan] should_enter_plan_mode=False reason=auto_plan_disabled")
             return False
     except Exception:
-        logger.debug("auto_plan lookup failed", exc_info=True)
+        logger.warning(
+            "[fixplan] auto_plan lookup failed for user=%s — defaulting to enabled",
+            user_id[:8] if user_id else user_id, exc_info=True,
+        )
         # Default: assume on. Don't bypass plan-mode just because settings
         # lookup choked.
 
+    logger.debug("[fixplan] should_enter_plan_mode=True")
     return True
 
 
@@ -351,9 +375,17 @@ async def gate_with_plan(
             steps=plan.steps,
         )
     except Exception as exc:
-        logger.warning("plan_checkpoint failed for user %s: %s", user_id, exc)
+        logger.warning(
+            "[fixplan] plan_checkpoint failed for user=%s type=%s: %s",
+            user_id[:8] if user_id else user_id, type(exc).__name__, exc,
+            exc_info=True,
+        )
         return True, plan, None
 
+    logger.debug(
+        "[fixplan] gate decision approved=%s for user=%s",
+        decision.approved, user_id[:8] if user_id else user_id,
+    )
     if decision.approved:
         mark_approved(user_id, message)
         return True, plan, decision.reason

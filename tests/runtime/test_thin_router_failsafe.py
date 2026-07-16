@@ -17,7 +17,8 @@ def test_cap_sets_engaged_flag() -> None:
     idx = _SRC.index("THIN-ROUTER")
     # Window widened 2026-06-24: the work-call budget + dispatch-only
     # narrowing added lines between the block header and _thin_router_capped.
-    window = _SRC[idx:idx + 3200]
+    # Widened again 2026-07-16: a diagnostic cap-decision debug log was added.
+    window = _SRC[idx:idx + 3700]
     assert "_thin_router_capped" in window, (
         "the cap block must set a cap-engaged flag for the failsafe"
     )

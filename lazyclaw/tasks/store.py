@@ -724,6 +724,10 @@ async def update_task(
             else:
                 set_clauses.append("reminder_job_id = ?")
                 params.append(None)
+            logger.debug(
+                "[tasks] reminder rescheduled task=%s user=%s new_reminder=%s",
+                task_id, user_id, new_reminder,
+            )
 
     # Keep reminder_offset_minutes in sync when due_date or reminder_at
     # change. The recurring respawn path reads this directly, so a stale
@@ -825,6 +829,11 @@ async def fail_task(
     task["last_error"] = error
     task["attempt_count"] = attempts
     task["last_attempted_at"] = now
+    # Log ids + attempt count only — never the raw error text (may carry PII).
+    logger.warning(
+        "[tasks] task %s marked FAILED (user=%s attempt=%d)",
+        task_id, user_id, attempts,
+    )
     await _mirror_status_to_lazybrain(
         config, user_id, task, "failed", error=error,
     )
@@ -1118,7 +1127,7 @@ async def complete_task(
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Could not parse tags JSON for task %r; skipping tags", task.get("title"))
 
-            await create_task(
+            new_task = await create_task(
                 config, user_id,
                 title=task["title"],
                 description=task.get("description"),
@@ -1130,9 +1139,15 @@ async def complete_task(
                 recurring=task["recurring"],
                 tags=tags,
             )
-            logger.debug("Created next recurring task from %s", task_id)
+            logger.debug(
+                "[tasks] recurring respawn %s -> %s (next_due=%s user=%s)",
+                task_id, new_task.get("id"), next_date, user_id,
+            )
         except Exception:
-            logger.warning("Failed to create recurring task", exc_info=True)
+            logger.warning(
+                "[tasks] recurring respawn failed for task %s (user=%s)",
+                task_id, user_id, exc_info=True,
+            )
 
     return True
 
@@ -1178,6 +1193,8 @@ async def delete_task(
             (now, now, task_id, user_id),
         )
         await db.commit()
+    if result.rowcount:
+        logger.debug("[tasks] soft-deleted task %s (user=%s)", task_id, user_id)
     return result.rowcount > 0
 
 
@@ -1210,6 +1227,10 @@ async def _create_reminder_job(
         )
         await db.commit()
 
+    logger.debug(
+        "[tasks] reminder job %s created for task %s (fires_at=%s user=%s)",
+        job_id, task_id, reminder_at, user_id,
+    )
     return job_id
 
 

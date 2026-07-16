@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import 'app_db.dart';
@@ -732,6 +732,7 @@ class DocumentCacheDao {
       'payload': jsonEncode(payload),
       'created_at': createdAt,
     });
+    debugPrint('DocumentCacheDao: queued outbox op=$op kind=$kind id=$id');
   }
 }
 

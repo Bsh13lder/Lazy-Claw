@@ -120,6 +120,10 @@ def filter_pinned_for_cache(
             excluded_titles.append(title or "(untitled)")
             continue
         kept.append(note)
+    logger.debug(
+        "[journal] filter_pinned_for_cache: total=%d kept=%d excluded=%d",
+        len(pinned or ()), len(kept), len(excluded_titles),
+    )
     return kept, excluded_titles
 
 
@@ -203,9 +207,12 @@ def _quarantine_reason(
         wl = _find_wikilink_in_quote_block(content)
         if wl:
             return ("wikilink", wl)
-    except Exception:
+    except Exception as exc:
         # A pathological prior reply must never crash context build.
-        pass
+        logger.warning(
+            "[journal] wikilink-in-quote check raised error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
 
     if tool_results_this_turn:
         try:
@@ -222,8 +229,11 @@ def _quarantine_reason(
                         " quotes unverified"
                     )
                     return ("quote-mismatch", evidence)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "[journal] quote-mismatch check raised error_type=%s: %s",
+                type(exc).__name__, exc, exc_info=True,
+            )
 
     return None
 
@@ -274,6 +284,13 @@ def quarantine_polluted_history(
     else:
         scan_start = max(0, n - scan_limit)
     first_logged = False
+    quarantined_count = 0
+
+    logger.debug(
+        "[journal] quarantine scan starting: messages=%d scan_start=%d "
+        "scan_limit=%s",
+        n, scan_start, scan_limit,
+    )
 
     for idx in range(scan_start, n):
         msg = out[idx]
@@ -282,7 +299,12 @@ def quarantine_polluted_history(
             if role != "assistant":
                 continue
             content = getattr(msg, "content", None) or ""
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[journal] failed to read role/content at index=%d "
+                "error_type=%s: %s", idx, type(exc).__name__, exc,
+                exc_info=True,
+            )
             continue
 
         reason_pair = _quarantine_reason(content, tool_results_this_turn)
@@ -304,15 +326,22 @@ def quarantine_polluted_history(
             # Fallback for test stand-ins that don't accept all kwargs.
             try:
                 replacement = type(msg)(role=msg.role, content=_QUARANTINE_PLACEHOLDER)
-            except Exception:
+            except Exception as exc:
                 # Last resort: skip rather than crash the turn.
+                logger.warning(
+                    "[journal] failed to build quarantine replacement at "
+                    "index=%d error_type=%s: %s",
+                    idx, type(exc).__name__, exc, exc_info=True,
+                )
                 continue
         out[idx] = replacement
+        quarantined_count += 1
 
-        offending = (evidence or "")[:80]
+        # NEVER log `evidence` verbatim — for reason="wikilink" it IS the
+        # matched quote fragment. Log only its length + the reason class.
         log_msg = (
             f"[history-filter] quarantined assistant message at index={idx} "
-            f"— reason={reason}, offending={offending!r}"
+            f"— reason={reason}, evidence_len={len(evidence or '')}"
         )
         if not first_logged:
             logger.info(log_msg)
@@ -320,6 +349,10 @@ def quarantine_polluted_history(
         else:
             logger.debug(log_msg)
 
+    logger.debug(
+        "[journal] quarantine scan done: scanned=%d quarantined=%d",
+        n - scan_start, quarantined_count,
+    )
     return out
 
 
@@ -448,10 +481,12 @@ def drop_capability_denial_history(
                 content = getattr(msg, "content", None) or ""
                 if not has_calls and is_capability_denial(content):
                     dropped += 1
+                    # NEVER log reply content verbatim — length only.
                     if dropped == 1:
                         logger.info(
-                            "[history-filter] dropped capability-denial assistant "
-                            "message at index=%d: %r", idx, content[:80],
+                            "[history-filter] dropped capability-denial "
+                            "assistant message at index=%d content_len=%d",
+                            idx, len(content),
                         )
                     else:
                         logger.debug(
@@ -459,10 +494,18 @@ def drop_capability_denial_history(
                             idx,
                         )
                     continue
-        except Exception:
+        except Exception as exc:
             # A pathological row must never crash context build.
-            pass
+            logger.warning(
+                "[journal] capability-denial scan raised at index=%d "
+                "error_type=%s: %s", idx, type(exc).__name__, exc,
+                exc_info=True,
+            )
         out.append(msg)
+    logger.debug(
+        "[journal] drop_capability_denial_history: scanned=%d dropped=%d",
+        n - scan_start, dropped,
+    )
     return out
 
 
@@ -475,10 +518,15 @@ def neutralize_stale_errors(messages: list) -> list:
     Pure: never mutates the input list and never raises.
     """
     out = list(messages)
+    neutralized = 0
     for idx, msg in enumerate(out):
         try:
             content = getattr(msg, "content", None) or ""
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[journal] failed to read content at index=%d error_type=%s: "
+                "%s", idx, type(exc).__name__, exc, exc_info=True,
+            )
             continue
         if not is_stale_provider_error(content):
             continue
@@ -496,11 +544,22 @@ def neutralize_stale_errors(messages: list) -> list:
                     role=getattr(msg, "role", "tool"),
                     content=STALE_TOOL_ERROR_MARKER,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "[journal] failed to build stale-error replacement at "
+                    "index=%d error_type=%s: %s",
+                    idx, type(exc).__name__, exc, exc_info=True,
+                )
                 continue
         out[idx] = replacement
+        neutralized += 1
         logger.debug(
             "[history-filter] neutralized stale provider error at index=%d (role=%s)",
             idx, getattr(msg, "role", "?"),
+        )
+    if neutralized:
+        logger.debug(
+            "[journal] neutralize_stale_errors: scanned=%d neutralized=%d",
+            len(out), neutralized,
         )
     return out

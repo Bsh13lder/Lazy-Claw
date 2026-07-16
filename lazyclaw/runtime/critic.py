@@ -149,7 +149,11 @@ def _parse_verdict(raw: str) -> tuple[bool, list[str], str | None]:
 
     match = _JSON_BLOCK_RE.search(text)
     if not match:
-        logger.warning("Critic output had no JSON block — failing open: %.120s", text)
+        # Never log `text` itself — it's raw LLM output that may echo
+        # reviewed reply/user content. Length only.
+        logger.warning(
+            "[critic] output had no JSON block (len=%d) — failing open", len(text),
+        )
         return True, [], None
 
     try:
@@ -217,7 +221,10 @@ async def _audit_once(
     except Exception as exc:
         # Network blip, auth issue, etc. — fail open so we never block a
         # reply on a flaky critic.
-        logger.warning("Critic call failed (%s) — failing open", exc)
+        logger.warning(
+            "[critic] audit call failed type=%s (%s) — failing open",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return True, [], None
 
     return _parse_verdict(response.content or "")
@@ -272,11 +279,15 @@ async def _ask_brain_to_rewrite(
             rewrite_messages, user_id=user_id, role=ROLE_BRAIN,
         )
     except Exception as exc:
-        logger.warning("Critic rewrite call failed (%s) — keeping previous reply", exc)
+        logger.warning(
+            "[critic] rewrite call failed type=%s (%s) — keeping previous reply",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return None
 
     new_reply = (response.content or "").strip()
     if not new_reply:
+        logger.debug("[critic] rewrite call returned empty content — keeping previous reply")
         return None
     return new_reply
 
@@ -347,6 +358,10 @@ async def run_critic(
             )
 
         # Otherwise rewrite and re-check.
+        logger.debug(
+            "[critic] requesting brain rewrite attempt=%d/%d fix_hint_len=%d",
+            attempt, max_loops, len(fix_hint or ""),
+        )
         new_reply = await _ask_brain_to_rewrite(
             eco_router=eco_router,
             user_id=user_id,
@@ -365,10 +380,19 @@ async def run_critic(
                 last_issues=tuple(issues),
                 rewrite_count=rewrite_count,
             )
+        logger.debug(
+            "[critic] rewrite accepted attempt=%d new_reply_len=%d",
+            attempt, len(new_reply),
+        )
         current_reply = new_reply
         rewrite_count += 1
 
     # Defensive fallback — loop should always return inside the body.
+    logger.warning(
+        "[critic] loop exhausted without returning inside body — "
+        "using defensive fallback (bug guard); loops_used=%d rewrite_count=%d",
+        max_loops, rewrite_count,
+    )
     return CriticResult(
         final_reply=current_reply,
         passed=False,

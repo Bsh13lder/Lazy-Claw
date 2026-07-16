@@ -33,6 +33,10 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
     """
     cached = _PRIMARY_CACHE.get(user_id)
     if cached:
+        logger.debug(
+            "[session] primary session cache hit user=%s session=%s",
+            user_id[:8] if user_id else user_id, cached,
+        )
         return cached
 
     async with db_session(config) as db:
@@ -46,6 +50,10 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
         if existing:
             session_id = existing[0]
             _PRIMARY_CACHE[user_id] = session_id
+            logger.debug(
+                "[session] resolved existing primary session user=%s session=%s",
+                user_id[:8] if user_id else user_id, session_id,
+            )
             return session_id
 
         # No primary yet — promote the oldest session if one exists,
@@ -59,6 +67,10 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
         oldest = await row.fetchone()
         if oldest:
             session_id = oldest[0]
+            logger.debug(
+                "[session] promoting oldest session to primary user=%s session=%s",
+                user_id[:8] if user_id else user_id, session_id,
+            )
             try:
                 await db.execute(
                     "UPDATE agent_chat_sessions SET is_primary = 1 "
@@ -68,12 +80,18 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
                 await db.commit()
             except Exception:
                 logger.debug(
-                    "Promote-to-primary failed — racing writer probably won",
+                    "[session] promote-to-primary failed for user=%s — "
+                    "racing writer probably won",
+                    user_id[:8] if user_id else user_id,
                     exc_info=True,
                 )
                 # Fall through to re-SELECT below.
         else:
             session_id = str(uuid4())
+            logger.debug(
+                "[session] creating new primary session user=%s session=%s",
+                user_id[:8] if user_id else user_id, session_id,
+            )
             try:
                 await db.execute(
                     "INSERT INTO agent_chat_sessions (id, user_id, title, is_primary) "
@@ -83,7 +101,9 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
                 await db.commit()
             except Exception:
                 logger.debug(
-                    "Create-primary INSERT failed — racing writer probably won",
+                    "[session] create-primary INSERT failed for user=%s — "
+                    "racing writer probably won",
+                    user_id[:8] if user_id else user_id,
                     exc_info=True,
                 )
 
@@ -100,19 +120,29 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
             # Extreme edge case: partial index prevented both writes. Fall back
             # to the id we tried to create and hope the next call succeeds.
             logger.warning(
-                "No primary session found after create attempt for user %s", user_id,
+                "[session] no primary session found after create attempt for user=%s "
+                "(falling back to attempted session=%s)",
+                user_id[:8] if user_id else user_id, session_id,
             )
             _PRIMARY_CACHE[user_id] = session_id
             return session_id
 
         session_id = final[0]
         _PRIMARY_CACHE[user_id] = session_id
+        logger.debug(
+            "[session] resolved primary session (post-race re-select) user=%s session=%s",
+            user_id[:8] if user_id else user_id, session_id,
+        )
         return session_id
 
 
 def invalidate_primary_session(user_id: str) -> None:
     """Drop cached primary id for a user (call after delete or reflag)."""
-    _PRIMARY_CACHE.pop(user_id, None)
+    had_cached = _PRIMARY_CACHE.pop(user_id, None) is not None
+    logger.debug(
+        "[session] invalidate_primary_session user=%s had_cached=%s",
+        user_id[:8] if user_id else user_id, had_cached,
+    )
 
 
 def clear_cache() -> None:

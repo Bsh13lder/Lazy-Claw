@@ -31,6 +31,7 @@ name stays attached to the warning).
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -38,6 +39,8 @@ from lazyclaw.runtime.f1_content_verifier import (
     parse_quote_lines,
     verify_quotes_against_tool_results,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ─── failure-claim patterns ──────────────────────────────────────────────
@@ -349,6 +352,12 @@ def detect_confabulation(
     if not reply:
         return _CLEAN_VERDICT
 
+    logger.debug(
+        "[f1] detect_confabulation start: reply_len=%d tool_calls=%d "
+        "tool_results=%d",
+        len(reply), len(tool_call_history or []), len(tool_results or []),
+    )
+
     # ── Check 0: wikilink inside a quote block (hardest signal) ──
     # No real contact sends [[wikilink]] syntax — if it appears inside a
     # `> sender (ts): ...` line OR on a continuation line of an open
@@ -374,6 +383,10 @@ def detect_confabulation(
                     if i < len(tool_results):
                         last_bytes = len(tool_results[i] or "")
                     break
+            logger.debug(
+                "[f1] verdict=wikilink_in_quote tool=%s payload_bytes=%d",
+                last_read, last_bytes,
+            )
             return ConfabulationVerdict(
                 is_confabulation=True,
                 kind="wikilink_in_quote",
@@ -382,8 +395,11 @@ def detect_confabulation(
                 tool_name=last_read,
                 payload_bytes=last_bytes,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[f1] wikilink-in-quote check raised error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
 
     # ── Check 1: failure-claim against successful read payload ──
     try:
@@ -393,6 +409,10 @@ def detect_confabulation(
                 tool_call_history, tool_results,
             )
             if has_payload:
+                logger.debug(
+                    "[f1] verdict=failure_claim tool=%s payload_bytes=%d",
+                    tool_name, payload_bytes,
+                )
                 return ConfabulationVerdict(
                     is_confabulation=True,
                     kind="failure_claim",
@@ -401,10 +421,13 @@ def detect_confabulation(
                     tool_name=tool_name,
                     payload_bytes=payload_bytes,
                 )
-    except Exception:
+    except Exception as exc:
         # Defensive: a malformed pattern or histories shouldn't crash the
         # turn. Fall through to the next check.
-        pass
+        logger.warning(
+            "[f1] failure-claim check raised error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
 
     # ── Check 2: made-up quotes (inverse confabulation) ──
     try:
@@ -435,6 +458,11 @@ def detect_confabulation(
                             if i < len(tool_results):
                                 last_bytes = len(tool_results[i] or "")
                             break
+                    logger.debug(
+                        "[f1] verdict=made_up_quote tool=%s "
+                        "unverified_quotes=%d payload_bytes=%d",
+                        last_read, report.unverified_count, last_bytes,
+                    )
                     return ConfabulationVerdict(
                         is_confabulation=True,
                         kind="made_up_quote",
@@ -443,9 +471,13 @@ def detect_confabulation(
                         tool_name=last_read,
                         payload_bytes=last_bytes,
                     )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[f1] made-up-quote check raised error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
+        )
 
+    logger.debug("[f1] verdict=clean")
     return _CLEAN_VERDICT
 
 
@@ -488,6 +520,11 @@ def _select_raw_payload(
             continue
         if len(result) > _RAW_INJECTION_TRUNCATE_CHARS:
             payload = result[:_RAW_INJECTION_TRUNCATE_CHARS] + _TRUNCATE_SUFFIX
+            logger.debug(
+                "[f1] raw payload truncated: tool=%s original_len=%d "
+                "truncated_to=%d",
+                name, len(result), _RAW_INJECTION_TRUNCATE_CHARS,
+            )
         else:
             payload = result
         return name, payload
@@ -576,8 +613,17 @@ def build_raw_data_injection(
     if not payload:
         # Shouldn't happen in the confabulation path (the verdict requires
         # a successful payload to fire), but defensive default.
+        logger.debug(
+            "[f1] build_raw_data_injection: reason=%s kind=%s no payload "
+            "available", reason, verdict.kind,
+        )
         return f"[SYSTEM: {opening}{directive}]"
 
+    logger.debug(
+        "[f1] build_raw_data_injection: reason=%s kind=%s tool=%s "
+        "payload_len=%d",
+        reason, verdict.kind, tool_name, len(payload),
+    )
     return (
         f"[SYSTEM: {opening}{directive}\n\n"
         f"--- RAW DATA from {tool_name or 'tool'} ---\n"

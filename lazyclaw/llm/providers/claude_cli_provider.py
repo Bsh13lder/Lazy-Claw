@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from typing import Any
 
@@ -342,6 +343,9 @@ def check_claude_cli_auth() -> tuple[bool, str]:
     binary = shutil.which("claude")
     if not binary:
         # No CLI installed — user clearly isn't trying to use MODE_CLAUDE.
+        logger.debug(
+            "[provider:claude_cli] auth check: no `claude` binary — CLI unused",
+        )
         return True, ""
 
     # macOS host stores cred in Keychain, no file to check. We can't
@@ -349,16 +353,24 @@ def check_claude_cli_auth() -> tuple[bool, str]:
     # just trust it and skip the warning.
     import sys
     if sys.platform == "darwin" and not os.path.exists("/.dockerenv"):
+        logger.debug(
+            "[provider:claude_cli] auth check: macOS host — trusting Keychain cred",
+        )
         return True, ""
 
     cred_path = os.path.expanduser("~/.claude/.credentials.json")
     if not os.path.isfile(cred_path) or os.path.getsize(cred_path) == 0:
+        logger.warning(
+            "[provider:claude_cli] auth check: `claude` present but credentials "
+            "file missing/empty — not logged in",
+        )
         return False, (
             "Claude CLI is installed but not logged in. "
             "Run `docker exec -it lazyclaw claude /login` "
             "(or `claude /login` on the host) to enable MODE_CLAUDE."
         )
 
+    logger.debug("[provider:claude_cli] auth check: ready")
     return True, ""
 
 
@@ -537,11 +549,13 @@ class ClaudeCLIProvider(BaseLLMProvider):
         # Dump first 500 chars of prompt for debugging
         logger.debug("Claude CLI prompt preview: %s", prompt_text[:500])
 
+        _t0 = time.monotonic()
         for attempt in range(_MAX_RETRIES):
             # Try to grab a pre-warmed process first (must match BOTH args
             # and the per-user cwd, else a warm proc could carry another
             # user's session bucket).
             proc = self._grab_warm_proc(args, cwd)
+            _warm_used = proc is not None
 
             try:
                 if proc is None:
@@ -623,7 +637,15 @@ class ClaudeCLIProvider(BaseLLMProvider):
             for _ in range(slots_to_fill):
                 asyncio.create_task(self._pre_warm(args, cwd))
 
-            return self._parse_response(raw)
+            resp = self._parse_response(raw)
+            logger.debug(
+                "[provider:claude_cli] chat done model=%s latency=%dms "
+                "attempt=%d/%d warm_used=%s tool_calls=%d",
+                self._model, int((time.monotonic() - _t0) * 1000),
+                attempt + 1, _MAX_RETRIES, _warm_used,
+                len(resp.tool_calls or []),
+            )
+            return resp
 
         raise RuntimeError("Claude CLI failed after all retries")
 

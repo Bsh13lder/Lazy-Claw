@@ -11,6 +11,7 @@ with an LLM fallback for anything regex can't handle.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -32,6 +33,8 @@ from lazyclaw.tasks.store import (
     toggle_step,
     update_task,
 )
+
+logger = logging.getLogger(__name__)
 
 _config = load_config()
 
@@ -126,6 +129,11 @@ async def create_task_route(
     user: User = Depends(get_current_user),
 ):
     """Create a user-owned task. Agent-owned tasks are created by skills."""
+    logger.debug(
+        "[route:tasks] POST create user=%s fields=%s client_id=%s",
+        user.id, list(body.model_dump(exclude_unset=True).keys()),
+        bool(body.id),
+    )
     steps_payload = (
         [s.model_dump() for s in body.steps] if body.steps else None
     )
@@ -174,13 +182,25 @@ async def update_task_route(
     the fields it changed (never an explicit null), so it is unaffected.
     """
     updates = body.model_dump(exclude_unset=True)
+    logger.debug(
+        "[route:tasks] PATCH id=%s user=%s fields=%s",
+        task_id, user.id, list(updates.keys()),
+    )
     # Never let a stray null blank the title — the one always-required field.
     if "title" in updates and not (updates["title"] or "").strip():
         updates.pop("title")
     if not updates:
+        logger.warning(
+            "[route:tasks] PATCH id=%s user=%s -> 400 no fields to update",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=400, detail="No fields to update")
     updated = await update_task(_config, user.id, task_id, **updates)
     if not updated:
+        logger.warning(
+            "[route:tasks] PATCH id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
     task = await get_task(_config, user.id, task_id)
     return {"task": task}
@@ -194,6 +214,10 @@ async def complete_task_route(
     """Tick a task off. Handles recurring: next occurrence auto-created."""
     ok = await complete_task(_config, user.id, task_id)
     if not ok:
+        logger.warning(
+            "[route:tasks] POST complete id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "done", "id": task_id}
 
@@ -206,6 +230,10 @@ async def delete_task_route(
     """Remove a task entirely (plus its reminder job)."""
     ok = await delete_task(_config, user.id, task_id)
     if not ok:
+        logger.warning(
+            "[route:tasks] DELETE id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted", "id": task_id}
 
@@ -233,6 +261,13 @@ async def task_changes_route(
     Last-write-wins on ``updated_at`` resolves any conflicts.
     """
     result = await get_task_changes(_config, user.id, since=since)
+    logger.debug(
+        "[route:tasks] GET changes user=%s since=%s -> tasks=%d deleted=%d now=%s",
+        user.id, since,
+        len(result.get("tasks") or []),
+        len(result.get("deleted") or []),
+        result.get("now"),
+    )
     return result
 
 
@@ -249,6 +284,10 @@ async def ai_describe_task_route(
 
     task = await get_task(_config, user.id, task_id)
     if task is None:
+        logger.warning(
+            "[route:tasks] POST ai-describe id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
 
     text = await describe_task(
@@ -258,6 +297,10 @@ async def ai_describe_task_route(
         existing_description=task.get("description"),
     )
     if not text:
+        logger.warning(
+            "[route:tasks] POST ai-describe id=%s user=%s -> 503 AI worker unavailable",
+            task_id, user.id,
+        )
         raise HTTPException(
             status_code=503,
             detail="AI worker is unavailable right now — try again in a moment.",
@@ -292,6 +335,10 @@ async def ai_polish_explanation_route(
 
     task = await get_task(_config, user.id, task_id)
     if task is None:
+        logger.warning(
+            "[route:tasks] POST ai-polish-explanation id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
 
     raw = body.explanation_text.strip()
@@ -320,10 +367,18 @@ async def set_steps_route(
     user: User = Depends(get_current_user),
 ):
     """Replace the full sub-task checklist for a task."""
+    logger.debug(
+        "[route:tasks] PUT steps id=%s user=%s count=%d",
+        task_id, user.id, len(body.steps),
+    )
     normalized = await set_steps(
         _config, user.id, task_id, [s.model_dump() for s in body.steps],
     )
     if normalized is None:
+        logger.warning(
+            "[route:tasks] PUT steps id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
     return {"steps": normalized}
 
@@ -337,6 +392,10 @@ async def toggle_step_route(
     """Flip the done flag on a single step. Returns the refreshed task."""
     task = await toggle_step(_config, user.id, task_id, step_id)
     if task is None:
+        logger.warning(
+            "[route:tasks] POST toggle-step id=%s step=%s user=%s -> 404 task or step not found",
+            task_id, step_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task or step not found")
     return {"task": task}
 
@@ -392,8 +451,16 @@ async def reschedule_task_route(
     NL parser. Returns ``{task, applied}`` where ``applied`` is the human-
     readable summary the UI shows in the toast.
     """
+    logger.debug(
+        "[route:tasks] POST reschedule id=%s user=%s mode=%s",
+        task_id, user.id, body.mode,
+    )
     task = await get_task(_config, user.id, task_id)
     if not task:
+        logger.warning(
+            "[route:tasks] POST reschedule id=%s user=%s -> 404 task not found",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
 
     from lazyclaw.tasks.nl_time import parse as nl_parse
@@ -404,6 +471,10 @@ async def reschedule_task_route(
     if body.mode == "smart":
         suggested = await _smart_reschedule_phrase(_config, user.id, task)
         if not suggested:
+            logger.warning(
+                "[route:tasks] POST reschedule id=%s user=%s -> 503 smart worker offline",
+                task_id, user.id,
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Smart reschedule unavailable — worker LLM offline.",
@@ -412,10 +483,18 @@ async def reschedule_task_route(
     else:
         phrase_to_use = (body.phrase or "").strip()
         if not phrase_to_use:
+            logger.warning(
+                "[route:tasks] POST reschedule id=%s user=%s -> 400 phrase required for mode=nl",
+                task_id, user.id,
+            )
             raise HTTPException(status_code=400, detail="Phrase is required for mode=nl")
 
     parsed = nl_parse(phrase_to_use, tz=user_tz)
     if not parsed.reminder_at and not parsed.due_date:
+        logger.warning(
+            "[route:tasks] POST reschedule id=%s user=%s -> 422 unparseable phrase",
+            task_id, user.id,
+        )
         raise HTTPException(
             status_code=422,
             detail=f"Couldn't parse a time from {phrase_to_use!r}. "
@@ -431,8 +510,18 @@ async def reschedule_task_route(
     try:
         ok = await update_task(_config, user.id, task_id, **updates)
     except ValueError as exc:
+        # Do not interpolate exc — its message can echo the submitted
+        # date/time value. Log only the route + user + a static reason.
+        logger.warning(
+            "[route:tasks] POST reschedule id=%s user=%s -> 400 update rejected (value validation)",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
+        logger.warning(
+            "[route:tasks] POST reschedule id=%s user=%s -> 404 task not found (post-update)",
+            task_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Task not found")
 
     refreshed = await get_task(_config, user.id, task_id)
@@ -480,6 +569,10 @@ async def _smart_reschedule_phrase(config, user_id: str, task: dict) -> str | No
             role=ROLE_WORKER,
         )
     except Exception:
+        logger.warning(
+            "[route:tasks] smart reschedule worker LLM failed user=%s",
+            user_id, exc_info=True,
+        )
         return None
     raw = (response.content or "").strip() if response else ""
     # Strip quotes / a leading bullet — the parser is permissive but the

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any, AsyncIterable
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,11 @@ async def ask_claude_vision(
 
     model = settings.claude_brain_model or "claude-sonnet-4-6"
 
+    logger.debug(
+        "[provider:claude_vision] dispatch model=%s png_bytes=%d timeout=%.1fs",
+        model, len(png_bytes), timeout_s,
+    )
+
     b64_png = base64.b64encode(png_bytes).decode("ascii")
 
     # Stream-json user message with mixed image + text content.
@@ -139,6 +145,7 @@ async def ask_claude_vision(
     import asyncio
 
     text_parts: list[str] = []
+    _t0 = time.monotonic()
     try:
         async def _consume() -> None:
             async for msg in sdk_query(prompt=_one_shot(), options=options):
@@ -149,10 +156,18 @@ async def ask_claude_vision(
 
         await asyncio.wait_for(_consume(), timeout=timeout_s)
     except asyncio.TimeoutError:
-        logger.warning("vision_query: timed out after %.1fs", timeout_s)
+        logger.warning("[provider:claude_vision] timed out after %.1fs", timeout_s)
         return ""
     except Exception as exc:
-        logger.warning("vision_query: SDK call failed: %s", exc)
+        logger.warning(
+            "[provider:claude_vision] SDK call failed: %s: %s",
+            type(exc).__name__, exc,
+        )
         return ""
 
-    return "\n".join(p for p in text_parts if p).strip()
+    answer = "\n".join(p for p in text_parts if p).strip()
+    logger.debug(
+        "[provider:claude_vision] done latency=%dms answer_chars=%d",
+        int((time.monotonic() - _t0) * 1000), len(answer),
+    )
+    return answer

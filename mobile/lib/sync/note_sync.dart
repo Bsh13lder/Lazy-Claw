@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/api/api_exceptions.dart';
 import '../local/note_dao.dart';
@@ -96,12 +97,22 @@ class NoteSync {
     // with server-stamped times. The first update row of a run keeps the merged
     // payload; the rest are no-op'd (just dequeued).
     final coalesced = _coalesceUpdates(queue);
+    if (queue.isNotEmpty) {
+      debugPrint(
+        'NoteSync.push: draining outbox — ${queue.length} op(s), '
+        '${coalesced.skipSeqs.length} coalesced',
+      );
+    }
 
     var pushed = 0;
     for (final item in queue) {
       try {
         // Skipped duplicate update rows: just dequeue, no network call.
         if (coalesced.skipSeqs.contains(item.seq)) {
+          debugPrint(
+            'NoteSync.push: coalesced-skip seq=${item.seq} op=${item.op} '
+            'id=${item.entityId}',
+          );
           await _dao.deleteOutboxItem(item.seq);
           continue;
         }
@@ -115,6 +126,10 @@ class NoteSync {
           // hard-remove tombstone) so a crash can't split the two writes.
           await _dao.commitPush(item.seq, item.entityId);
           pushed++;
+          debugPrint(
+            'NoteSync.push: pushed seq=${item.seq} op=${item.op} '
+            'id=${item.entityId}',
+          );
         }
         // A drained-but-not-committed item (definitive 4xx, or a dead-lettered
         // 5xx poison) has already had its outbox row removed inside the failure
@@ -122,12 +137,19 @@ class NoteSync {
         // server truth — never silently dropping the user's edit.
       } on _PushInterrupted catch (e) {
         // Network down OR a retryable server error — stop, keep the rest queued.
+        debugPrint(
+          'NoteSync.push: interrupted after $pushed pushed — remaining outbox '
+          'op(s) preserved for next sync: ${e.cause}',
+        );
         return NoteSyncResult(
           pushed: pushed,
           pushInterrupted: true,
           error: e.cause,
         );
       }
+    }
+    if (queue.isNotEmpty) {
+      debugPrint('NoteSync.push: drain complete — $pushed pushed');
     }
     return NoteSyncResult(pushed: pushed);
   }
@@ -183,6 +205,10 @@ class NoteSync {
   ///   * other 4xx → drain the outbox row (return false; next pull restores it).
   Future<bool> _classifyPushFailure(NoteOutboxItem item, Object e) async {
     if (_isNetworkError(e)) {
+      debugPrint(
+        'NoteSync.push: network/transport failure op=${item.op} '
+        'id=${item.entityId} — stop drain, keep queue: $e',
+      );
       throw _PushInterrupted(e);
     }
     final api = _asApiError(e);
@@ -192,6 +218,10 @@ class NoteSync {
     // Return true so the caller commits (removes the outbox row AND hard-removes
     // the local tombstone) and counts it as pushed.
     if (status == 404 && item.op == NoteOutboxOp.delete) {
+      debugPrint(
+        'NoteSync.push: HTTP 404 on ${item.op} id=${item.entityId} — '
+        'idempotent success',
+      );
       return true;
     }
 
@@ -200,9 +230,17 @@ class NoteSync {
       // keep it queued for the next sync — NEVER silently drop.
       final attempts = await _dao.bumpOutboxAttempts(item.seq);
       if (attempts >= kMaxPushAttempts) {
+        debugPrint(
+          'NoteSync.push: dead-lettered op=${item.op} id=${item.entityId} '
+          'after $attempts attempt(s) (HTTP $status)',
+        );
         await _dao.deadLetterOutboxItem(item.seq);
         return false; // drained the poison item; local stays dirty for next pull
       }
+      debugPrint(
+        'NoteSync.push: retryable HTTP $status op=${item.op} '
+        'id=${item.entityId} attempt=$attempts — keeping queued',
+      );
       throw _PushInterrupted(e);
     }
 
@@ -216,12 +254,21 @@ class NoteSync {
       // sync can surface the rejection.
       if (item.op == NoteOutboxOp.create) {
         await _logCreateRejected(item, status);
+      } else {
+        debugPrint(
+          'NoteSync.push: definitive HTTP $status op=${item.op} '
+          'id=${item.entityId} — draining outbox row (next pull restores truth)',
+        );
       }
       await _dao.deleteOutboxItem(item.seq);
       return false; // drained
     }
 
     // Unknown shape with no usable status → treat as network-ish and keep it.
+    debugPrint(
+      'NoteSync.push: unclassifiable failure op=${item.op} '
+      'id=${item.entityId} — keeping queued: $e',
+    );
     throw _PushInterrupted(e);
   }
 
@@ -240,6 +287,10 @@ class NoteSync {
       field: 'create_rejected',
       local: 'HTTP $status — $descriptor',
       server: null, // create never landed → no server value
+    );
+    debugPrint(
+      'NoteSync.push: CREATE rejected HTTP $status entity=${item.entity} '
+      'id=${item.entityId} — conflict logged, cache stays dirty',
     );
   }
 
@@ -267,10 +318,12 @@ class NoteSync {
   /// `pullFailed: true` and leaves the cursor untouched.
   Future<NoteSyncResult> pull() async {
     final cursor = await _dao.getCursor();
+    debugPrint('NoteSync.pull: fetching changes since cursor=$cursor');
     NoteChanges changes;
     try {
       changes = await _repo.fetchChanges(since: cursor);
     } catch (e) {
+      debugPrint('NoteSync.pull: fetchChanges failed — cursor unchanged: $e');
       return NoteSyncResult(pullFailed: true, error: e);
     }
 
@@ -290,6 +343,10 @@ class NoteSync {
       if (logged) conflicts++;
       deletedApplied++;
     }
+    debugPrint(
+      'NoteSync.pull: applied — merged=$pulled deleted=$deletedApplied '
+      'conflicts=$conflicts',
+    );
 
     // Advance the cursor only when the server gave us a real clock. An empty
     // `now` means we can't trust the page boundary — fall back to the max
@@ -298,7 +355,12 @@ class NoteSync {
     final nextCursor = _resolveCursor(changes);
     if (nextCursor != null && nextCursor.isNotEmpty) {
       await _dao.setCursor(nextCursor);
+      debugPrint('NoteSync.pull: cursor advanced → $nextCursor');
     } else {
+      debugPrint(
+        'NoteSync.pull: empty server clock with no datable rows — '
+        'pull marked failed, cursor held',
+      );
       return NoteSyncResult(
         pulled: pulled,
         deletedApplied: deletedApplied,
@@ -369,6 +431,10 @@ class NoteSync {
     for (final col in _conflictFields) {
       final localVal = localRow[col]?.toString();
       if (localVal == null || localVal.isEmpty) continue;
+      debugPrint(
+        'NoteSync.pull: tombstone conflict id=$id field=$col '
+        'winner=server(delete) — local edit lost',
+      );
       await txn.logConflict(
         id: id,
         field: col,
@@ -440,6 +506,10 @@ class NoteSync {
       }
 
       // Local strictly newer — keep it; it re-pushes next sync. Nothing logged.
+      debugPrint(
+        'NoteSync.pull: kept newer local id=${serverNote.id} — server change '
+        'deferred, will re-push',
+      );
       return const _MergeOutcome(written: false, conflict: false);
     });
   }
@@ -460,6 +530,10 @@ class NoteSync {
       final serverVal = serverVals[col];
       if (localVal != serverVal) {
         any = true;
+        debugPrint(
+          'NoteSync.pull: LWW field conflict id=${serverNote.id} field=$col '
+          'winner=server',
+        );
         await txn.logConflict(
           id: serverNote.id,
           field: col,

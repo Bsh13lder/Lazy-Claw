@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
 
@@ -49,6 +50,11 @@ class LaneQueue:
         33db41a → ``User <id>:heartbeat not found``).
         """
         if not self._running:
+            logger.warning(
+                "[queue] enqueue rejected — LaneQueue not started "
+                "(user=%s lane=%s)",
+                user_id, lane_key or user_id,
+            )
             raise RuntimeError("LaneQueue not started")
 
         key = lane_key or user_id
@@ -56,8 +62,8 @@ class LaneQueue:
         lane = self._get_lane(key)
         await lane.put(job)
         logger.debug(
-            "Enqueued job for user %s on lane %s (queue size: %d)",
-            user_id, key, lane.qsize(),
+            "[queue] enqueue user=%s lane=%s lane_depth=%d total_depth=%d",
+            user_id, key, lane.qsize(), self.queue_depth,
         )
 
         # Await thread-safe future from async context
@@ -71,6 +77,10 @@ class LaneQueue:
             # Start a processor task for this lane
             self._processors[lane_key] = asyncio.create_task(
                 self._process_lane(lane_key)
+            )
+            logger.debug(
+                "[queue] new lane started key=%s active_lanes=%d",
+                lane_key, len(self._lanes),
             )
         return self._lanes[lane_key]
 
@@ -86,17 +96,30 @@ class LaneQueue:
                 if lane.empty():
                     del self._lanes[lane_key]
                     del self._processors[lane_key]
-                    logger.debug("Cleaned up idle lane %s", lane_key)
+                    logger.debug("[queue] idle lane cleaned up key=%s", lane_key)
                     return
                 continue
 
+            logger.debug(
+                "[queue] dequeue user=%s lane=%s remaining_depth=%d",
+                job.user_id, lane_key, lane.qsize(),
+            )
+            _t0 = time.monotonic()
             try:
                 result = await self._handler(job.user_id, job.message, **job.kwargs)
-                logger.debug("Job completed for user %s (result_len=%d)", job.user_id, len(result or ""))
+                logger.debug(
+                    "[queue] job done user=%s lane=%s result_len=%d elapsed_ms=%.0f",
+                    job.user_id, lane_key, len(result or ""),
+                    (time.monotonic() - _t0) * 1000,
+                )
                 if not job.result_future.done():
                     job.result_future.set_result(result)
             except Exception as e:
-                logger.error("Job failed for user %s: %s", job.user_id, e, exc_info=True)
+                logger.error(
+                    "[queue] job failed user=%s lane=%s err_type=%s elapsed_ms=%.0f: %s",
+                    job.user_id, lane_key, type(e).__name__,
+                    (time.monotonic() - _t0) * 1000, e, exc_info=True,
+                )
                 if not job.result_future.done():
                     job.result_future.set_result(f"Error processing message: {e}")
             finally:

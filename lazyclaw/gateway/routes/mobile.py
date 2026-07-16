@@ -9,10 +9,13 @@ signed/HMAC download URL or a shared secret.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mobile", tags=["mobile"])
 
@@ -45,6 +48,10 @@ def _keyboard_version_path() -> Path:
 async def mobile_version() -> JSONResponse:
     vp = _version_path()
     if not vp.exists() or not _apk_path().exists():
+        logger.warning(
+            "[route:mobile] GET version -> 404 no mobile build published (dir=%s)",
+            _APK_DIR,
+        )
         raise HTTPException(status_code=404, detail="No mobile build published")
     return JSONResponse(json.loads(vp.read_text()))
 
@@ -53,6 +60,9 @@ async def mobile_version() -> JSONResponse:
 async def mobile_apk() -> FileResponse:
     ap = _apk_path()
     if not ap.exists():
+        logger.warning(
+            "[route:mobile] GET apk -> 404 no APK published (dir=%s)", _APK_DIR,
+        )
         raise HTTPException(status_code=404, detail="No APK published")
     return FileResponse(
         ap,
@@ -65,6 +75,10 @@ async def mobile_apk() -> FileResponse:
 async def keyboard_version() -> JSONResponse:
     vp = _keyboard_version_path()
     if not vp.exists() or not _keyboard_apk_path().exists():
+        logger.warning(
+            "[route:mobile] GET keyboard-version -> 404 no keyboard build published (dir=%s)",
+            _APK_DIR,
+        )
         raise HTTPException(status_code=404, detail="No keyboard build published")
     return JSONResponse(json.loads(vp.read_text()))
 
@@ -73,6 +87,10 @@ async def keyboard_version() -> JSONResponse:
 async def keyboard_apk() -> FileResponse:
     ap = _keyboard_apk_path()
     if not ap.exists():
+        logger.warning(
+            "[route:mobile] GET keyboard-apk -> 404 no keyboard APK published (dir=%s)",
+            _APK_DIR,
+        )
         raise HTTPException(status_code=404, detail="No keyboard APK published")
     return FileResponse(
         ap,

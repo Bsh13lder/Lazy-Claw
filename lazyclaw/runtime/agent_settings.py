@@ -34,7 +34,10 @@ async def get_agent_settings(config, user_id: str) -> dict:
                 settings = json.loads(row[0])
                 return {**DEFAULT_AGENTS, **settings.get("agents", {})}
     except Exception as exc:
-        logger.debug("get_agent_settings failed: %s", exc)
+        logger.debug(
+            "[settings] get_agent_settings failed user=%s: %s",
+            user_id[:8] if user_id else None, exc, exc_info=True,
+        )
     return dict(DEFAULT_AGENTS)
 
 
@@ -42,20 +45,24 @@ async def update_agent_settings(config, user_id: str, updates: dict) -> dict:
     """Validate and update agent settings. Returns new merged settings."""
     if "auto_delegate" in updates:
         if not isinstance(updates["auto_delegate"], bool):
+            logger.debug("[settings] update_agent_settings rejected key=auto_delegate (not bool)")
             raise ValueError("auto_delegate must be a boolean")
     if "max_concurrent_specialists" in updates:
         val = int(updates["max_concurrent_specialists"])
         if not 1 <= val <= 10:
+            logger.debug("[settings] update_agent_settings rejected key=max_concurrent_specialists (out of range)")
             raise ValueError("max_concurrent_specialists must be 1-10")
         updates = {**updates, "max_concurrent_specialists": val}
     if "max_ram_mb" in updates:
         val = int(updates["max_ram_mb"])
         if not 128 <= val <= 4096:
+            logger.debug("[settings] update_agent_settings rejected key=max_ram_mb (out of range)")
             raise ValueError("max_ram_mb must be 128-4096")
         updates = {**updates, "max_ram_mb": val}
     if "specialist_timeout_s" in updates:
         val = int(updates["specialist_timeout_s"])
         if not 10 <= val <= 600:
+            logger.debug("[settings] update_agent_settings rejected key=specialist_timeout_s (out of range)")
             raise ValueError("specialist_timeout_s must be 10-600")
         updates = {**updates, "specialist_timeout_s": val}
 
@@ -74,4 +81,8 @@ async def update_agent_settings(config, user_id: str, updates: dict) -> dict:
             (json.dumps(new_settings), user_id),
         )
         await db.commit()
+        logger.debug(
+            "[settings] update_agent_settings applied user=%s keys=%s",
+            user_id[:8] if user_id else None, sorted(updates.keys()),
+        )
         return agents

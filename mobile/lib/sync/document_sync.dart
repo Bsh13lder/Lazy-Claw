@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/api/api_exceptions.dart';
 import '../local/document_cache_dao.dart';
@@ -100,12 +101,22 @@ class DocumentSync {
     final queue = all.where((i) => i.kind == _kind.api).toList();
     // Coalesce consecutive `update` ops per entity so replays can't interleave.
     final coalesced = _coalesceUpdates(queue);
+    if (queue.isNotEmpty) {
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: draining outbox — ${queue.length} '
+        'op(s), ${coalesced.skipSeqs.length} coalesced',
+      );
+    }
 
     var pushed = 0;
     var conflicts = 0;
     for (final item in queue) {
       try {
         if (coalesced.skipSeqs.contains(item.seq)) {
+          debugPrint(
+            'DocumentSync[${_kind.api}].push: coalesced-skip seq=${item.seq} '
+            'op=${item.op} id=${item.docId}',
+          );
           await _dao.deleteOutboxItem(item.seq);
           continue;
         }
@@ -118,9 +129,17 @@ class DocumentSync {
           await _dao.commitPush(item.seq, item.entityId,
               serverUpdatedAt: outcome.serverUpdatedAt);
           pushed++;
+          debugPrint(
+            'DocumentSync[${_kind.api}].push: pushed seq=${item.seq} '
+            'op=${item.op} id=${item.docId}',
+          );
         }
         if (outcome.conflictLogged) conflicts++;
       } on _PushInterrupted catch (e) {
+        debugPrint(
+          'DocumentSync[${_kind.api}].push: interrupted after $pushed pushed — '
+          'remaining outbox op(s) preserved for next sync: ${e.cause}',
+        );
         return DocSyncResult(
           pushed: pushed,
           conflicts: conflicts,
@@ -128,6 +147,12 @@ class DocumentSync {
           error: e.cause,
         );
       }
+    }
+    if (queue.isNotEmpty) {
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: drain complete — $pushed pushed, '
+        '$conflicts conflict(s)',
+      );
     }
     return DocSyncResult(pushed: pushed, conflicts: conflicts);
   }
@@ -189,6 +214,10 @@ class DocumentSync {
       // A 409 on save: the server changed under us. Log it (never lose the
       // user's edit), drain the outbox row, and let the next pull restore server
       // truth (which carries the conflict's server snapshot).
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: 409 save conflict id=${item.docId} '
+        'field=save_conflict winner=server — draining, next pull restores truth',
+      );
       await _dao.logConflict(
         kind: item.kind,
         id: item.docId,
@@ -213,32 +242,57 @@ class DocumentSync {
   ///     visible conflict first so a client-originated row isn't silently lost.
   Future<_PushOutcome> _classifyPushFailure(DocOutboxItem item, Object e) async {
     if (_isNetworkError(e)) {
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: network/transport failure '
+        'op=${item.op} id=${item.docId} — stop drain, keep queue: $e',
+      );
       throw _PushInterrupted(e);
     }
     final status = _statusOf(e) ?? 0;
 
     if (status == 404 && item.op == DocOutboxOp.delete) {
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: HTTP 404 on delete id=${item.docId} '
+        '— idempotent success',
+      );
       return const _PushOutcome(committed: true);
     }
 
     if (status >= 500) {
       final attempts = await _dao.bumpOutboxAttempts(item.seq);
       if (attempts >= kMaxPushAttempts) {
+        debugPrint(
+          'DocumentSync[${_kind.api}].push: dead-lettered op=${item.op} '
+          'id=${item.docId} after $attempts attempt(s) (HTTP $status)',
+        );
         await _dao.deadLetterOutboxItem(item.seq);
         return const _PushOutcome(committed: false);
       }
+      debugPrint(
+        'DocumentSync[${_kind.api}].push: retryable HTTP $status op=${item.op} '
+        'id=${item.docId} attempt=$attempts — keeping queued',
+      );
       throw _PushInterrupted(e);
     }
 
     if (status >= 400) {
       if (item.op == DocOutboxOp.create) {
         await _logCreateRejected(item, status);
+      } else {
+        debugPrint(
+          'DocumentSync[${_kind.api}].push: definitive HTTP $status '
+          'op=${item.op} id=${item.docId} — draining outbox row',
+        );
       }
       await _dao.deleteOutboxItem(item.seq);
       return const _PushOutcome(committed: false);
     }
 
     // Unknown shape with no usable status → treat as network-ish; keep queued.
+    debugPrint(
+      'DocumentSync[${_kind.api}].push: unclassifiable failure op=${item.op} '
+      'id=${item.docId} — keeping queued: $e',
+    );
     throw _PushInterrupted(e);
   }
 
@@ -251,6 +305,10 @@ class DocumentSync {
       field: 'create_rejected',
       local: 'HTTP $status — $descriptor',
       server: null,
+    );
+    debugPrint(
+      'DocumentSync[${_kind.api}].push: CREATE rejected HTTP $status '
+      'id=${item.docId} — conflict logged, cache stays dirty',
     );
   }
 
@@ -270,10 +328,17 @@ class DocumentSync {
   /// to the server's `now` on success.
   Future<DocSyncResult> pull() async {
     final cursor = await _dao.getCursor(_kind.api);
+    debugPrint(
+      'DocumentSync[${_kind.api}].pull: fetching changes since cursor=$cursor',
+    );
     DocChanges changes;
     try {
       changes = await _repo.fetchChanges(_kind, since: cursor);
     } catch (e) {
+      debugPrint(
+        'DocumentSync[${_kind.api}].pull: fetchChanges failed — cursor '
+        'unchanged: $e',
+      );
       return DocSyncResult(pullFailed: true, error: e);
     }
 
@@ -293,11 +358,22 @@ class DocumentSync {
       if (logged) conflicts++;
       deletedApplied++;
     }
+    debugPrint(
+      'DocumentSync[${_kind.api}].pull: applied — merged=$pulled '
+      'deleted=$deletedApplied conflicts=$conflicts',
+    );
 
     final nextCursor = _resolveCursor(changes);
     if (nextCursor != null && nextCursor.isNotEmpty) {
       await _dao.setCursor(_kind.api, nextCursor);
+      debugPrint(
+        'DocumentSync[${_kind.api}].pull: cursor advanced → $nextCursor',
+      );
     } else {
+      debugPrint(
+        'DocumentSync[${_kind.api}].pull: empty server clock with no datable '
+        'rows — pull marked failed, cursor held',
+      );
       return DocSyncResult(
         pulled: pulled,
         deletedApplied: deletedApplied,
@@ -366,6 +442,10 @@ class DocumentSync {
             ? true
             : false;
         if (logged) {
+          debugPrint(
+            'DocumentSync[${_kind.api}].pull: LWW payload conflict id=${sd.id} '
+            'field=payload winner=server',
+          );
           await txn.logConflict(
             kind: _kind.api,
             id: sd.id,
@@ -386,6 +466,10 @@ class DocumentSync {
       }
 
       // Local strictly newer — keep it; it re-pushes next sync. Nothing logged.
+      debugPrint(
+        'DocumentSync[${_kind.api}].pull: kept newer local id=${sd.id} — '
+        'server change deferred, will re-push',
+      );
       return const _MergeOutcome(written: false, conflict: false);
     });
   }
@@ -401,6 +485,10 @@ class DocumentSync {
         final dirty = ((localRow['dirty'] as int?) ?? 0) == 1;
         final alreadyDeleted = ((localRow['deleted'] as int?) ?? 0) == 1;
         if (dirty && !alreadyDeleted) {
+          debugPrint(
+            'DocumentSync[${_kind.api}].pull: tombstone conflict id=$id '
+            'field=server_deleted winner=server(delete) — local edit lost',
+          );
           await txn.logConflict(
             kind: _kind.api,
             id: id,

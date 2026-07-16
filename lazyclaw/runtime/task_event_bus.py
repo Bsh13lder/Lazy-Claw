@@ -99,6 +99,10 @@ def publish(event: TaskEvent) -> None:
         return
     ch = _channel(event.user_id)
     ch.ring.append(event)
+    logger.debug(
+        "[eventbus] publish kind=%s user=%s subscribers=%d",
+        event.kind, event.user_id[:8], len(ch.subscribers),
+    )
     for q in list(ch.subscribers):
         try:
             q.put_nowait(event)
@@ -107,7 +111,10 @@ def publish(event: TaskEvent) -> None:
                 q.get_nowait()
                 q.put_nowait(event)
             except (asyncio.QueueEmpty, asyncio.QueueFull):
-                logger.debug("Task event dropped for %s (slow subscriber)", event.user_id)
+                logger.debug(
+                    "[eventbus] event dropped kind=%s user=%s (slow subscriber)",
+                    event.kind, event.user_id[:8],
+                )
 
 
 async def subscribe(user_id: str) -> AsyncIterator[TaskEvent]:
@@ -116,6 +123,10 @@ async def subscribe(user_id: str) -> AsyncIterator[TaskEvent]:
     q: asyncio.Queue = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE)
     async with _lock:
         ch.subscribers.append(q)
+    logger.debug(
+        "[eventbus] subscribe user=%s subscribers=%d",
+        user_id[:8] if user_id else None, len(ch.subscribers),
+    )
     try:
         while True:
             evt = await q.get()
@@ -125,7 +136,14 @@ async def subscribe(user_id: str) -> AsyncIterator[TaskEvent]:
             try:
                 ch.subscribers.remove(q)
             except ValueError:
-                pass
+                logger.debug(
+                    "[eventbus] unsubscribe: queue already removed user=%s",
+                    user_id[:8] if user_id else None,
+                )
+        logger.debug(
+            "[eventbus] unsubscribe user=%s subscribers=%d",
+            user_id[:8] if user_id else None, len(ch.subscribers),
+        )
 
 
 def recent_events(
@@ -145,9 +163,16 @@ def recent_events(
     if max_age_s is not None:
         cutoff = time.time() - max_age_s
         events = [e for e in events if e.ts >= cutoff]
+    logger.debug(
+        "[eventbus] recent_events user=%s returned=%d", user_id[:8] if user_id else None, len(events),
+    )
     return events
 
 
 def clear_user(user_id: str) -> None:
     """Drop all state for a user (logout, session reset)."""
-    _channels.pop(user_id, None)
+    removed = _channels.pop(user_id, None) is not None
+    logger.debug(
+        "[eventbus] clear_user user=%s removed_channel=%s",
+        user_id[:8] if user_id else None, removed,
+    )

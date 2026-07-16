@@ -6,7 +6,10 @@ the file's mtime changes (e.g., user edits the file).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _FALLBACK_PERSONALITY = (
     "You are Claw, a helpful AI assistant. Be direct, friendly, and efficient."
@@ -138,7 +141,9 @@ def is_minimax_brain(model: str | None) -> bool:
     """
     if not model:
         return False
-    return model.lower().startswith("minimax-")
+    result = model.lower().startswith("minimax-")
+    logger.debug("[personality] is_minimax_brain model=%s result=%s", model, result)
+    return result
 
 
 def minimax_tool_discipline_suffix() -> str:
@@ -173,11 +178,17 @@ def load_personality(personality_path: str | None = None) -> str:
     try:
         mtime = path.stat().st_mtime
         if _cache is not None and mtime == _cache_mtime:
+            logger.debug("[personality] SOUL.md cache hit path=%s", path)
             return _cache
+        logger.debug("[personality] SOUL.md (re)loading from disk path=%s", path)
         _cache = path.read_text(encoding="utf-8")
         _cache_mtime = mtime
         return _cache
     except FileNotFoundError:
+        logger.warning(
+            "[personality] SOUL.md not found at %s — falling back to default personality",
+            path,
+        )
         return _FALLBACK_PERSONALITY
 
 
@@ -195,11 +206,18 @@ def load_heartbeat_personality(personality_path: str | None = None) -> str:
     try:
         mtime = path.stat().st_mtime
         if _hb_cache is not None and mtime == _hb_cache_mtime:
+            logger.debug("[personality] HEARTBEAT.md cache hit path=%s", path)
             return _hb_cache
+        logger.debug("[personality] HEARTBEAT.md (re)loading from disk path=%s", path)
         _hb_cache = path.read_text(encoding="utf-8")
         _hb_cache_mtime = mtime
         return _hb_cache
     except FileNotFoundError:
+        logger.warning(
+            "[personality] HEARTBEAT.md not found at %s — falling back to default "
+            "heartbeat personality",
+            path,
+        )
         return _FALLBACK_HEARTBEAT_PERSONALITY
 
 

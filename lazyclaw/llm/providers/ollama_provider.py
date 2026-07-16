@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 import httpx
 
@@ -146,17 +147,29 @@ class OllamaProvider(BaseLLMProvider):
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
 
+        logger.debug(
+            "[provider:ollama] chat start model=%s tools=%d", model, len(tools or []),
+        )
+        _t0 = time.monotonic()
         try:
             client = await self._get_client()
             resp = await client.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
         except httpx.ConnectError as exc:
+            logger.warning(
+                "[provider:ollama] connect failed base_url=%s model=%s",
+                self._base_url, model,
+            )
             raise OllamaUnavailableError(
                 "Cannot connect to Ollama at "
                 f"{self._base_url}. Is it running?"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "[provider:ollama] HTTP %s for model=%s",
+                exc.response.status_code, model,
+            )
             if exc.response.status_code == 404:
                 raise OllamaUnavailableError(
                     f"Model '{model}' not found in Ollama. "
@@ -166,6 +179,10 @@ class OllamaProvider(BaseLLMProvider):
                 f"Ollama returned HTTP {exc.response.status_code}"
             ) from exc
         except httpx.ReadTimeout as exc:
+            logger.warning(
+                "[provider:ollama] read timeout loading model=%s after %dms",
+                model, int((time.monotonic() - _t0) * 1000),
+            )
             raise OllamaUnavailableError(
                 f"Ollama timed out loading model '{model}' "
                 f"(may need more RAM or first load is slow)"
@@ -174,7 +191,12 @@ class OllamaProvider(BaseLLMProvider):
             err_msg = str(exc).strip()
             if not err_msg:
                 err_msg = type(exc).__name__
+            logger.warning(
+                "[provider:ollama] chat error model=%s: %s: %s",
+                model, type(exc).__name__, err_msg,
+            )
             raise OllamaUnavailableError(f"Ollama error: {err_msg}") from exc
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
 
         choice = data["choices"][0]
         message = choice["message"]
@@ -215,6 +237,14 @@ class OllamaProvider(BaseLLMProvider):
         # Strip <think>...</think> tags if any model outputs them
         if "<think>" in content:
             content = _strip_think_tags(content)
+
+        logger.debug(
+            "[provider:ollama] chat done model=%s latency=%dms finish=%s "
+            "tool_calls=%d tokens_in=%s tokens_out=%s",
+            data.get("model", model), _latency_ms, choice.get("finish_reason"),
+            len(parsed_tool_calls or []),
+            (usage or {}).get("prompt_tokens"), (usage or {}).get("completion_tokens"),
+        )
 
         return LLMResponse(
             content=content,

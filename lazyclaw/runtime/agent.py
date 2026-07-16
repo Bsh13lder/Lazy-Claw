@@ -1994,7 +1994,12 @@ async def _extract_and_store_lesson(
         if lesson:
             await store_lesson(config, user_id, lesson)
     except Exception as e:
-        logger.debug("Lesson extraction background task failed: %s", e)
+        logger.warning(
+            "[agent] lesson extraction failed user=%s error_type=%s error=%s",
+            user_id[:8] if isinstance(user_id, str) else user_id,
+            type(e).__name__,
+            e,
+        )
 
 
 class _PlanRejected(Exception):
@@ -2157,8 +2162,14 @@ async def _load_auto_plan_setting(user_id: str) -> bool:
                 return True
             # SQLite stores booleans as 0/1.
             return bool(row[0])
-    except Exception:
+    except Exception as e:
         # Missing column on older DBs — default to ON.
+        logger.debug(
+            "[agent] _load_auto_plan_setting failed user=%s error_type=%s "
+            "— defaulting to auto_plan=True",
+            user_id[:8] if isinstance(user_id, str) else user_id,
+            type(e).__name__,
+        )
         return True
 
 
@@ -2238,7 +2249,11 @@ class Agent:
                     for t in self.registry.list_tools()
                 ]
                 tool_names = [n for n in tool_names if n][:40]
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "[agent] plan gate: registry.list_tools() failed "
+                    "error_type=%s error=%s", type(e).__name__, e,
+                )
                 tool_names = []
 
         # Pre-plan research pass — parallel zero-brain-LLM lookups over
@@ -2332,7 +2347,13 @@ class Agent:
                 try:
                     from lazyclaw.runtime.plan_research import gather_plan_research
                     extra = await gather_plan_research(self.config, user_id, rq)
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        "[agent] plan gate: self-research pass failed "
+                        "user=%s error_type=%s error=%s",
+                        user_id[:8] if isinstance(user_id, str) else user_id,
+                        type(e).__name__, e,
+                    )
                     extra = ""
                 plan_messages.append(LLMMessage(
                     role="system",
@@ -2484,7 +2505,7 @@ class Agent:
         if hasattr(cb, 'cancel_token'):
             cb.cancel_token = cancel_token
 
-        logger.info("process_message START: user=%s msg=%s", user_id[:8], message[:40])
+        logger.info("process_message START: user=%s msg_len=%d", user_id[:8], len(message or ""))
         self._nudged_tool_use = False  # Reset per-message nudge flag
         self._nudged_research = False  # Reset research-intent nudge flag
 
@@ -2646,7 +2667,7 @@ class Agent:
             from lazyclaw.runtime.task_splitter import split_tasks, _looks_compound
 
             if _looks_compound(message):
-                logger.info("COMPOUND detected for: %s", message[:60])
+                logger.info("COMPOUND detected (msg_len=%d)", len(message or ""))
                 sub_tasks = await split_tasks(
                     self.eco_router, user_id, message,
                 )
@@ -2794,7 +2815,7 @@ class Agent:
             # journal/pinned, no lessons recall. History still loaded so
             # task-bound reminders see prior turns.
             from lazyclaw.runtime.personality import load_heartbeat_personality
-            logger.info("HEARTBEAT slim path engaged for: %r", (message or "")[:60])
+            logger.info("HEARTBEAT slim path engaged (msg_len=%d)", len(message or ""))
             system_prompt = load_heartbeat_personality()
             history_rows = await _load_history()
         elif needs_tools_early:
@@ -3771,7 +3792,7 @@ class Agent:
             else:
                 logger.warning("ZERO tools resolved from base_names=%s — registry may be empty", _base_names)
         else:
-            logger.info("No tools — fast chat path for: %s", message[:50])
+            logger.info("No tools — fast chat path (msg_len=%d)", len(message or ""))
 
         # Build context — keep recent messages, compact old ones.
         # Filter error messages so LLM doesn't reference past failures.
@@ -4199,6 +4220,11 @@ class Agent:
         iteration = 0
         try:
             for iteration in range(max_iterations):
+                logger.debug(
+                    "[agent] iter=%d/%d tools=%d messages=%d user=%s",
+                    iteration, max_iterations, len(tools), len(messages),
+                    user_id[:8],
+                )
                 if cancel_token.is_cancelled:
                     if self._team_lead and _fg_task_id:
                         self._team_lead.cancel(_fg_task_id)
@@ -4228,8 +4254,12 @@ class Agent:
                                 f"Got it: {_note[:60]}",
                                 {"note": _note},
                             ))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "[agent] side-note drain failed iter=%d user=%s "
+                        "error_type=%s error=%s",
+                        iteration, user_id[:8], type(e).__name__, e,
+                    )
 
                 # TAOR phase: entering "think" — LLM planning / reasoning.
                 try:
@@ -4239,8 +4269,12 @@ class Agent:
                     ))
                     if self._team_lead and _fg_task_id:
                         self._team_lead.update_phase(_fg_task_id, "think")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "[agent] think-phase event/update_phase failed iter=%d "
+                        "error_type=%s error=%s",
+                        iteration, type(e).__name__, e,
+                    )
 
                 # Prune old tool results to save tokens
                 # Early iterations: keep 2 full results for context
@@ -4450,6 +4484,12 @@ class Agent:
                     cap_by_mutation=_cap_by_mutation,
                     work_calls=_fg_work_calls,
                 )
+                logger.debug(
+                    "[agent] iter=%d thin_router_cap decision cap_now=%s "
+                    "reason=%s cap_by_mutation=%s work_calls=%d",
+                    iteration, _cap_now, _cap_reason, _cap_by_mutation,
+                    _fg_work_calls,
+                )
                 if _cap_now:
                     # Mutation cap → meta-only (brain may still search/recall
                     # while delegating the next ACTION). Budget cap (read-grind)
@@ -4520,6 +4560,11 @@ class Agent:
                     kwargs["tools"] = tools
                 logger.info("AGENTIC LOOP iter=%d: tools=%d, messages=%d",
                             iteration, len(tools), len(messages))
+                logger.debug(
+                    "[agent] iter=%d final tool names=%s",
+                    iteration,
+                    [t.get("function", {}).get("name") for t in tools],
+                )
 
                 # Role routing: brain for strategy + final answers,
                 # worker for mid-chain tool orchestration (cheaper/local).
@@ -4630,7 +4675,12 @@ class Agent:
                                 _fallback_name = (
                                     await self.eco_router.get_fallback_model(user_id)
                                 )
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(
+                                    "[agent] chat-path get_fallback_model failed "
+                                    "iter=%d user=%s error_type=%s error=%s",
+                                    iteration, user_id[:8], type(e).__name__, e,
+                                )
                                 _fallback_name = None
                             if _fallback_name:
                                 _esc_reason = (
@@ -4765,7 +4815,12 @@ class Agent:
                                 _fallback_name = (
                                     await self.eco_router.get_fallback_model(user_id)
                                 )
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(
+                                    "[agent] stream-path get_fallback_model failed "
+                                    "iter=%d user=%s error_type=%s error=%s",
+                                    iteration, user_id[:8], type(e).__name__, e,
+                                )
                                 _fallback_name = None
                             if _fallback_name:
                                 logger.warning(
@@ -5513,7 +5568,12 @@ class Agent:
                     ):
                         try:
                             _fallback_name = await self.eco_router.get_fallback_model(user_id)
-                        except Exception:
+                        except Exception as e:
+                            logger.warning(
+                                "[agent] empty-response-path get_fallback_model "
+                                "failed iter=%d user=%s error_type=%s error=%s",
+                                iteration, user_id[:8], type(e).__name__, e,
+                            )
                             _fallback_name = None
                         logger.warning(
                             "Empty LLM response from %s (usage=%s, tools=%d) — escalating to fallback %s",
@@ -5693,7 +5753,12 @@ class Agent:
                                 from lazyclaw.runtime.f1_content_verifier import (
                                     phase2_enforcement_verdict,
                                 )
-                            except ImportError:
+                            except ImportError as e:
+                                logger.debug(
+                                    "[agent] f1_content_verifier import failed "
+                                    "(stale container?) error_type=%s error=%s",
+                                    type(e).__name__, e,
+                                )
                                 phase2_enforcement_verdict = None  # type: ignore
                             _confab_verdict = _detect_confab(
                                 _final_content,
@@ -5951,6 +6016,11 @@ class Agent:
                             self._team_lead.cancel(_fg_task_id)
                             _fg_task_id = None
 
+                        logger.info(
+                            "[agent] fg->bg promotion iter=%d user=%s "
+                            "task_id=%s specialist=%s",
+                            iteration, user_id[:8], _task_id, _specialist_name,
+                        )
                         await cb.on_event(AgentEvent(
                             FAST_DISPATCH,
                             f"Dispatched to background ({_specialist_name})",
@@ -5977,8 +6047,12 @@ class Agent:
                     ))
                     if self._team_lead and _fg_task_id:
                         self._team_lead.update_phase(_fg_task_id, "act")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "[agent] act-phase event/update_phase failed iter=%d "
+                        "error_type=%s error=%s",
+                        iteration, type(e).__name__, e,
+                    )
 
                 # Assistant message with tool calls (may have partial text content)
                 assistant_msg = LLMMessage(
@@ -6108,6 +6182,10 @@ class Agent:
                         )
                         _mcp_pre_snapshot = snapshot_mcp_tool_names(self.registry)
 
+                    logger.debug(
+                        "[agent] dispatch %s keys=%s iter=%d",
+                        tc.name, list(tc.arguments or {}), iteration,
+                    )
                     # Duplicate call cache — skip re-executing identical tool calls.
                     # Non-idempotent generators/actions are never cached (see
                     # _NEVER_CACHE_TOOLS) so a stale prior result can't replay.
@@ -6198,6 +6276,10 @@ class Agent:
                             )
                             head = result[:512]  # only check the head; results can be huge
                             _is_err_result = any(m in head for m in _err_status_markers)
+                        logger.debug(
+                            "[agent] %s -> status=%s len=%d",
+                            tc.name, "error" if _is_err_result else "ok", len(result),
+                        )
                         if not _is_err_result and tc.name not in _NEVER_CACHE_TOOLS:
                             _tool_call_cache[_cache_key] = result
                         elif _is_err_result:
@@ -6305,8 +6387,17 @@ class Agent:
                                 "approval", f"{_display} approved",
                                 {"skill": skill_name, "display_name": _display, "approved": True},
                             ))
+                            logger.debug(
+                                "[agent] dispatch (post-approval) %s keys=%s iter=%d",
+                                tc.name, list(tc.arguments or {}), iteration,
+                            )
                             result = await self.executor.execute_allowed(tc, user_id, callback=cb)
-                            await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
+                            _result_str = result if isinstance(result, str) else str(result)
+                            logger.debug(
+                                "[agent] %s (post-approval) -> len=%d",
+                                tc.name, len(_result_str),
+                            )
+                            await recorder.record_tool_result(tc.name, _result_str)
                             await cb.on_event(AgentEvent(
                                 "tool_result", _display,
                                 {
@@ -6719,7 +6810,12 @@ class Agent:
                         ).get("parameters", {})
                         try:
                             _r_json = json.dumps(_r_params, indent=2)[:1500]
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(
+                                "[agent] recovery schema json.dumps failed "
+                                "tool=%s error_type=%s error=%s",
+                                _r_name, type(e).__name__, e,
+                            )
                             _r_json = str(_r_params)[:1500]
                         _recovery_lines.append(
                             f"\nSchema for `{_r_name}`:\n"
@@ -6915,8 +7011,12 @@ class Agent:
                     if _delegate_registered and self.registry:
                         try:
                             self.registry.unregister("delegate")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(
+                                "[agent] delegate unregister failed (three-"
+                                "strikes path) error_type=%s error=%s",
+                                type(e).__name__, e,
+                            )
                     await cb.on_event(AgentEvent(
                         "done",
                         f"Three-strikes break on {_failed_tool}",
@@ -7188,8 +7288,12 @@ class Agent:
                         ))
                         if self._team_lead and _fg_task_id:
                             self._team_lead.update_phase(_fg_task_id, "observe")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(
+                            "[agent] observe-phase event/update_phase failed "
+                            "iter=%d error_type=%s error=%s",
+                            iteration, type(e).__name__, e,
+                        )
 
                     _last_result = _tool_results[-1] if _tool_results else None
 
@@ -7471,6 +7575,10 @@ class Agent:
                     )
                 )
         except asyncio.CancelledError:
+            logger.warning(
+                "[agent] loop cancelled at iter=%d user=%s",
+                iteration, user_id[:8],
+            )
             if self._team_lead and _fg_task_id:
                 self._team_lead.cancel(_fg_task_id)
             await cb.on_event(AgentEvent("done", "Cancelled", {}))
@@ -7498,8 +7606,11 @@ class Agent:
                 ))
                 if self._team_lead and _fg_task_id:
                     self._team_lead.update_phase(_fg_task_id, "reflect")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "[agent] reflect-phase event/update_phase failed "
+                    "error_type=%s error=%s", type(e).__name__, e,
+                )
             for _taor_v in range(_taor_verify_passes):
                 _taor_last = all_new_messages[-1]
                 _taor_final = _taor_last.content or ""
@@ -7613,8 +7724,12 @@ class Agent:
                                         "issues": list(_critic_result.last_issues),
                                     },
                                 ))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(
+                                    "[agent] critic event emit failed "
+                                    "error_type=%s error=%s",
+                                    type(e).__name__, e,
+                                )
             except Exception as _ce:
                 logger.warning("TAOR critic call failed (failing open): %s", _ce)
 

@@ -111,21 +111,30 @@ async def _telegram_send_with_retry(
         except telegram.error.BadRequest as exc:
             if plain_factory is not None:
                 logger.warning(
-                    "Telegram send BadRequest (%s) — retrying as plain text", exc,
+                    "[channel:telegram] send BadRequest (%s) — retrying as plain text",
+                    type(exc).__name__,
                 )
                 return await _telegram_send_with_retry(
                     plain_factory, max_retries=max_retries,
                 )
+            logger.warning(
+                "[channel:telegram] send failed BadRequest err=%s (no plain fallback)",
+                type(exc).__name__,
+            )
             raise
         except (telegram.error.NetworkError, telegram.error.TimedOut) as exc:
             if attempt < max_retries - 1:
                 delay = _SEND_RETRY_BASE_DELAY * (attempt + 1)
                 logger.warning(
-                    "Telegram send retry %d/%d: %s (waiting %.1fs)",
-                    attempt + 1, max_retries, exc, delay,
+                    "[channel:telegram] send retry %d/%d err=%s (waiting %.1fs)",
+                    attempt + 1, max_retries, type(exc).__name__, delay,
                 )
                 await asyncio.sleep(delay)
             else:
+                logger.warning(
+                    "[channel:telegram] send gave up after %d retries err=%s",
+                    max_retries, type(exc).__name__,
+                )
                 raise
 
 # Minimum seconds between Telegram message edits (rate limit protection)
@@ -1452,6 +1461,11 @@ class TelegramAdapter(ChannelAdapter):
         if media is None:
             return
 
+        # Read boundary: an audio message arrived. Never log the transcript.
+        logger.debug(
+            "[channel:telegram] direction=in kind=voice chat=%s", chat_id,
+        )
+
         ack = None
         try:
             ack = await update.message.reply_text("\U0001f399️ Listening…")
@@ -1558,7 +1572,12 @@ class TelegramAdapter(ChannelAdapter):
         # Resolve actual user_id from database — prefer explicit chat->user
         # binding set via /link so Telegram matches the Web UI session user.
         user_id = await resolve_user_id(self._config, chat_id=chat_id)
-        logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
+        # Read boundary: log chat/user id + message length ONLY. Never log the
+        # message text (E2E-encrypted content must not leak into server logs).
+        logger.info(
+            "[channel:telegram] direction=in chat=%s user=%s chars=%d",
+            chat_id, user_id[:8], len(text),
+        )
 
         # ── Bare-NL task router: cheap regex check at message-start
         # for "snooze X 2h", "postpone Y Friday", "complete Z",
@@ -2244,10 +2263,26 @@ class TelegramAdapter(ChannelAdapter):
         self, external_user_id: str, message: OutboundMessage,
     ) -> None:
         if self._app is None:
+            logger.warning(
+                "[channel:telegram] direction=out chat=%s status=not_started",
+                external_user_id,
+            )
             raise RuntimeError("Telegram adapter not started")
-        await self._app.bot.send_message(
-            chat_id=int(external_user_id), text=message.text,
+        # Log the send boundary: chat id + message length ONLY, never the body.
+        logger.debug(
+            "[channel:telegram] direction=out chat=%s chars=%d",
+            external_user_id, len(message.text or ""),
         )
+        try:
+            await self._app.bot.send_message(
+                chat_id=int(external_user_id), text=message.text,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[channel:telegram] direction=out chat=%s status=error err=%s",
+                external_user_id, type(exc).__name__,
+            )
+            raise
 
     @staticmethod
     async def verify_token(token: str) -> dict | None:
@@ -2261,5 +2296,13 @@ class TelegramAdapter(ChannelAdapter):
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("ok"):
+                    # Log authenticated result WITHOUT the token or bot handle.
+                    logger.debug(
+                        "[channel:telegram] token verify status=authenticated",
+                    )
                     return data["result"]
+        logger.warning(
+            "[channel:telegram] token verify status=not_authenticated http=%s",
+            resp.status_code,
+        )
         return None

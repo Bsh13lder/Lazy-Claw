@@ -113,6 +113,9 @@ async def list_threads(
     Returns ``{"threads": [...], "count": n}``.
     """
     if channel is not None and not _CHANNEL_PARAM_RE.match(channel):
+        logger.warning(
+            "[route:inbox] GET threads user=%s -> 400 invalid channel param", user.id,
+        )
         raise HTTPException(status_code=400, detail="invalid channel")
     threads = await thread_store.list_threads(config, user.id, channel=channel)
     return {"threads": threads, "count": len(threads)}
@@ -146,8 +149,20 @@ async def get_thread_changes(
         try:
             datetime.fromisoformat(since)
         except ValueError:
+            logger.warning(
+                "[route:inbox] GET threads/changes user=%s -> 400 invalid 'since' timestamp",
+                user.id,
+            )
             raise HTTPException(status_code=400, detail="invalid 'since' timestamp")
-    return await thread_store.get_thread_changes(config, user.id, since)
+    result = await thread_store.get_thread_changes(config, user.id, since)
+    logger.debug(
+        "[route:inbox] GET threads/changes user=%s since=%s -> threads=%d deleted=%d now=%s",
+        user.id, since,
+        len(result.get("threads") or []),
+        len(result.get("deleted") or []),
+        result.get("now"),
+    )
+    return result
 
 
 @router.get("/threads/{thread_id}/messages")
@@ -162,6 +177,10 @@ async def get_thread_messages(
     """
     thread = await thread_store.get_thread(config, user.id, thread_id)
     if thread is None:
+        logger.warning(
+            "[route:inbox] GET thread messages thread=%s user=%s -> 404 thread not found",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Thread not found")
 
     registry = _get_registry()
@@ -209,14 +228,26 @@ async def get_thread_media(
     the mobile app can render a playable voice note / photo inline.
     """
     if not _MESSAGE_ID_RE.match(message_id):
+        logger.warning(
+            "[route:inbox] GET media thread=%s user=%s -> 400 invalid message id",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=400, detail="invalid message id")
     if not _media_limiter.check(user.id):
+        logger.warning(
+            "[route:inbox] GET media thread=%s user=%s -> 429 rate limited",
+            thread_id, user.id,
+        )
         raise HTTPException(
             status_code=429, detail="Too many media downloads — wait a minute and retry."
         )
 
     thread = await thread_store.get_thread(config, user.id, thread_id)
     if thread is None:
+        logger.warning(
+            "[route:inbox] GET media thread=%s user=%s -> 404 thread not found",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Thread not found")
 
     registry = _get_registry()
@@ -287,13 +318,25 @@ async def reply_to_thread(
     Returns ``{"success": true, "mode": "<mode>"}`` (direct) or
     ``{"success": true, "conversation_id": "<id>", "mode": "ai"}`` (ai).
     """
+    logger.debug(
+        "[route:inbox] POST reply thread=%s user=%s mode=%s",
+        thread_id, user.id, body.mode,
+    )
     if not _reply_limiter.check(user.id):
+        logger.warning(
+            "[route:inbox] POST reply thread=%s user=%s -> 429 rate limited",
+            thread_id, user.id,
+        )
         raise HTTPException(
             status_code=429, detail="Too many sends — wait a minute and retry."
         )
 
     thread = await thread_store.get_thread(config, user.id, thread_id)
     if thread is None:
+        logger.warning(
+            "[route:inbox] POST reply thread=%s user=%s -> 404 thread not found",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Thread not found")
 
     if body.mode == "ai":
@@ -301,6 +344,10 @@ async def reply_to_thread(
         try:
             from lazyclaw.comms import conversation_runner  # noqa: PLC0415
         except ImportError:
+            logger.warning(
+                "[route:inbox] POST reply thread=%s user=%s -> 503 conversation_runner unavailable",
+                thread_id, user.id,
+            )
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -319,11 +366,19 @@ async def reply_to_thread(
                 goal=body.text,
             )
         except ValueError:
+            logger.warning(
+                "[route:inbox] POST reply(ai) thread=%s user=%s -> 400 channel unsupported",
+                thread_id, user.id,
+            )
             raise HTTPException(
                 status_code=400,
                 detail="AI replies are not supported on this channel.",
             )
         except RuntimeError:
+            logger.warning(
+                "[route:inbox] POST reply(ai) thread=%s user=%s -> 503 runtime unavailable",
+                thread_id, user.id,
+            )
             raise HTTPException(
                 status_code=503,
                 detail="AI conversation mode needs the agent runtime — try again shortly.",
@@ -361,6 +416,10 @@ async def put_thread_instruction(
         config, user.id, thread_id, body.instruction,
     )
     if not ok:
+        logger.warning(
+            "[route:inbox] PUT thread instruction thread=%s user=%s -> 404 thread not found",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Thread not found")
     return {"success": True, "thread_id": thread_id}
 
@@ -387,6 +446,10 @@ async def put_thread_contact_name(
     the unified contact store, and creates a [[Name]] LazyBrain page."""
     thread = await thread_store.get_thread(config, user.id, thread_id)
     if thread is None:
+        logger.warning(
+            "[route:inbox] PUT thread contact thread=%s user=%s -> 404 thread not found",
+            thread_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="Thread not found")
 
     from lazyclaw.comms import contact_naming
@@ -396,6 +459,10 @@ async def put_thread_contact_name(
             config, user.id, thread, body.name,
         )
     except ValueError as e:
+        logger.warning(
+            "[route:inbox] PUT thread contact thread=%s user=%s -> 400: %s",
+            thread_id, user.id, e,
+        )
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, **result}
 
@@ -405,6 +472,7 @@ async def put_thread_contact_name(
 
 def _validated_channel(channel: str) -> str:
     if not _CHANNEL_PARAM_RE.match(channel):
+        logger.warning("[route:inbox] channel-instruction -> 400 invalid channel param")
         raise HTTPException(status_code=400, detail="invalid channel")
     return channel
 
@@ -423,6 +491,9 @@ async def get_channel_instruction(
             config, user.id, _validated_channel(channel),
         )
     except ValueError as e:
+        logger.warning(
+            "[route:inbox] GET channel instruction user=%s -> 400: %s", user.id, e,
+        )
         raise HTTPException(status_code=400, detail=str(e))
     return result or {"channel": channel, "instruction": None}
 
@@ -443,6 +514,9 @@ async def put_channel_instruction(
             config, user.id, _validated_channel(channel), body.instruction,
         )
     except ValueError as e:
+        logger.warning(
+            "[route:inbox] PUT channel instruction user=%s -> 400: %s", user.id, e,
+        )
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, **result}
 
@@ -461,5 +535,8 @@ async def delete_channel_instruction(
             config, user.id, _validated_channel(channel),
         )
     except ValueError as e:
+        logger.warning(
+            "[route:inbox] DELETE channel instruction user=%s -> 400: %s", user.id, e,
+        )
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": removed}

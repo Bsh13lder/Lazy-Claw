@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/task.dart';
@@ -548,6 +549,12 @@ class TaskDao {
         healed++;
       }
     });
+    if (orphanRows.isNotEmpty || healed > 0) {
+      debugPrint(
+        'TaskDao.reenqueueOrphanedCreates: ${orphanRows.length} orphan '
+        'candidate(s) scanned, re-enqueued $healed stranded create(s)',
+      );
+    }
     return healed;
   }
 
@@ -693,6 +700,9 @@ class TaskDao {
       'payload': jsonEncode(payload),
       'created_at': createdAt,
     });
+    debugPrint(
+      'TaskDao: queued outbox op=$op entity=$kTaskEntity id=$entityId',
+    );
   }
 
   /// Translate a server field-patch (snake_case keys) into column updates.

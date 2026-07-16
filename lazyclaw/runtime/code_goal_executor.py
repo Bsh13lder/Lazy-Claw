@@ -160,7 +160,7 @@ async def dispatch_code_goal(goal: Goal) -> None:
     team_lead = _DEFAULT_TEAM_LEAD
     if cfg is None or registry is None or eco_router is None:
         logger.warning(
-            "code_goal_executor: runtime not registered — goal %s stays in "
+            "[codegoal] runtime not registered — goal=%s stays in "
             "EXECUTING with no dispatch. Call register_runtime() from app.py.",
             goal.id,
         )
@@ -180,6 +180,11 @@ async def dispatch_code_goal(goal: Goal) -> None:
     instruction = _compose_code_instruction(
         goal, additional_instruction=continuation,
     )
+    logger.debug(
+        "[codegoal] dispatch goal=%s mode=%s prior_session=%s",
+        goal.id, "continuation" if continuation is not None else "fresh",
+        goal.code_session_id[:8] if goal.code_session_id else None,
+    )
 
     # Use the goal_id itself as the task_id for trivial cross-reference:
     # CodeSpecialist.tsx already groups by project_tag and shows the
@@ -195,13 +200,21 @@ async def dispatch_code_goal(goal: Goal) -> None:
         try:
             executor = GoalExecutor(cfg, GoalRepository(cfg))
             await executor.set_code_session_id(goal.user_id, goal.id, sid)
+            logger.debug(
+                "[codegoal] session id latched goal=%s session=%s",
+                goal.id, sid[:8] if sid else sid,
+            )
         except Exception:
             logger.exception(
-                "code_goal_executor: set_code_session_id failed for goal %s",
-                goal.id,
+                "[codegoal] set_code_session_id failed goal=%s user=%s",
+                goal.id, goal.user_id,
             )
 
     async def _run_and_finalize() -> None:
+        logger.debug(
+            "[codegoal] run_specialist starting goal=%s task=%s resume=%s",
+            goal.id, task_id, bool(goal.code_session_id),
+        )
         try:
             result = await run_specialist(
                 user_id=goal.user_id,
@@ -218,7 +231,10 @@ async def dispatch_code_goal(goal: Goal) -> None:
                 on_session_id=_on_session_id,
             )
         except Exception as exc:
-            logger.exception("code_goal_executor: specialist crashed for goal %s", goal.id)
+            logger.exception(
+                "[codegoal] specialist crashed goal=%s task=%s error_type=%s",
+                goal.id, task_id, type(exc).__name__,
+            )
             await _safe_mark_failed(cfg, goal, f"specialist crashed: {exc!s}")
             return
 
@@ -253,8 +269,8 @@ async def dispatch_code_goal(goal: Goal) -> None:
                     team_lead.fail(task_id, error=result.error or "")
             except Exception:
                 logger.debug(
-                    "code_goal_executor: team_lead mirror failed",
-                    exc_info=True,
+                    "[codegoal] team_lead mirror failed goal=%s task=%s",
+                    goal.id, task_id, exc_info=True,
                 )
 
         # P1: Code goals are multi-turn. A successful turn does NOT
@@ -265,11 +281,19 @@ async def dispatch_code_goal(goal: Goal) -> None:
         # Failures still go to BLOCKED so the user can unblock + continue
         # (mark_blocked is the existing retry-friendly transition).
         if result.success:
+            logger.debug(
+                "[codegoal] run_specialist succeeded goal=%s task=%s files=%d",
+                goal.id, task_id, len(result.files_touched or ()),
+            )
             await _safe_touch_progress(
                 cfg, goal,
                 f"turn complete — files: {len(result.files_touched or ())}",
             )
         else:
+            logger.warning(
+                "[codegoal] run_specialist failed goal=%s task=%s",
+                goal.id, task_id,
+            )
             await _safe_mark_failed(cfg, goal, result.error or "specialist failed")
 
     # Register with team_lead so the Code Specialist page sees a card
@@ -289,8 +313,8 @@ async def dispatch_code_goal(goal: Goal) -> None:
             )
         except Exception:
             logger.debug(
-                "code_goal_executor: team_lead.register failed",
-                exc_info=True,
+                "[codegoal] team_lead.register failed goal=%s task=%s",
+                goal.id, task_id, exc_info=True,
             )
 
     _bg = asyncio.create_task(_run_and_finalize(), name=f"code-goal-{goal.id[:8]}")
@@ -311,8 +335,12 @@ async def _safe_mark_done(config: Config, goal: Goal, result: str) -> None:
     try:
         executor = GoalExecutor(config, GoalRepository(config))
         await executor.mark_done(goal.user_id, goal.id)
+        logger.debug("[codegoal] mark_done succeeded goal=%s", goal.id)
     except Exception:
-        logger.exception("code_goal_executor: mark_done failed for goal %s", goal.id)
+        logger.exception(
+            "[codegoal] mark_done failed goal=%s user=%s",
+            goal.id, goal.user_id,
+        )
 
 
 async def _safe_touch_progress(config: Config, goal: Goal, note: str) -> None:
@@ -327,6 +355,10 @@ async def _safe_touch_progress(config: Config, goal: Goal, note: str) -> None:
         repo = GoalRepository(config)
         current = await repo.get(goal.user_id, goal.id)
         if current is None:
+            logger.debug(
+                "[codegoal] touch_progress no-op: goal=%s not found",
+                goal.id,
+            )
             return
         await repo.update(replace(
             current,
@@ -335,7 +367,8 @@ async def _safe_touch_progress(config: Config, goal: Goal, note: str) -> None:
         ))
     except Exception:
         logger.exception(
-            "code_goal_executor: touch_progress failed for goal %s", goal.id,
+            "[codegoal] touch_progress failed goal=%s user=%s",
+            goal.id, goal.user_id,
         )
 
 
@@ -347,8 +380,12 @@ async def _safe_mark_failed(config: Config, goal: Goal, reason: str) -> None:
     try:
         executor = GoalExecutor(config, GoalRepository(config))
         await executor.mark_blocked(goal.user_id, goal.id, reason[:500])
+        logger.debug("[codegoal] mark_blocked succeeded goal=%s", goal.id)
     except Exception:
-        logger.exception("code_goal_executor: mark_blocked failed for goal %s", goal.id)
+        logger.exception(
+            "[codegoal] mark_blocked failed goal=%s user=%s",
+            goal.id, goal.user_id,
+        )
 
 
 # ── Register at import time ─────────────────────────────────────────

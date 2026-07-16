@@ -500,7 +500,7 @@ async def run_tab_health_cycle(
             anchored_target_ids=anchored_ids,
         )
 
-    return {
+    summary = {
         "tabs_scanned": tabs_scanned,
         "idle_closed": idle_closed,
         "cap_closed": cap_closed,
@@ -508,3 +508,10 @@ async def run_tab_health_cycle(
         "anchored_hosts": sorted(anchored_hosts),
         "anchored_target_ids": sorted(anchored_ids),
     }
+    logger.debug(
+        "[reaper] cycle done scanned=%d idle_closed=%d cap_closed=%d "
+        "blanks_refreshed=%d cap=%d anchored_hosts=%d anchored_ids=%d",
+        tabs_scanned, idle_closed, cap_closed, blanks_refreshed, max_tabs,
+        len(anchored_hosts), len(anchored_ids),
+    )
+    return summary

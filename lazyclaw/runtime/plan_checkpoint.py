@@ -195,15 +195,24 @@ async def request_clarification(
     _pending_q[user_id] = pending
 
     _publish_question_event(user_id, question)
+    logger.debug(
+        "[checkpoint] clarification requested for user %s (timeout=%.0fs)",
+        user_id, timeout,
+    )
 
     try:
         await asyncio.wait_for(pending.event.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         pending.answer = None
+        logger.debug("[checkpoint] clarification TIMED OUT for user %s", user_id)
     finally:
         if _pending_q.get(user_id) is pending:
             _pending_q.pop(user_id, None)
 
+    logger.debug(
+        "[checkpoint] clarification resolved for user %s answered=%s",
+        user_id, pending.answer is not None,
+    )
     return pending.answer
 
 
@@ -211,18 +220,31 @@ def answer_clarification(user_id: str, answer: str) -> bool:
     """Release the pending question with the user's typed answer."""
     pending = _pending_q.get(user_id)
     if pending is None or pending.event.is_set():
+        logger.debug(
+            "[checkpoint] answer_clarification() no-op for user %s (no pending)",
+            user_id,
+        )
         return False
     pending.answer = (answer or "").strip() or None
     pending.event.set()
+    logger.debug(
+        "[checkpoint] answer_clarification() released for user %s answered=%s",
+        user_id, pending.answer is not None,
+    )
     return True
 
 
 def cancel_clarification(user_id: str) -> bool:
     pending = _pending_q.get(user_id)
     if pending is None or pending.event.is_set():
+        logger.debug(
+            "[checkpoint] cancel_clarification() no-op for user %s (no pending)",
+            user_id,
+        )
         return False
     pending.answer = None
     pending.event.set()
+    logger.debug("[checkpoint] cancel_clarification() released for user %s", user_id)
     return True
 
 
@@ -248,11 +270,16 @@ def approve(
     """Release the pending plan with approval. Returns True if released."""
     pending = _pending.get(user_id)
     if pending is None or pending.event.is_set():
+        logger.debug(
+            "[checkpoint] approve() no-op for user %s (no pending or already released)",
+            user_id,
+        )
         return False
     pending.decision = PlanDecision(
         True, reason, auto_approve_session=auto_approve_session,
     )
     pending.event.set()
+    logger.debug("[checkpoint] approve() released pending plan for user %s", user_id)
     return True
 
 
@@ -260,9 +287,14 @@ def reject(user_id: str, reason: Optional[str] = None) -> bool:
     """Release the pending plan with rejection."""
     pending = _pending.get(user_id)
     if pending is None or pending.event.is_set():
+        logger.debug(
+            "[checkpoint] reject() no-op for user %s (no pending or already released)",
+            user_id,
+        )
         return False
     pending.decision = PlanDecision(False, reason or "rejected by user")
     pending.event.set()
+    logger.debug("[checkpoint] reject() released pending plan for user %s", user_id)
     return True
 
 

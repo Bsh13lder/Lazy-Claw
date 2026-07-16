@@ -308,7 +308,12 @@ async def delete_template(config: Config, user_id: str, tpl_id: str) -> bool:
             (tpl_id, user_id),
         )
         await db.commit()
-        return (cursor.rowcount or 0) > 0
+        deleted = (cursor.rowcount or 0) > 0
+    logger.info(
+        "[browser] template delete id=%s user=%s deleted=%s",
+        tpl_id, user_id, deleted,
+    )
+    return deleted
 
 
 # ── Auto-save: host lookup + upsert ───────────────────────────────────────
@@ -390,6 +395,10 @@ async def upsert_by_host(
             config, user_id, tpl["id"],
             run_count=1, success_count=1, last_run_at=now,
         ) or tpl
+        logger.info(
+            "[browser] template upsert host=%s user=%s action=created id=%s",
+            (host or "?").lower(), user_id, tpl.get("id"),
+        )
         return tpl, True
 
     fields: dict = {
@@ -409,6 +418,11 @@ async def upsert_by_host(
         fields["checkpoints"] = merged_cps
 
     tpl = await update_template(config, user_id, existing["id"], **fields)
+    logger.info(
+        "[browser] template upsert host=%s user=%s action=updated id=%s run_count=%d",
+        (host or "?").lower(), user_id, existing.get("id"),
+        fields.get("run_count", 0),
+    )
     return tpl or existing, False
 
 

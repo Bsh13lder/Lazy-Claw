@@ -6,8 +6,11 @@ before hitting HTTP 429. Each provider has independent counters.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,9 @@ class RateLimiter:
     def set_minimax_tier(self, tier: str) -> None:
         """Configure MiniMax 5-hour cap from Token Plan tier name."""
         cap = MINIMAX_TIER_LIMITS.get(tier.lower().strip(), MINIMAX_TIER_LIMITS["plus"])
+        logger.debug(
+            "[llm] rate limiter: minimax tier=%r → 5h cap=%d req", tier, cap,
+        )
         self.set_provider_limit("minimax", ProviderLimits(requests_per_5h=cap))
 
     def has_capacity(self, provider: str) -> bool:
@@ -193,6 +199,11 @@ class RateLimiter:
         if fivehour and fivehour.max_count > 0:
             fivehour._prune(now)
             remaining = fivehour.max_count - len(fivehour.timestamps)
+            logger.warning(
+                "[llm] rate-limit hit for provider=%s — saturating 5h window "
+                "(%d slots) to block retries until it opens",
+                provider, remaining,
+            )
             for _ in range(remaining):
                 fivehour.record(now)
             return
@@ -200,6 +211,11 @@ class RateLimiter:
         if minute and minute.max_count > 0:
             minute._prune(now)
             remaining = minute.max_count - len(minute.timestamps)
+            logger.warning(
+                "[llm] rate-limit hit for provider=%s — saturating 1m window "
+                "(%d slots) to block retries",
+                provider, remaining,
+            )
             for _ in range(remaining):
                 minute.record(now)
 

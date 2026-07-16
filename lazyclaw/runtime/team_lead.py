@@ -7,10 +7,13 @@ Lives for the session lifetime (in-memory only, resets on restart).
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+
+logger = logging.getLogger(__name__)
 
 
 # ── Status query detection ────────────────────────────────────────────
@@ -118,7 +121,11 @@ class TeamLead:
         try:
             self._event_publisher(user_id, event)
         except Exception:
-            pass
+            logger.debug(
+                "[teamlead] event publish failed: type=%s task_id=%s user=%s",
+                event.get("type"), event.get("task_id"),
+                user_id[:8] if user_id else "", exc_info=True,
+            )
 
     # ── Registration ──────────────────────────────────────────────
 
@@ -153,6 +160,10 @@ class TeamLead:
             self._cancel_tokens[task_id] = cancel_token
         if user_id:
             self._task_users[task_id] = user_id
+        logger.debug(
+            "[teamlead] register task=%s name=%s lane=%s user=%s goal_id=%s",
+            task_id, name, lane, user_id[:8] if user_id else "", goal_id,
+        )
         self._publish(user_id, {
             "type": "task_started",
             "task_id": task_id,
@@ -177,6 +188,10 @@ class TeamLead:
                 current_tool=step_name,
                 recent_tools=tuple(recent),
             )
+            logger.debug(
+                "[teamlead] step task=%s tool=%s step_count=%d",
+                task_id, step_name, task.step_count + 1,
+            )
             self._publish(self._task_users.get(task_id, ""), {
                 "type": "task_step",
                 "task_id": task_id,
@@ -189,6 +204,7 @@ class TeamLead:
         task = self._active.get(task_id)
         if task is not None:
             self._active[task_id] = replace(task, phase=phase)
+            logger.debug("[teamlead] phase task=%s phase=%s", task_id, phase)
             self._publish(self._task_users.get(task_id, ""), {
                 "type": "task_phase",
                 "task_id": task_id,
@@ -238,6 +254,10 @@ class TeamLead:
                 files_touched=files_touched or task.files_touched,
                 short_description=short_description or task.short_description,
             ))
+            logger.debug(
+                "[teamlead] complete task=%s name=%s lane=%s result_len=%d",
+                task_id, task.name, task.lane, len(full),
+            )
             self._publish(uid, {
                 "type": "task_completed",
                 "task_id": task_id,
@@ -259,6 +279,10 @@ class TeamLead:
                 current_tool="",
                 phase="",
             ))
+            logger.debug(
+                "[teamlead] fail task=%s name=%s lane=%s error=%s",
+                task_id, task.name, task.lane, error[:200],
+            )
             self._publish(uid, {
                 "type": "task_completed",
                 "task_id": task_id,
@@ -280,6 +304,10 @@ class TeamLead:
                 current_tool="",
                 phase="",
             ))
+            logger.debug(
+                "[teamlead] cancel task=%s name=%s lane=%s",
+                task_id, task.name, task.lane,
+            )
             self._publish(uid, {
                 "type": "task_completed",
                 "task_id": task_id,
@@ -294,14 +322,27 @@ class TeamLead:
         supplied (prevents cross-user cancel).
         """
         if user_id and self._task_users.get(task_id, "") != user_id:
+            logger.debug(
+                "[teamlead] request_cancel denied task=%s reason=user_mismatch",
+                task_id,
+            )
             return False
         token = self._cancel_tokens.get(task_id)
         if token is None:
+            logger.debug(
+                "[teamlead] request_cancel denied task=%s reason=no_token",
+                task_id,
+            )
             return False
         try:
             token.cancel()
+            logger.debug("[teamlead] request_cancel fired task=%s", task_id)
             return True
         except Exception:
+            logger.warning(
+                "[teamlead] request_cancel token.cancel() failed for task=%s",
+                task_id, exc_info=True,
+            )
             return False
 
     @property

@@ -123,6 +123,11 @@ def detect_knowledge_gap(
     if not (phrase_hit or repeat_hit):
         return False, ""
 
+    logger.debug(
+        "[recall] knowledge gap detected phrase_hit=%s repeat_hit=%s",
+        phrase_hit, repeat_hit,
+    )
+
     # Query: prefer the user message (what they want), fall back to last
     # sentence of the assistant (what the brain was confused about).
     query = (user_message or "").strip() or last
@@ -151,6 +156,7 @@ async def build_recall_block(
             config, user_id, gap_query, k=5, min_similarity=0.0,
         )
         results = sem.get("results") or []
+        logger.debug("[recall] semantic_search hits=%d", len(results))
         if results:
             parts.append("### From your second brain (LazyBrain)")
             for n in results[:5]:
@@ -158,7 +164,7 @@ async def build_recall_block(
                 snippet = (n.get("content") or "").strip().splitlines()[0][:160]
                 parts.append(f"- **{title}** — {snippet}")
     except Exception:
-        logger.debug("self_recall: semantic_search failed", exc_info=True)
+        logger.warning("[recall] semantic_search failed", exc_info=True)
 
     # Lane 2: personal_memory keyword overlap (top 5)
     try:
@@ -178,15 +184,19 @@ async def build_recall_block(
                     scored.append((overlap, m))
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[:5]
+            logger.debug(
+                "[recall] personal_memory pool=%d matched=%d", len(pool), len(top),
+            )
             if top:
                 parts.append("### From your personal memory")
                 for _, m in top:
                     snippet = (m.get("content") or "").strip().splitlines()[0][:200]
                     parts.append(f"- {snippet}")
     except Exception:
-        logger.debug("self_recall: get_memories failed", exc_info=True)
+        logger.warning("[recall] get_memories failed", exc_info=True)
 
     if not parts:
+        logger.debug("[recall] build_recall_block: no findings, returning None")
         return None
 
     header = (
@@ -195,4 +205,5 @@ async def build_recall_block(
         "something. The user's own data below is likely the answer. "
         "Use it directly — do NOT ask the user to repeat themselves.\n"
     )
+    logger.debug("[recall] build_recall_block: parts=%d", len(parts))
     return header + "\n".join(parts)

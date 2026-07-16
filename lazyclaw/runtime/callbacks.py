@@ -90,6 +90,10 @@ class MultiCallback:
                 cb.cancel_token = token
 
     async def on_event(self, event: AgentEvent) -> None:
+        _null_logger.debug(
+            "[callbacks] MultiCallback on_event kind=%s fanout=%d",
+            event.kind, len(self._callbacks),
+        )
         for cb in self._callbacks:
             try:
                 await cb.on_event(event)
@@ -102,6 +106,10 @@ class MultiCallback:
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
+        _null_logger.debug(
+            "[callbacks] MultiCallback on_approval_request skill=%s fanout=%d",
+            skill_name, len(self._callbacks),
+        )
         for cb in self._callbacks:
             try:
                 if await cb.on_approval_request(skill_name, arguments):
@@ -168,6 +176,10 @@ class StepTrackingCallback:
             self._inner.cancel_token = token
 
     async def on_event(self, event: AgentEvent) -> None:
+        _null_logger.debug(
+            "[callbacks] StepTrackingCallback on_event kind=%s task=%s",
+            event.kind, self._task_id,
+        )
         if event.kind == "specialist_tool":
             tool_name = (
                 event.metadata.get("tool", event.detail)
@@ -258,6 +270,10 @@ class SilentSubagentCallback:
         # All other events (token, tool_call, tool_result, specialist_*,
         # thinking_delta, done, …) are intentionally dropped — they would
         # otherwise leak into the foreground chat stream.
+        _null_logger.debug(
+            "[callbacks] SilentSubagentCallback dropped event kind=%s task=%s",
+            kind, self._task_id,
+        )
 
     async def on_approval_request(self, skill_name: str, arguments: dict) -> bool:
         _null_logger.debug(

@@ -47,9 +47,16 @@ class ForegroundSyncScheduler with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      debugPrint(
+        'ForegroundSync: app resumed — triggering sync + re-arming '
+        '${_interval.inMinutes}m timer',
+      );
       _onSync();
       _arm();
     } else {
+      debugPrint(
+        'ForegroundSync: app $state — cancelling periodic sync timer',
+      );
       _timer?.cancel();
     }
   }

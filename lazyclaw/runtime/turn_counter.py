@@ -11,7 +11,10 @@ auto-promotion. No data loss, no migration.
 """
 from __future__ import annotations
 
+import logging
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 QUIET_TURNS_FOR_VERIFY = 3
 
@@ -32,12 +35,20 @@ def advance_turn(user_id: str) -> int:
     with _lock:
         new_value = _turns.get(user_id, 0) + 1
         _turns[user_id] = new_value
+        logger.debug(
+            "[turncount] advance user=%s turn=%d",
+            user_id[:8] if user_id else None, new_value,
+        )
         return new_value
 
 
 def reset_for_test() -> None:
     """Test-only — wipe every counter. Production code never calls this."""
     with _lock:
+        logger.warning(
+            "[turncount] reset_for_test called — clearing %d counter(s) "
+            "(should only happen in tests)", len(_turns),
+        )
         _turns.clear()
 
 

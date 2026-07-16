@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/note.dart';
@@ -578,6 +579,9 @@ class NoteDao {
       'payload': jsonEncode(payload),
       'created_at': createdAt,
     });
+    debugPrint(
+      'NoteDao: queued outbox op=$op entity=$kNoteEntity id=$entityId',
+    );
   }
 
   Note _noteFromRow(Map<String, Object?> row) => Note(

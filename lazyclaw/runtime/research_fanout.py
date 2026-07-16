@@ -233,18 +233,33 @@ async def gather_specialist_research(
         ))
 
     if not lanes:
+        logger.debug("[research] fan-out: no lanes available (want_code=%s want_web=%s)", want_code, want_web)
         return ""
+
+    logger.debug(
+        "[research] fan-out dispatched: %d lane(s)=%s user=%s",
+        len(lanes), [kind for kind, _ in lanes], user_id[:8] if user_id else "",
+    )
 
     # Run every lane concurrently. Lane wrappers already swallow their own
     # errors (returning None), so gather never raises here.
     results = await asyncio.gather(*(coro for _, coro in lanes))
 
     parts: list[str] = []
+    found_lanes = 0
     for (kind, _), result in zip(lanes, results):
         finding = _lane_finding(result)
         if finding:
+            found_lanes += 1
             parts.append(f"### {kind}")
             parts.append(finding)
+
+    plan_gate_fed = bool(parts)
+    logger.debug(
+        "[research] fan-out settled: %d/%d lane(s) yielded findings, "
+        "plan_gate_fed=%s",
+        found_lanes, len(lanes), plan_gate_fed,
+    )
 
     if not parts:
         return ""

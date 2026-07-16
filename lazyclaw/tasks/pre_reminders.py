@@ -123,4 +123,9 @@ async def resolve_pre_reminders(
         dt = parse_offset_against(entry, base) or parse_iso_datetime(entry)
         if dt and now < dt < base:
             out.append(dt.isoformat())
-    return sorted(set(out))
+    resolved = sorted(set(out))
+    logger.debug(
+        "[tasks] pre_reminders resolved user=%s offsets=%d resolved=%d",
+        user_id, len(raw), len(resolved),
+    )
+    return resolved

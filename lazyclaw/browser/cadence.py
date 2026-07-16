@@ -181,6 +181,10 @@ def get_cadence(
     base = DOMAIN_OVERRIDES.get(base_key, DEFAULT) if base_key else DEFAULT
 
     if not user_overrides:
+        logger.debug(
+            "[cadence] domain=%s base=%s user_override=no",
+            domain_norm or "?", base_key or "default",
+        )
         return base
 
     # Exact-then-suffix lookup over the user's keys, normalizing as we go.
@@ -195,7 +199,15 @@ def get_cadence(
                 factors = user_keys_norm[key]
                 break
     if not factors:
+        logger.debug(
+            "[cadence] domain=%s base=%s user_override=none-matched",
+            domain_norm or "?", base_key or "default",
+        )
         return base
+    logger.debug(
+        "[cadence] domain=%s base=%s user_override=applied fields=%d",
+        domain_norm or "?", base_key or "default", len(factors),
+    )
     return base.with_factors(factors)
 
 

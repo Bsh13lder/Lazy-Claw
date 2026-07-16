@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/api/api_exceptions.dart';
 import '../local/budgets_dao.dart';
@@ -108,13 +109,21 @@ class BudgetsSync {
     // reserva-1000 dropped by an outage or parent-404) is no longer excluded
     // from the self-heal below. Routine syncs pass false, keeping the markers.
     if (retryRejected) {
-      await _dao.clearCreateRejectedConflicts();
+      final cleared = await _dao.clearCreateRejectedConflicts();
+      debugPrint(
+        'BudgetsSync.sync: force-retry cleared $cleared create_rejected marker(s)',
+      );
     }
     // Self-heal any stranded offline creates (ops that were dead-lettered or
     // silently drained by an older build) BEFORE draining, so the reserva-1000
     // class of orphan — a dirty cache row with no outbox op — re-pushes this
     // run instead of living on-device forever, invisible to the server.
-    await _dao.reenqueueOrphanedCreates();
+    final healed = await _dao.reenqueueOrphanedCreates();
+    if (healed > 0) {
+      debugPrint(
+        'BudgetsSync.sync: self-heal re-enqueued $healed stranded create(s)',
+      );
+    }
     final pushResult = await push();
     final pullResult = await pull();
     return BudgetsSyncResult(
@@ -141,12 +150,22 @@ class BudgetsSync {
     // client `updated_at` for LWW); the rest are no-op'd (just dequeued). Both
     // projects and expenses support `update`, and each is keyed by its own id.
     final coalesced = _coalesceUpdates(queue);
+    if (queue.isNotEmpty) {
+      debugPrint(
+        'BudgetsSync.push: draining outbox — ${queue.length} op(s), '
+        '${coalesced.skipSeqs.length} coalesced',
+      );
+    }
 
     var pushed = 0;
     for (final item in queue) {
       try {
         // Skipped duplicate update rows: just dequeue, no network call.
         if (coalesced.skipSeqs.contains(item.seq)) {
+          debugPrint(
+            'BudgetsSync.push: coalesced-skip seq=${item.seq} op=${item.op} '
+            'entity=${item.entity} id=${item.entityId}',
+          );
           await _dao.deleteOutboxItem(item.seq);
           continue;
         }
@@ -160,18 +179,29 @@ class BudgetsSync {
           // / hard-remove tombstone) so a crash can't split the two writes.
           await _dao.commitPush(item.seq, item.entity, item.entityId);
           pushed++;
+          debugPrint(
+            'BudgetsSync.push: pushed seq=${item.seq} op=${item.op} '
+            'entity=${item.entity} id=${item.entityId}',
+          );
         }
         // A drained-but-not-committed item (definitive 4xx, or a dead-lettered
         // 5xx poison) has already had its outbox row removed inside the failure
         // classifier; we leave its cache row dirty so the NEXT pull restores
         // server truth — never silently dropping the user's edit.
       } on _PushInterrupted catch (e) {
+        debugPrint(
+          'BudgetsSync.push: interrupted after $pushed pushed — remaining '
+          'outbox op(s) preserved for next sync: ${e.cause}',
+        );
         return BudgetsSyncResult(
           pushed: pushed,
           pushInterrupted: true,
           error: e.cause,
         );
       }
+    }
+    if (queue.isNotEmpty) {
+      debugPrint('BudgetsSync.push: drain complete — $pushed pushed');
     }
     return BudgetsSyncResult(pushed: pushed);
   }
@@ -283,6 +313,10 @@ class BudgetsSync {
   ///   * other 4xx → drain the outbox row (return false; next pull restores it).
   Future<bool> _classifyPushFailure(BudgetsOutboxItem item, Object e) async {
     if (_isNetworkError(e)) {
+      debugPrint(
+        'BudgetsSync.push: network/transport failure op=${item.op} '
+        'entity=${item.entity} id=${item.entityId} — stop drain, keep queue: $e',
+      );
       throw _PushInterrupted(e);
     }
     final api = _asApiError(e);
@@ -292,6 +326,10 @@ class BudgetsSync {
     // Return true so the caller commits (removes the outbox row AND hard-removes
     // the local tombstone) and counts it as pushed.
     if (status == 404 && item.op == BudgetsOutboxOp.delete) {
+      debugPrint(
+        'BudgetsSync.push: HTTP 404 on ${item.op} entity=${item.entity} '
+        'id=${item.entityId} — idempotent success',
+      );
       return true;
     }
 
@@ -305,6 +343,10 @@ class BudgetsSync {
     // child on the very first failure — this is the reserva-1000 data-loss fix.
     // A definitively-unresolvable 404 still bounds out and logs a conflict.
     if (status == 404 && item.op == BudgetsOutboxOp.create) {
+      debugPrint(
+        'BudgetsSync.push: HTTP 404 on CREATE entity=${item.entity} '
+        'id=${item.entityId} — parent missing server-side, retry-or-deadletter',
+      );
       return _retryOrDeadLetter(item, e, logRejectionOnDeadLetter: true);
     }
 
@@ -323,12 +365,22 @@ class BudgetsSync {
       // BEFORE draining so the UI / next sync can surface the rejection.
       if (item.op == BudgetsOutboxOp.create) {
         await _logCreateRejected(item, status);
+      } else {
+        debugPrint(
+          'BudgetsSync.push: definitive HTTP $status op=${item.op} '
+          'entity=${item.entity} id=${item.entityId} — draining outbox row '
+          '(next pull restores truth)',
+        );
       }
       await _dao.deleteOutboxItem(item.seq);
       return false; // drained
     }
 
     // Unknown shape with no usable status → treat as network-ish and keep it.
+    debugPrint(
+      'BudgetsSync.push: unclassifiable failure op=${item.op} '
+      'entity=${item.entity} id=${item.entityId} — keeping queued: $e',
+    );
     throw _PushInterrupted(e);
   }
 
@@ -352,9 +404,17 @@ class BudgetsSync {
         final status = _asApiError(e)?.status ?? _statusOf(e) ?? 0;
         await _logCreateRejected(item, status);
       }
+      debugPrint(
+        'BudgetsSync.push: dead-lettered op=${item.op} entity=${item.entity} '
+        'id=${item.entityId} after $attempts attempt(s)',
+      );
       await _dao.deadLetterOutboxItem(item.seq);
       return false; // drained the poison item; local stays dirty for next pull
     }
+    debugPrint(
+      'BudgetsSync.push: retryable failure op=${item.op} entity=${item.entity} '
+      'id=${item.entityId} attempt=$attempts — keeping queued',
+    );
     throw _PushInterrupted(e);
   }
 
@@ -380,6 +440,10 @@ class BudgetsSync {
       field: 'create_rejected',
       local: 'HTTP $status — $descriptor',
       server: null, // create never landed → no server value
+    );
+    debugPrint(
+      'BudgetsSync.push: CREATE rejected HTTP $status entity=${item.entity} '
+      'id=${item.entityId} — conflict logged, cache stays dirty',
     );
   }
 
@@ -466,10 +530,14 @@ class BudgetsSync {
   /// returns `pullFailed: true` and leaves the cursor untouched.
   Future<BudgetsSyncResult> pull() async {
     final cursor = await _dao.getCursor();
+    debugPrint('BudgetsSync.pull: fetching changes since cursor=$cursor');
     BudgetChanges changes;
     try {
       changes = await _repo.fetchChanges(since: cursor);
     } catch (e) {
+      debugPrint(
+        'BudgetsSync.pull: fetchChanges failed — cursor unchanged: $e',
+      );
       return BudgetsSyncResult(pullFailed: true, error: e);
     }
 
@@ -522,6 +590,10 @@ class BudgetsSync {
       if (logged) conflicts++;
       deletedApplied++;
     }
+    debugPrint(
+      'BudgetsSync.pull: applied — merged=$pulled deleted=$deletedApplied '
+      'conflicts=$conflicts',
+    );
 
     // Advance the shared cursor only when the server gave us a real clock. An
     // empty `now` means we can't trust the page boundary — fall back to the max
@@ -530,7 +602,12 @@ class BudgetsSync {
     final nextCursor = _resolveCursor(changes);
     if (nextCursor != null && nextCursor.isNotEmpty) {
       await _dao.setCursor(nextCursor);
+      debugPrint('BudgetsSync.pull: cursor advanced → $nextCursor');
     } else {
+      debugPrint(
+        'BudgetsSync.pull: empty server clock with no datable rows — '
+        'pull marked failed, cursor held',
+      );
       return BudgetsSyncResult(
         pulled: pulled,
         deletedApplied: deletedApplied,
@@ -614,6 +691,10 @@ class BudgetsSync {
       }
 
       // Local strictly newer — keep it; it re-pushes next sync. Nothing logged.
+      debugPrint(
+        'BudgetsSync.pull: kept newer local project id=${serverProject.id} — '
+        'server change deferred, will re-push',
+      );
       return const _MergeOutcome(written: false, conflict: false);
     });
   }
@@ -643,6 +724,10 @@ class BudgetsSync {
       final serverVal = _canonField(col, serverJson[col]);
       if (localVal != serverVal) {
         any = true;
+        debugPrint(
+          'BudgetsSync.pull: LWW field conflict project id=${serverProject.id} '
+          'field=$col winner=server',
+        );
         await txn.logConflict(
           id: serverProject.id,
           field: col,
@@ -712,6 +797,10 @@ class BudgetsSync {
         return _MergeOutcome(written: true, conflict: logged);
       }
 
+      debugPrint(
+        'BudgetsSync.pull: kept newer local expense id=${serverExpense.id} — '
+        'server change deferred, will re-push',
+      );
       return const _MergeOutcome(written: false, conflict: false);
     });
   }
@@ -741,6 +830,10 @@ class BudgetsSync {
       final serverVal = _canonField(col, serverJson[col]);
       if (localVal != serverVal) {
         any = true;
+        debugPrint(
+          'BudgetsSync.pull: LWW field conflict expense id=${serverExpense.id} '
+          'field=$col winner=server',
+        );
         await txn.logConflict(
           id: serverExpense.id,
           field: col,
@@ -799,6 +892,10 @@ class BudgetsSync {
       }
 
       // Local strictly newer — keep it; it re-pushes next sync.
+      debugPrint(
+        'BudgetsSync.pull: kept newer local budget-entry id=${serverEntry.id} '
+        '— server change deferred, will re-push',
+      );
       return const _MergeOutcome(written: false, conflict: false);
     });
   }
@@ -817,6 +914,10 @@ class BudgetsSync {
       final serverVal = serverJson[col]?.toString();
       if (localVal != serverVal) {
         any = true;
+        debugPrint(
+          'BudgetsSync.pull: LWW field conflict budget-entry '
+          'id=${serverEntry.id} field=$col winner=server',
+        );
         await txn.logConflict(
           id: serverEntry.id,
           field: col,
@@ -970,6 +1071,10 @@ class BudgetsSync {
     for (final col in cols) {
       final localVal = localRow[col]?.toString();
       if (localVal == null || localVal.isEmpty) continue;
+      debugPrint(
+        'BudgetsSync.pull: tombstone conflict id=$id field=$col '
+        'winner=server(delete) — local edit lost',
+      );
       await txn.logConflict(
         id: id,
         field: col,

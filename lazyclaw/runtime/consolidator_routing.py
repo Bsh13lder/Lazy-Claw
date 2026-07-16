@@ -19,7 +19,10 @@ import the gateway layer.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 def is_live_web_callback(cb: object) -> bool:
@@ -54,5 +57,13 @@ def choose_consolidator_callback(
     Pure function: returns a callback, never mutates ``original_cb``.
     """
     if is_live_web_callback(original_cb):
+        logger.debug(
+            "[consolidate] routing decision=web origin=%s",
+            type(original_cb).__name__,
+        )
         return original_cb
+    logger.debug(
+        "[consolidate] routing decision=telegram origin=%s",
+        type(original_cb).__name__,
+    )
     return telegram_factory()

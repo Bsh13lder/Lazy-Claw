@@ -13,8 +13,11 @@ same ``→ FAILED:`` marker so the existing machinery (``stuck_detector``'s
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Final
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["classify", "stamp_failed"]
 
@@ -76,8 +79,10 @@ def classify(tool_name: str, result: str) -> tuple[str, str | None]:
 
     # Respect existing markers from browser action_verifier.
     if _MARKER_SUCCESS in result:
+        logger.debug("[verify] tool=%s status=success reason=marker_success", tool_name)
         return "success", None
     if _MARKER_FAILED in result:
+        logger.debug("[verify] tool=%s status=failed reason=marker_failed", tool_name)
         return "failed", None
 
     stripped = result.strip()
@@ -85,22 +90,31 @@ def classify(tool_name: str, result: str) -> tuple[str, str | None]:
     # Empty result from a tool that must produce content.
     if not stripped:
         if tool_name in _EMPTY_MEANS_FAILED:
+            logger.debug("[verify] tool=%s status=failed reason=empty_result", tool_name)
             return "failed", "empty result"
         if any(tool_name.startswith(p) for p in _EMPTY_IS_OK_PREFIXES):
+            logger.debug("[verify] tool=%s status=uncertain reason=empty_ok_prefix", tool_name)
             return "uncertain", None
         # A generic empty result is suspicious but not conclusive.
+        logger.debug("[verify] tool=%s status=uncertain reason=empty_generic", tool_name)
         return "uncertain", None
 
     # HTTP error codes — common when the agent calls n8n / external APIs.
     http_match = _HTTP_ERROR_RE.search(stripped)
     if http_match:
+        logger.debug(
+            "[verify] tool=%s status=failed reason=http_error code=%s",
+            tool_name, http_match.group().strip(),
+        )
         return "failed", f"HTTP error ({http_match.group().strip()})"
 
     # Prefix / substring failure markers.
     for pattern, label in _FAILURE_MARKERS:
         if pattern.search(stripped):
+            logger.debug("[verify] tool=%s status=failed reason=%s", tool_name, label)
             return "failed", label
 
+    logger.debug("[verify] tool=%s status=uncertain reason=no_signal", tool_name)
     return "uncertain", None
 
 
@@ -110,5 +124,7 @@ def stamp_failed(result: str, reason: str) -> str:
     """
     reason = (reason or "unknown").strip()
     if _MARKER_FAILED in result:
+        logger.debug("[verify] stamp_failed skipped — already marked")
         return result  # already marked
+    logger.debug("[verify] stamp_failed reason=%s", reason)
     return f"{result.rstrip()}\n{_MARKER_FAILED} {reason}"

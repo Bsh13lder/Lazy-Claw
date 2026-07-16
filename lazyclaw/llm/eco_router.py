@@ -719,6 +719,13 @@ class EcoRouter:
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
+        logger.debug(
+            "[eco] chat: mode=%s role=%s model_override=%s tools=%d "
+            "brain=%s worker=%s fallback=%s",
+            settings.mode, role, model or "-", len(kwargs.get("tools") or []),
+            models["brain"], models["worker"], models["fallback"],
+        )
+
         # MODE_CLAUDE is strictly sticky: every brain/worker/escalation/
         # explicit-model-override path goes through the user's Claude
         # subscription. The user runs CLAUDE mode precisely because they
@@ -736,6 +743,9 @@ class EcoRouter:
         # surface to the caller.
         if settings.mode == MODE_CLAUDE:
             transport = getattr(settings, "claude_transport", "sdk") or "sdk"
+            logger.debug(
+                "[eco] MODE_CLAUDE dispatch: transport=%s role=%s", transport, role,
+            )
             if transport == "sdk":
                 try:
                     return await self._route_claude_sdk(
@@ -750,13 +760,17 @@ class EcoRouter:
                     )
                     if isinstance(exc, SDKUnavailable):
                         logger.warning(
-                            "Claude SDK unavailable, falling back to CLI: %s",
-                            exc,
+                            "[eco] Claude SDK unavailable, falling back to CLI "
+                            "transport: %s: %s", type(exc).__name__, exc,
                         )
                         return await self._route_claude(
                             messages, user_id, settings=settings, role=role,
                             **kwargs,
                         )
+                    logger.warning(
+                        "[eco] Claude SDK error (not SDKUnavailable) surfaced to "
+                        "caller: %s: %s", type(exc).__name__, exc,
+                    )
                     raise
             return await self._route_claude(
                 messages, user_id, settings=settings, role=role, **kwargs,
@@ -764,6 +778,10 @@ class EcoRouter:
 
         # Explicit model override — bypass routing
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
+            logger.debug(
+                "[eco] explicit model override: model=%s role=%s (bypass routing)",
+                model, role,
+            )
             # Subscription-only model names don't go through paid API —
             # route through the matching transport. Both names point at
             # the same Claude binary; "sdk" gets the native protocol.
@@ -810,6 +828,10 @@ class EcoRouter:
         brain_name = models["brain"]
         brain_profile = get_model(brain_name)
         is_local_brain = brain_profile and brain_profile.is_local
+        logger.debug(
+            "[eco] brain route: mode=%s model=%s is_local=%s",
+            settings.mode, brain_name, bool(is_local_brain),
+        )
 
         # CLI/MCP model names can't go through paid API — route to CLI
         if brain_name in ("claude-cli", "claude_code"):
@@ -912,6 +934,7 @@ class EcoRouter:
             self._claude_cli = ClaudeCLIProvider(model=cli_model)
         else:
             self._claude_cli._model = cli_model
+        logger.debug("[eco] claude-cli route: role=%s model=%s", role, cli_model)
 
         self._set_routing(
             "claude-cli", "claude_cli", is_local=False,
@@ -993,7 +1016,8 @@ class EcoRouter:
         # invoke the same `claude` binary.
         sdk_model = _resolve_claude_cli_model(settings, role)
 
-        if self._claude_sdk is None or self._claude_sdk_model != sdk_model:
+        _sdk_rebuilt = self._claude_sdk is None or self._claude_sdk_model != sdk_model
+        if _sdk_rebuilt:
             from lazyclaw.llm.providers.claude_sdk_provider import (
                 ClaudeSDKProvider,
             )
@@ -1001,6 +1025,10 @@ class EcoRouter:
             self._claude_sdk_model = sdk_model
         else:
             self._claude_sdk._model = sdk_model
+        logger.debug(
+            "[eco] claude-sdk route: role=%s model=%s provider_rebuilt=%s",
+            role, sdk_model, _sdk_rebuilt,
+        )
 
         self._set_routing(
             "claude-sdk", "claude_sdk", is_local=False,
@@ -1032,6 +1060,10 @@ class EcoRouter:
         worker_name = models["worker"]
         worker_profile = get_model(worker_name)
         is_local_worker = worker_profile and worker_profile.is_local
+        logger.debug(
+            "[eco] worker route: mode=%s model=%s is_local=%s",
+            settings.mode, worker_name, bool(is_local_worker),
+        )
 
         # CLI/MCP model names can't go through paid API — route to CLI
         if worker_name in ("claude-cli", "claude_code"):
@@ -1118,8 +1150,29 @@ class EcoRouter:
         self._set_routing(model, provider, is_local=False, reason=reason)
         self._record_usage(user_id, "paid")
 
-        response = await self._paid_router.chat(
-            messages, model=model, user_id=user_id, **kwargs
+        logger.debug(
+            "[eco] paid call start: provider=%s model=%s reason=%s",
+            provider, model, reason,
+        )
+        _t0 = asyncio.get_event_loop().time()
+        try:
+            response = await self._paid_router.chat(
+                messages, model=model, user_id=user_id, **kwargs
+            )
+        except Exception as exc:
+            logger.warning(
+                "[eco] paid call failed: provider=%s model=%s after %dms: %s: %s",
+                provider, model, int((asyncio.get_event_loop().time() - _t0) * 1000),
+                type(exc).__name__, exc,
+            )
+            raise
+        _usage = response.usage or {}
+        logger.debug(
+            "[eco] paid call done: provider=%s model=%s latency=%dms "
+            "tool_calls=%d tokens_in=%s tokens_out=%s",
+            provider, response.model, int((asyncio.get_event_loop().time() - _t0) * 1000),
+            len(response.tool_calls or []),
+            _usage.get("prompt_tokens"), _usage.get("completion_tokens"),
         )
         # MiniMax Token Plan is request-count metered (4,500 / 5h on Plus).
         # Record every successful call so the TUI/limiter has a live count
@@ -1225,8 +1278,14 @@ class EcoRouter:
         order = self._get_provider_order(settings)
         available = [p for p in order if self._rate_limiter.has_capacity(p)]
         if not available:
+            logger.debug(
+                "[eco] free providers: none with capacity (order=%s)", order,
+            )
             return None
 
+        logger.debug(
+            "[eco] free providers cascade: trying %s", available,
+        )
         dict_messages = self._convert_to_dicts(messages)
 
         try:
@@ -1237,9 +1296,13 @@ class EcoRouter:
                 preferred_model=settings.preferred_free_model,
             )
         except RuntimeError:
-            logger.warning("All free providers failed", exc_info=True)
+            logger.warning("[eco] all free providers failed", exc_info=True)
             return None
 
+        logger.debug(
+            "[eco] free provider succeeded: provider=%s model=%s",
+            result.provider, result.model,
+        )
         self._rate_limiter.record_request(result.provider)
         self._record_usage(user_id, "free")
         self._set_routing(
@@ -1277,6 +1340,11 @@ class EcoRouter:
         """Stream chat responses. Routes based on ECO mode + role."""
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
+
+        logger.debug(
+            "[eco] stream_chat: mode=%s role=%s tools=%d",
+            settings.mode, role, len(kwargs.get("tools") or []),
+        )
 
         # MODE_CLAUDE strict-sticky — every streaming call goes through
         # the SDK (default) or CLI subprocess. NEVER falls through to

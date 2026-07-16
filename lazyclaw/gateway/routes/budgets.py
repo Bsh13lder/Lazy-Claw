@@ -8,6 +8,7 @@ that wikilinks back to its project page.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +17,8 @@ from pydantic import BaseModel, Field
 from lazyclaw.budgets import store
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
+
+logger = logging.getLogger(__name__)
 
 _config = load_config()
 
@@ -134,6 +137,10 @@ async def create_project_route(
     body: CreateProjectBody,
     user: User = Depends(get_current_user),
 ):
+    logger.debug(
+        "[route:budgets] POST create-project user=%s fields=%s client_id=%s",
+        user.id, list(body.model_dump(exclude_unset=True).keys()), bool(body.id),
+    )
     project = await store.create_project(
         _config, user.id, body.name,
         budget=body.budget, currency=body.currency, description=body.description,
@@ -149,6 +156,10 @@ async def get_project_route(
 ):
     project = await store.get_project(_config, user.id, project_id)
     if project is None:
+        logger.warning(
+            "[route:budgets] GET project id=%s user=%s -> 404 project not found",
+            project_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="project not found")
     return {"project": project}
 
@@ -164,13 +175,25 @@ async def update_project_route(
     # column (name/budget/currency/status) is guarded out so it can never blank
     # a required field → 500. Nullable fields (description, color) clear fine.
     fields = body.model_dump(exclude_unset=True)
+    logger.debug(
+        "[route:budgets] PATCH project id=%s user=%s fields=%s",
+        project_id, user.id, list(fields.keys()),
+    )
     for required in ("name", "budget", "currency", "status"):
         if required in fields and fields[required] is None:
             fields.pop(required)
     if not fields:
+        logger.warning(
+            "[route:budgets] PATCH project id=%s user=%s -> 400 no fields to update",
+            project_id, user.id,
+        )
         raise HTTPException(status_code=400, detail="no fields to update")
     ok = await store.update_project(_config, user.id, project_id, **fields)
     if not ok:
+        logger.warning(
+            "[route:budgets] PATCH project id=%s user=%s -> 404 project not found",
+            project_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="project not found")
     project = await store.get_project(_config, user.id, project_id)
     return {"project": project}
@@ -186,6 +209,10 @@ async def set_budget_route(
         _config, user.id, project_id, body.budget, currency=body.currency,
     )
     if not ok:
+        logger.warning(
+            "[route:budgets] PUT set-budget project=%s user=%s -> 404 project not found",
+            project_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="project not found")
     project = await store.get_project(_config, user.id, project_id)
     return {"project": project}
@@ -199,6 +226,10 @@ async def delete_project_route(
 ):
     ok = await store.delete_project(_config, user.id, project_id, cascade=cascade)
     if not ok:
+        logger.warning(
+            "[route:budgets] DELETE project id=%s user=%s cascade=%s -> 409 project has expenses",
+            project_id, user.id, cascade,
+        )
         raise HTTPException(
             status_code=409,
             detail="project has expenses; pass ?cascade=true to delete anyway",
@@ -231,7 +262,20 @@ async def budget_changes_route(
     Clients should persist ``now`` locally and send it on the next pull.
     Last-write-wins on ``updated_at`` resolves any conflicts.
     """
-    return await store.get_budget_changes(_config, user.id, since=since)
+    result = await store.get_budget_changes(_config, user.id, since=since)
+    logger.debug(
+        "[route:budgets] GET changes user=%s since=%s -> projects=%d expenses=%d "
+        "entries=%d del_projects=%d del_expenses=%d del_entries=%d now=%s",
+        user.id, since,
+        len(result.get("projects") or []),
+        len(result.get("expenses") or []),
+        len(result.get("budget_entries") or []),
+        len(result.get("deleted_projects") or []),
+        len(result.get("deleted_expenses") or []),
+        len(result.get("deleted_budget_entries") or []),
+        result.get("now"),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +311,11 @@ async def create_expense_route(
     body: CreateExpenseBody,
     user: User = Depends(get_current_user),
 ):
+    logger.debug(
+        "[route:budgets] POST create-expense project=%s user=%s fields=%s client_id=%s",
+        project_id, user.id, list(body.model_dump(exclude_unset=True).keys()),
+        bool(body.id),
+    )
     try:
         expense = await store.create_expense(
             _config, user.id, project_id,
@@ -276,6 +325,10 @@ async def create_expense_route(
             expense_id=body.id or None,
         )
     except ValueError as exc:
+        logger.warning(
+            "[route:budgets] POST create-expense project=%s user=%s -> 404: %s",
+            project_id, user.id, exc,
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"expense": expense}
 
@@ -292,13 +345,25 @@ async def update_expense_route(
     # required field or corrupt the SUM rollup. Nullable fields (vendor, notes,
     # description, task_id, spent_at) clear fine.
     fields = body.model_dump(exclude_unset=True)
+    logger.debug(
+        "[route:budgets] PATCH expense id=%s user=%s fields=%s",
+        expense_id, user.id, list(fields.keys()),
+    )
     for required in ("amount", "currency", "status"):
         if required in fields and fields[required] is None:
             fields.pop(required)
     if not fields:
+        logger.warning(
+            "[route:budgets] PATCH expense id=%s user=%s -> 400 no fields to update",
+            expense_id, user.id,
+        )
         raise HTTPException(status_code=400, detail="no fields to update")
     ok = await store.update_expense(_config, user.id, expense_id, **fields)
     if not ok:
+        logger.warning(
+            "[route:budgets] PATCH expense id=%s user=%s -> 404 expense not found",
+            expense_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="expense not found")
     return {"status": "updated"}
 
@@ -310,6 +375,10 @@ async def delete_expense_route(
 ):
     ok = await store.delete_expense(_config, user.id, expense_id)
     if not ok:
+        logger.warning(
+            "[route:budgets] DELETE expense id=%s user=%s -> 404 expense not found",
+            expense_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="expense not found")
     return {"status": "deleted"}
 
@@ -325,6 +394,10 @@ async def create_recurring_route(
     body: CreateRecurringBody,
     user: User = Depends(get_current_user),
 ):
+    logger.debug(
+        "[route:budgets] POST create-recurring project=%s user=%s fields=%s",
+        project_id, user.id, list(body.model_dump(exclude_unset=True).keys()),
+    )
     try:
         recurring = await store.create_recurring_expense(
             _config, user.id, project_id,
@@ -333,6 +406,12 @@ async def create_recurring_route(
             vendor=body.vendor, task_id=body.task_id,
         )
     except ValueError as exc:
+        # Do not interpolate exc — its message can echo the submitted cron
+        # expression value. Log only the route + user + a static reason.
+        logger.warning(
+            "[route:budgets] POST create-recurring project=%s user=%s -> 400 (cron/project validation)",
+            project_id, user.id,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"recurring": recurring}
 
@@ -352,6 +431,11 @@ async def add_budget_entry_route(
     body: AddBudgetEntryBody,
     user: User = Depends(get_current_user),
 ):
+    logger.debug(
+        "[route:budgets] POST add-budget-entry project=%s user=%s fields=%s client_id=%s",
+        project_id, user.id, list(body.model_dump(exclude_unset=True).keys()),
+        bool(body.id),
+    )
     try:
         entry = await store.add_budget_entry(
             _config, user.id, project_id,
@@ -359,6 +443,10 @@ async def add_budget_entry_route(
             entry_id=body.id or None,
         )
     except ValueError as exc:
+        logger.warning(
+            "[route:budgets] POST add-budget-entry project=%s user=%s -> 404: %s",
+            project_id, user.id, exc,
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"entry": entry}
 
@@ -385,10 +473,22 @@ async def update_budget_entry_route(
         fields["source"] = body.source
     if body.currency is not None:
         fields["currency"] = body.currency
+    logger.debug(
+        "[route:budgets] PATCH budget-entry id=%s user=%s fields=%s",
+        entry_id, user.id, list(fields.keys()),
+    )
     if not fields:
+        logger.warning(
+            "[route:budgets] PATCH budget-entry id=%s user=%s -> 400 no fields to update",
+            entry_id, user.id,
+        )
         raise HTTPException(status_code=400, detail="no fields to update")
     ok = await store.update_budget_entry(_config, user.id, entry_id, **fields)
     if not ok:
+        logger.warning(
+            "[route:budgets] PATCH budget-entry id=%s user=%s -> 404 budget entry not found",
+            entry_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="budget entry not found")
     entry = await store.get_budget_entry(_config, user.id, entry_id)
     return {"entry": entry}
@@ -401,6 +501,10 @@ async def delete_budget_entry_route(
 ):
     ok = await store.delete_budget_entry(_config, user.id, entry_id)
     if not ok:
+        logger.warning(
+            "[route:budgets] DELETE budget-entry id=%s user=%s -> 404 budget entry not found",
+            entry_id, user.id,
+        )
         raise HTTPException(status_code=404, detail="budget entry not found")
     return {"status": "deleted"}
 

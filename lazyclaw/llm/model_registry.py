@@ -9,7 +9,10 @@ Three modes:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,7 +84,13 @@ OLLAMA_WORKER_MODEL = "lazyclaw-e2b"
 
 def get_mode_models(mode: str) -> dict[str, str]:
     """Get brain/worker/fallback model IDs for a mode."""
-    return dict(MODE_MODELS.get(mode, MODE_MODELS["hybrid"]))
+    models = MODE_MODELS.get(mode)
+    if models is None:
+        logger.debug(
+            "[llm] get_mode_models: unknown mode %r → hybrid default", mode,
+        )
+        models = MODE_MODELS["hybrid"]
+    return dict(models)
 
 
 # ── Backward-compat aliases (used by imports, remove later) ──────────

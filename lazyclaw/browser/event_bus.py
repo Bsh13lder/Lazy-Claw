@@ -194,11 +194,15 @@ def set_live_mode(user_id: str, seconds: float = LIVE_MODE_DEFAULT_SECONDS) -> f
     """Turn on per-action thumbnail capture for `seconds`. Returns expiry ts."""
     expiry = time.time() + seconds
     _live_mode_until[user_id] = expiry
+    logger.debug(
+        "[browser] live_mode enabled user=%s seconds=%.0f", user_id, seconds,
+    )
     return expiry
 
 
 def clear_live_mode(user_id: str) -> None:
-    _live_mode_until.pop(user_id, None)
+    if _live_mode_until.pop(user_id, None) is not None:
+        logger.debug("[browser] live_mode cleared user=%s", user_id)
 
 
 def is_live_mode(user_id: str) -> bool:

@@ -233,6 +233,9 @@ async def chat(
             "X-Title": "LazyClaw",
         }
 
+    logger.debug(
+        "[provider:free/%s] chat start model=%s", provider_name, effective_model,
+    )
     response = await _openai_chat(
         base_url=pdef.base_url,
         api_key=api_key,
@@ -254,6 +257,11 @@ async def chat(
         "total_tokens": usage_raw.get("total_tokens", 0),
     }
 
+    logger.debug(
+        "[provider:free/%s] chat done model=%s tokens_in=%s tokens_out=%s",
+        provider_name, data.get("model", effective_model),
+        usage["prompt_tokens"], usage["completion_tokens"],
+    )
     return FreeProviderResult(
         content=content,
         model=data.get("model", effective_model),
@@ -415,6 +423,10 @@ async def cascade_chat(
             result = await asyncio.wait_for(
                 chat(provider_name, api_key, messages, model),
                 timeout=25,
+            )
+            logger.debug(
+                "[llm] free cascade selected provider=%s model=%s",
+                result.provider, result.model,
             )
             return result
         except httpx.HTTPStatusError as exc:

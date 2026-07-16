@@ -138,18 +138,37 @@ async def dispatch_contract_intake(
     config = config or _resolve_default_config()
     registry = registry or _resolve_default_registry()
 
+    logger.debug(
+        "[intake] dispatch_contract_intake entry goal=%s user=%s "
+        "account_slug=%s status=%s",
+        goal.id, goal.user_id, goal.account_slug, goal.status.value,
+    )
+
     if config is None:
+        logger.warning(
+            "[intake] dispatch rejected: config unavailable goal=%s",
+            goal.id,
+        )
         return "Cannot execute intake — config unavailable."
     # Argument-shape checks first — these are validation failures that
     # don't need a registry to report. The registry-availability guard
     # comes AFTER so a caller probing this function with a bad slug or
     # bad status still gets the expected, specific error message.
     if goal.account_slug != "upwork":
+        logger.debug(
+            "[intake] dispatch rejected: account_slug=%s not 'upwork' "
+            "goal=%s",
+            goal.account_slug, goal.id,
+        )
         return (
             f"Goal {goal.id} has account_slug={goal.account_slug!r}; "
             "contract_intake_executor only handles 'upwork'."
         )
     if goal.status != GoalStatus.EXECUTING:
+        logger.debug(
+            "[intake] dispatch rejected: status=%s not EXECUTING goal=%s",
+            goal.status.value, goal.id,
+        )
         return (
             f"Goal {goal.id} is in {goal.status.value}; executor expects "
             "EXECUTING. Did the answers complete? Call answer_goal_questions "
@@ -162,6 +181,10 @@ async def dispatch_contract_intake(
         # ``execute_contract_intake_setup`` after the runtime is fully
         # wired. Returning early avoids the AttributeError surfaced by
         # ``_step_register_watcher`` when it does ``registry.get(...)``.
+        logger.warning(
+            "[intake] dispatch rejected: registry unavailable goal=%s",
+            goal.id,
+        )
         await _mark_blocked(
             config, goal,
             "Skill registry unavailable — runtime not fully initialized. "
@@ -175,12 +198,21 @@ async def dispatch_contract_intake(
         )
 
     work_type = _parse_work_type(goal)
+    logger.info(
+        "[intake] work_type classified goal=%s work_type=%s",
+        goal.id, work_type,
+    )
     if work_type != "web_monitoring":
         # Other types just get the setup-doc note + mark DONE.
         return await _handle_non_monitor(goal, config, registry, work_type)
 
     setup = await _parse_setup_from_answers(config, goal)
     if setup is None or not setup.platform_host:
+        logger.warning(
+            "[intake] setup parse failed or missing platform_host "
+            "goal=%s parsed=%s",
+            goal.id, setup is not None,
+        )
         await _mark_blocked(
             config, goal,
             "Could not parse platform URL from answers — re-trigger with "
@@ -194,6 +226,10 @@ async def dispatch_contract_intake(
         )
 
     slug = _slug_from_host(setup.platform_host)
+    logger.debug(
+        "[intake] provisioning starting goal=%s slug=%s",
+        goal.id, slug,
+    )
     summary_lines: list[str] = [
         f"📦 Contract setup running for {goal.title} (slug=`{slug}`)",
     ]
@@ -238,6 +274,11 @@ async def dispatch_contract_intake(
     # 9. Land the goal
     executor = GoalExecutor(config)
     if failures:
+        logger.warning(
+            "[intake] provisioning finished with %d failure(s) goal=%s "
+            "slug=%s — marking BLOCKED",
+            len(failures), goal.id, slug,
+        )
         await executor.mark_blocked(
             goal.user_id, goal.id,
             reason="; ".join(failures)[:500],
@@ -256,9 +297,17 @@ async def dispatch_contract_intake(
                     action="contract_intake_executor",
                 )
             await executor.mark_done(goal.user_id, goal.id)
+            logger.info(
+                "[intake] provisioning succeeded goal=%s slug=%s -> done",
+                goal.id, slug,
+            )
             summary_lines.append(f"\n✅ Goal {goal.id} DONE — every step provisioned.")
         except Exception as exc:
-            logger.exception("Failed to land goal in DONE state")
+            logger.exception(
+                "[intake] failed to land goal in DONE state goal=%s "
+                "slug=%s error_type=%s",
+                goal.id, slug, type(exc).__name__,
+            )
             summary_lines.append(
                 f"\n⚠️ Setup succeeded but couldn't transition goal to DONE: {exc}"
             )
@@ -273,15 +322,20 @@ async def _step_vault(
     config, user_id, slug, setup, summary, failures,
 ) -> None:
     if not setup.credentials_text.strip():
+        logger.debug("[intake] step=vault slug=%s status=skip (no creds)", slug)
         summary.append("  · vault: SKIP (no credentials provided)")
         return
     try:
         from lazyclaw.crypto.vault import set_credential
         key = f"{slug}_credentials"
         await set_credential(config, user_id, key, setup.credentials_text)
+        logger.debug("[intake] step=vault slug=%s status=ok", slug)
         summary.append(f"  ✓ vault: stored `{key}` (value redacted)")
     except Exception as exc:
-        logger.exception("vault_set failed for %s", slug)
+        logger.exception(
+            "[intake] step=vault slug=%s status=failed error_type=%s",
+            slug, type(exc).__name__,
+        )
         failures.append(f"vault: {exc}")
         summary.append(f"  ✗ vault: {exc}")
 
@@ -292,11 +346,18 @@ async def _step_live_host(
     try:
         from lazyclaw.browser.browser_settings import add_live_host
         hosts = await add_live_host(config, user_id, host)
+        logger.debug(
+            "[intake] step=live_host host=%s status=ok count=%d",
+            host, len(hosts),
+        )
         summary.append(
             f"  ✓ live_host: added `{host}` (user list now {len(hosts)})"
         )
     except Exception as exc:
-        logger.exception("add_live_host failed for %s", host)
+        logger.exception(
+            "[intake] step=live_host host=%s status=failed error_type=%s",
+            host, type(exc).__name__,
+        )
         failures.append(f"live_host: {exc}")
         summary.append(f"  ✗ live_host: {exc}")
 
@@ -309,9 +370,16 @@ async def _step_register_account(
         await register_account(
             config, user_id, slug, friendly_name[:50] or slug, host,
         )
+        logger.debug(
+            "[intake] step=browser_account slug=%s status=ok", slug,
+        )
         summary.append(f"  ✓ browser_account: registered `{slug}` -> {host}")
     except Exception as exc:
-        logger.exception("register_account failed for %s", slug)
+        logger.exception(
+            "[intake] step=browser_account slug=%s status=failed "
+            "error_type=%s",
+            slug, type(exc).__name__,
+        )
         failures.append(f"browser_account: {exc}")
         summary.append(f"  ✗ browser_account: {exc}")
 
@@ -320,11 +388,16 @@ async def _step_register_watcher(
     registry, user_id, setup, slug, summary, failures,
 ) -> None:
     if registry is None:
+        logger.debug("[intake] step=watcher slug=%s status=skip (no registry)", slug)
         failures.append("watcher: registry unavailable")
         summary.append("  ✗ watcher: registry unavailable")
         return
     watch_skill = registry.get("watch_site")
     if watch_skill is None:
+        logger.debug(
+            "[intake] step=watcher slug=%s status=skip (watch_site not registered)",
+            slug,
+        )
         failures.append("watcher: watch_site skill not registered")
         summary.append("  ✗ watcher: watch_site skill not registered")
         return
@@ -341,9 +414,18 @@ async def _step_register_watcher(
             # Wires the watcher push to the ✅ Accept button (PR 5).
             "accept_template_slug": slug,
         })
+        logger.debug(
+            "[intake] step=watcher slug=%s status=ok interval_min=%d",
+            slug, check_min,
+        )
         summary.append(f"  ✓ watcher: registered ({result[:120]})")
     except Exception as exc:
-        logger.exception("watch_site failed for %s", setup.platform_url)
+        # Log by slug, not the raw platform_url (may carry query-string
+        # PII) — slug is the normalized, already-non-sensitive host id.
+        logger.exception(
+            "[intake] step=watcher slug=%s status=failed error_type=%s",
+            slug, type(exc).__name__,
+        )
         failures.append(f"watcher: {exc}")
         summary.append(f"  ✗ watcher: {exc}")
 
@@ -352,6 +434,10 @@ async def _step_save_template(
     config, user_id, slug, setup, summary, failures,
 ) -> None:
     if not setup.accept_action_text.strip():
+        logger.debug(
+            "[intake] step=template slug=%s status=skip (no accept action)",
+            slug,
+        )
         summary.append("  · template: SKIP (no accept action described)")
         return
     try:
@@ -370,12 +456,19 @@ async def _step_save_template(
             checkpoints=["Confirm accept"],
             watch_url=setup.platform_url,
         )
+        logger.debug(
+            "[intake] step=template slug=%s status=ok template_id=%s",
+            slug, str(tpl.get("id", ""))[:8],
+        )
         summary.append(
             f"  ✓ template: saved `{slug}_accept` (id {tpl['id'][:8]}) — "
             "will auto-enrich on first successful accept"
         )
     except Exception as exc:
-        logger.exception("create_template failed for %s", slug)
+        logger.exception(
+            "[intake] step=template slug=%s status=failed error_type=%s",
+            slug, type(exc).__name__,
+        )
         failures.append(f"template: {exc}")
         summary.append(f"  ✗ template: {exc}")
 
@@ -384,11 +477,16 @@ async def _step_save_note(
     registry, user_id, goal, slug, setup, summary, failures,
 ) -> None:
     if registry is None:
+        logger.debug("[intake] step=setup_doc slug=%s status=skip (no registry)", slug)
         failures.append("setup_doc: registry unavailable")
         summary.append("  ✗ setup_doc: registry unavailable")
         return
     save_note = registry.get("lazybrain_save_note")
     if save_note is None:
+        logger.debug(
+            "[intake] step=setup_doc slug=%s status=skip (skill not registered)",
+            slug,
+        )
         failures.append("setup_doc: lazybrain_save_note skill not registered")
         summary.append("  ✗ setup_doc: lazybrain_save_note skill not registered")
         return
@@ -401,9 +499,13 @@ async def _step_save_note(
             "importance": 8,
             "pinned": True,
         })
+        logger.debug("[intake] step=setup_doc slug=%s status=ok", slug)
         summary.append("  ✓ setup_doc: saved to LazyBrain (pinned, credentials redacted)")
     except Exception as exc:
-        logger.exception("lazybrain_save_note failed for %s", slug)
+        logger.exception(
+            "[intake] step=setup_doc slug=%s status=failed error_type=%s",
+            slug, type(exc).__name__,
+        )
         failures.append(f"setup_doc: {exc}")
         summary.append(f"  ✗ setup_doc: {exc}")
 
@@ -412,10 +514,15 @@ async def _step_escalate_login(
     registry, user_id, slug, setup, summary, failures,
 ) -> None:
     if registry is None:
+        logger.debug("[intake] step=escalate slug=%s status=skip (no registry)", slug)
         summary.append("  · escalate: SKIP (no registry to fire escalate_to_human)")
         return
     escalate = registry.get("escalate_to_human")
     if escalate is None:
+        logger.debug(
+            "[intake] step=escalate slug=%s status=skip (skill not registered)",
+            slug,
+        )
         summary.append("  · escalate: SKIP (escalate_to_human not registered)")
         return
     try:
@@ -430,12 +537,16 @@ async def _step_escalate_login(
             "urgency": "business_hours",
             "timeout_seconds": 3600,
         })
+        logger.debug("[intake] step=escalate slug=%s status=ok", slug)
         summary.append("  ✓ escalate: login prompt pushed to Telegram")
     except Exception as exc:
         # Escalate failures are NOT setup-blocking — log + note in summary
         # but don't push the goal to BLOCKED. User can still log in
         # manually without the prompt.
-        logger.exception("escalate_to_human failed for %s", slug)
+        logger.exception(
+            "[intake] step=escalate slug=%s status=warn error_type=%s",
+            slug, type(exc).__name__,
+        )
         summary.append(f"  · escalate: WARN ({exc}) — log in manually")
 
 
@@ -443,6 +554,10 @@ async def _handle_non_monitor(
     goal, config, registry, work_type,
 ) -> str:
     """Non-web_monitoring work types: save a doc note + mark DONE."""
+    logger.debug(
+        "[intake] non-monitor path goal=%s work_type=%s",
+        goal.id, work_type,
+    )
     summary_lines = [
         f"📝 Contract setup for `{work_type}` work type — note-only path.",
     ]
@@ -469,8 +584,17 @@ async def _handle_non_monitor(
                 "importance": 7,
                 "pinned": True,
             })
+            logger.debug(
+                "[intake] non-monitor setup_doc goal=%s work_type=%s status=ok",
+                goal.id, work_type,
+            )
             summary_lines.append("  ✓ setup_doc: saved to LazyBrain")
         except Exception as exc:
+            logger.exception(
+                "[intake] non-monitor setup_doc goal=%s work_type=%s "
+                "status=failed error_type=%s",
+                goal.id, work_type, type(exc).__name__,
+            )
             summary_lines.append(f"  ✗ setup_doc: {exc}")
 
     # Land the goal regardless
@@ -482,8 +606,17 @@ async def _handle_non_monitor(
                 status="done", action="non-monitor note-only path",
             )
         await executor.mark_done(goal.user_id, goal.id)
+        logger.info(
+            "[intake] non-monitor goal=%s work_type=%s -> done",
+            goal.id, work_type,
+        )
         summary_lines.append(f"\n✅ Goal {goal.id} DONE.")
     except Exception as exc:
+        logger.exception(
+            "[intake] non-monitor failed to land goal goal=%s "
+            "work_type=%s error_type=%s",
+            goal.id, work_type, type(exc).__name__,
+        )
         summary_lines.append(f"\n⚠️ Couldn't land goal: {exc}")
 
     return "\n".join(summary_lines)
@@ -508,7 +641,10 @@ async def _parse_setup_from_answers(
         from lazyclaw.llm.providers.base import LLMMessage
         from lazyclaw.llm.router import LLMRouter
     except Exception as exc:
-        logger.debug("contract_intake_executor imports failed: %s", exc)
+        logger.debug(
+            "[intake] parse_setup: imports failed goal=%s error_type=%s",
+            goal.id, type(exc).__name__,
+        )
         return None
 
     try:
@@ -526,10 +662,13 @@ async def _parse_setup_from_answers(
             timeout=6.0,
         )
     except asyncio.TimeoutError:
-        logger.debug("contract setup parser timed out")
+        logger.debug("[intake] parse_setup: worker LLM timed out goal=%s", goal.id)
         return None
     except Exception as exc:
-        logger.debug("contract setup parser failed: %s", exc)
+        logger.debug(
+            "[intake] parse_setup: worker LLM call failed goal=%s error_type=%s",
+            goal.id, type(exc).__name__,
+        )
         return None
 
     raw = (resp.content or "").strip()
@@ -538,9 +677,18 @@ async def _parse_setup_from_answers(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.debug("setup parser JSON parse failed: %s", raw[:200])
+        # Never log the raw LLM response — it's derived from the user's
+        # contract answers. Length only.
+        logger.debug(
+            "[intake] parse_setup: JSON parse failed goal=%s raw_len=%d",
+            goal.id, len(raw),
+        )
         return None
     if not isinstance(data, dict):
+        logger.debug(
+            "[intake] parse_setup: parsed JSON not a dict goal=%s type=%s",
+            goal.id, type(data).__name__,
+        )
         return None
     return _build_setup_from_dict(data)
 
@@ -685,8 +833,15 @@ async def _mark_blocked(config, goal, reason: str) -> None:
         await executor.mark_blocked(
             goal.user_id, goal.id, reason=reason,
         )
+        logger.debug(
+            "[intake] mark_blocked succeeded goal=%s reason_len=%d",
+            goal.id, len(reason or ""),
+        )
     except Exception:
-        logger.exception("mark_blocked failed for %s", goal.id)
+        logger.exception(
+            "[intake] mark_blocked failed goal=%s user=%s",
+            goal.id, goal.user_id,
+        )
 
 
 # ── Module-level default config/registry resolution ─────────────────
@@ -722,9 +877,12 @@ def _resolve_default_registry() -> Any | None:
 async def _dispatch_entry(goal: Goal) -> None:
     """Thin wrapper called by GoalExecutor._dispatch for upwork goals."""
     result = await dispatch_contract_intake(goal)
+    # NOTE: log only the length, never the summary text — it is built
+    # from goal.title / setup fields (contract-adjacent user content) and
+    # must never land in plaintext production logs.
     logger.info(
-        "contract_intake_executor goal=%s result=%s",
-        goal.id, result[:200],
+        "[intake] dispatch_entry goal=%s result_len=%d",
+        goal.id, len(result or ""),
     )
 
 

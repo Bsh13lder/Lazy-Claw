@@ -197,6 +197,13 @@ async def check_watcher(
     last_value = context.get("last_value")
     notify_template = context.get("notify_template")
 
+    _watch_host = urlparse(url).hostname or "?"
+    logger.debug(
+        "[watcher] check start host=%s page_type=%s routing=%s job=%s",
+        _watch_host, page_type, "passive-live" if passive else "headless",
+        job_id or "?",
+    )
+
     # Pick the right extractor
     if custom_js:
         js_code = custom_js
@@ -224,10 +231,14 @@ async def check_watcher(
             try:
                 created_anchor = await backend.new_tab(url, background=True)
                 await backend.switch_tab(created_anchor, focus=False)
-            except Exception:
                 logger.debug(
-                    "watcher parked-tab create/switch failed for %s",
-                    url, exc_info=True,
+                    "[watcher] created parked tab host=%s job=%s",
+                    _watch_host, job_id or "?",
+                )
+            except Exception:
+                logger.warning(
+                    "[watcher] parked-tab create/switch failed host=%s job=%s",
+                    _watch_host, job_id or "?", exc_info=True,
                 )
                 return False, None, context
             if user_id is not None:
@@ -364,6 +375,10 @@ async def check_watcher(
         changed = current_value != last_value
 
     if not changed:
+        logger.debug(
+            "[watcher] check done host=%s page_type=%s changed=no job=%s",
+            _watch_host, page_type, job_id or "?",
+        )
         return False, None, new_context
 
     # Build notification with DIFF (what's new, not everything)
@@ -371,6 +386,11 @@ async def check_watcher(
         context, result, notify_template, last_value,
     )
 
+    # Log the CHANGE fired — never the notification body (message content).
+    logger.info(
+        "[watcher] change detected host=%s page_type=%s job=%s",
+        _watch_host, page_type, job_id or "?",
+    )
     return True, notification, new_context
 
 

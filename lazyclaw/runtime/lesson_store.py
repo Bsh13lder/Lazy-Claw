@@ -98,7 +98,10 @@ async def _find_note_by_title_key(
             return None
         return await lb_store.get_note(config, user_id, row[0])
     except Exception:
-        logger.debug("lesson_store: find_by_title_key failed", exc_info=True)
+        logger.debug(
+            "[lesson] find_note_by_title_key failed title_key=%s",
+            title_key[:16] if title_key else None, exc_info=True,
+        )
         return None
 
 
@@ -124,9 +127,10 @@ async def store_lesson(
                 title=f"Learned: {lesson.content[:50]}",
                 content={"lesson": lesson.content, "source": "correction"},
             )
+            # NOTE: never log `lesson.content` — keep to keys/counts only.
             logger.info(
-                "Stored site lesson for %s: %s (id=%s)",
-                lesson.domain, lesson.content[:60], memory_id,
+                "[lesson] store_lesson site domain=%s id=%s len=%d",
+                lesson.domain, memory_id, len(lesson.content),
             )
             return memory_id
         else:
@@ -139,9 +143,10 @@ async def store_lesson(
                 memory_type="learned_preference",
                 importance=lesson.importance,
             )
+            # NOTE: never log `lesson.content` — keep to keys/counts only.
             logger.info(
-                "Stored preference lesson: %s (id=%s, importance=%d)",
-                lesson.content[:60], memory_id, lesson.importance,
+                "[lesson] store_lesson preference id=%s importance=%d len=%d",
+                memory_id, lesson.importance, len(lesson.content),
             )
             # Also mirror into LazyBrain so the user can browse + backlink
             # the lesson in the PKM UI. Fire-and-forget; matches the
@@ -167,6 +172,11 @@ async def store_lesson(
                 existing = await _find_note_by_title_key(
                     config, user_id, _title_key(canonical_title),
                 )
+                logger.debug(
+                    "[lesson] store_lesson mirror decision=%s type=%s",
+                    "upsert" if existing is not None else "insert",
+                    lesson.lesson_type,
+                )
                 if existing is not None:
                     existing_tags = existing.get("tags") or []
                     merged_tags = list({*existing_tags, *tags})
@@ -190,11 +200,14 @@ async def store_lesson(
                 )
             except Exception:
                 logger.warning(
-                    "lazybrain lesson mirror failed for user %s",
-                    user_id, exc_info=True,
+                    "[lesson] lazybrain mirror failed user=%s type=%s",
+                    user_id, lesson.lesson_type, exc_info=True,
                 )
             return memory_id
 
     except Exception as e:
-        logger.warning("Failed to store lesson: %s", e)
+        logger.warning(
+            "[lesson] store_lesson failed type=%s domain=%s: %s",
+            lesson.lesson_type, lesson.domain, e, exc_info=True,
+        )
         return None

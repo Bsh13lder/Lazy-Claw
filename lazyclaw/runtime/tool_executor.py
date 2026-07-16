@@ -104,6 +104,12 @@ class ToolExecutor:
         # mid-sequence (the 2026-05-29 research-vs-submit collision).
         await acquire_live_browser_if_needed(user_id, tool_call.name)
 
+        logger.debug(
+            "[toolexec] execute start name=%s arg_keys=%s user=%s",
+            tool_call.name,
+            list(tool_call.arguments.keys()) if tool_call.arguments else [],
+            user_id[:8] if user_id else user_id,
+        )
         try:
             # Per-tool timeout: skill.timeout overrides executor default
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
@@ -113,6 +119,10 @@ class ToolExecutor:
             )
             logger.debug("Tool %s executed successfully", tool_call.name)
             processed = await self._process_result(result, tool_call.name, callback)
+            logger.debug(
+                "[toolexec] execute done name=%s result_len=%d",
+                tool_call.name, len(processed) if processed else 0,
+            )
             # Surface failed-tool results at INFO so we can debug MCP errors
             # without having to decrypt the lesson store. The classifier
             # already runs inside record_skill_outcome — calling it here a
@@ -135,13 +145,20 @@ class ToolExecutor:
             return processed
         except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
-            logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            logger.error(
+                "[toolexec] Tool %s timed out after %ds (user=%s)",
+                tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,
+            )
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, exc,
             )
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
-            logger.error("Tool %s failed: %s", tool_call.name, e)
+            logger.error(
+                "[toolexec] Tool %s failed (user=%s) type=%s: %s",
+                tool_call.name, user_id[:8] if user_id else user_id, type(e).__name__, e,
+                exc_info=True,
+            )
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, e,
             )
@@ -163,6 +180,12 @@ class ToolExecutor:
 
         await acquire_live_browser_if_needed(user_id, tool_call.name)
 
+        logger.debug(
+            "[toolexec] execute_allowed start name=%s arg_keys=%s user=%s",
+            tool_call.name,
+            list(tool_call.arguments.keys()) if tool_call.arguments else [],
+            user_id[:8] if user_id else user_id,
+        )
         try:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
             result = await asyncio.wait_for(
@@ -171,6 +194,10 @@ class ToolExecutor:
             )
             logger.debug("Tool %s executed (approved)", tool_call.name)
             processed = await self._process_result(result, tool_call.name, callback)
+            logger.debug(
+                "[toolexec] execute_allowed done name=%s result_len=%d",
+                tool_call.name, len(processed) if processed else 0,
+            )
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
             )
@@ -178,13 +205,19 @@ class ToolExecutor:
             return processed
         except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
-            logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            logger.error(
+                "[toolexec] Tool %s (approved) timed out after %ds (user=%s)",
+                tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,
+            )
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, exc,
             )
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
-            logger.error("Tool %s failed: %s", tool_call.name, e)
+            logger.error(
+                "[toolexec] Tool %s (approved) failed type=%s: %s",
+                tool_call.name, type(e).__name__, e, exc_info=True,
+            )
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, e,
             )
@@ -219,6 +252,11 @@ class ToolExecutor:
                 read_only_indices.append(i)
             else:
                 state_indices.append(i)
+
+        logger.debug(
+            "[toolexec] batch total=%d read_only=%d state=%d",
+            len(tool_calls), len(read_only_indices), len(state_indices),
+        )
 
         results: list[tuple[ToolCall, str, int, str | None] | None] = [None] * len(tool_calls)
 
@@ -277,6 +315,10 @@ class ToolExecutor:
         if callback and result.attachments:
             from lazyclaw.runtime.callbacks import AgentEvent
 
+            logger.debug(
+                "[toolexec] firing %d attachment event(s) for %s",
+                len(result.attachments), tool_name,
+            )
             for att in result.attachments:
                 await callback.on_event(AgentEvent(
                     kind="attachment",

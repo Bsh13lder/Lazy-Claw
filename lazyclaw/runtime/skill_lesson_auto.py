@@ -95,6 +95,8 @@ def topic_for_skill(skill: "BaseSkill") -> str | None:
     """
     name = getattr(skill, "name", None)
     if not name or name in _NOISE_DENYLIST:
+        if name:
+            logger.debug("[lesson] topic_for_skill denylisted skill=%s", name)
         return None
 
     if name in _TOPIC_FROM_NAME:
@@ -259,6 +261,10 @@ def _should_record(user_id: str, skill_name: str, outcome: str) -> bool:
     now = time.monotonic()
     last = _recent_dedup.get(key)
     if last is not None and (now - last) < _TIGHT_RETRY_WINDOW:
+        logger.debug(
+            "[lesson] tight-retry dedup skip user=%s skill=%s outcome=%s",
+            user_id[:8] if user_id else None, skill_name, outcome,
+        )
         return False
     _recent_dedup[key] = now
     # Cheap prune — never grows past the window's worth of entries.
@@ -292,6 +298,7 @@ async def record_skill_outcome(
     if config is None or not user_id or skill is None:
         return
 
+    skill_name = getattr(skill, "name", "") or "unknown"
     try:
         topic = topic_for_skill(skill)
         if not topic:
@@ -299,9 +306,12 @@ async def record_skill_outcome(
 
         outcome, error_msg, result_snippet = outcome_from_result(result, exception)
         if outcome == "skip":
+            logger.debug(
+                "[lesson] record_skill_outcome skip skill=%s (approval-pending)",
+                skill_name,
+            )
             return
 
-        skill_name = getattr(skill, "name", "") or "unknown"
         if not _should_record(user_id, skill_name, outcome):
             return
 
@@ -318,6 +328,11 @@ async def record_skill_outcome(
 
         turn = current_turn(user_id) if outcome == "pending" else None
 
+        logger.debug(
+            "[lesson] record_skill_outcome dispatching topic=%s skill=%s "
+            "outcome=%s has_error=%s",
+            topic, skill_name, outcome, error_msg is not None,
+        )
         await save_skill_lesson(
             config, user_id,
             topic=topic,
@@ -330,7 +345,10 @@ async def record_skill_outcome(
             pending_since_turn=turn,
         )
     except Exception:
-        logger.debug("record_skill_outcome failed", exc_info=True)
+        logger.debug(
+            "[lesson] record_skill_outcome failed skill=%s", skill_name,
+            exc_info=True,
+        )
 
 
 __all__ = [

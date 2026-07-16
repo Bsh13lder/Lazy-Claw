@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,6 +61,10 @@ class BaseLLMProvider(ABC):
         Yields StreamChunk instances. Override in providers that support streaming.
         """
         from lazyclaw.llm.providers.base import StreamChunk
+        logger.debug(
+            "[provider:%s] no native streaming — collapsing to one chunk (model=%s)",
+            type(self).__name__, model,
+        )
         response = await self.chat(messages, model, **kwargs)
         yield StreamChunk(
             delta=response.content,

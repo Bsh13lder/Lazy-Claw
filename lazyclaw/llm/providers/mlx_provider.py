@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -223,12 +224,21 @@ class MLXProvider(BaseLLMProvider):
             if key in kwargs:
                 payload[key] = kwargs[key]
 
+        logger.debug(
+            "[provider:mlx] chat start model=%s tools=%d thinking=%s",
+            effective_model, len(tools or []), thinking,
+        )
+        _t0 = time.monotonic()
         try:
             client = await self._get_client()
             resp = await client.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
         except httpx.ConnectError as exc:
+            logger.warning(
+                "[provider:mlx] connect failed base_url=%s model=%s",
+                self._base_url, effective_model,
+            )
             raise MLXUnavailableError(
                 f"Cannot connect to MLX server at {self._base_url}. "
                 "Start it with: mlx_lm.server --model <model>"
@@ -236,17 +246,29 @@ class MLXProvider(BaseLLMProvider):
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             body = exc.response.text[:300]
+            logger.warning(
+                "[provider:mlx] HTTP %s for model=%s", status, effective_model,
+            )
             raise MLXUnavailableError(
                 f"MLX server returned HTTP {status}: {body}"
             ) from exc
         except httpx.ReadTimeout as exc:
+            logger.warning(
+                "[provider:mlx] read timeout model=%s after %dms",
+                effective_model, int((time.monotonic() - _t0) * 1000),
+            )
             raise MLXUnavailableError(
                 f"MLX server timed out for model '{model}'. "
                 "Model may be loading or system under memory pressure."
             ) from exc
         except Exception as exc:
             err_msg = str(exc).strip() or type(exc).__name__
+            logger.warning(
+                "[provider:mlx] chat error model=%s: %s: %s",
+                effective_model, type(exc).__name__, err_msg,
+            )
             raise MLXUnavailableError(f"MLX error: {err_msg}") from exc
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
 
         choice = data["choices"][0]
         message = choice["message"]
@@ -278,6 +300,13 @@ class MLXProvider(BaseLLMProvider):
         # If content is empty but reasoning exists, use reasoning
         if not content and reasoning:
             content = reasoning.strip()
+
+        logger.debug(
+            "[provider:mlx] chat done model=%s latency=%dms tool_calls=%d "
+            "tokens_in=%s tokens_out=%s",
+            data.get("model", model), _latency_ms, len(parsed_tool_calls or []),
+            (usage or {}).get("prompt_tokens"), (usage or {}).get("completion_tokens"),
+        )
 
         return LLMResponse(
             content=content,

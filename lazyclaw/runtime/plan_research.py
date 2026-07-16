@@ -279,6 +279,10 @@ async def gather_plan_research(config, user_id: str, message: str) -> str:
     lazybrain, lessons, codebase, projects = await asyncio.gather(
         lazybrain_co, lessons_co, codebase_co, project_co,
     )
+    logger.debug(
+        "[planresearch] lane results: lazybrain=%d lessons=%d codebase=%d projects=%d",
+        len(lazybrain), len(lessons), len(codebase), len(projects),
+    )
 
     parts: list[str] = []
     if lazybrain:
@@ -295,6 +299,9 @@ async def gather_plan_research(config, user_id: str, message: str) -> str:
         parts.extend(projects)
 
     if not parts:
+        logger.debug("[planresearch] no findings surfaced across all lanes")
         return ""
 
-    return "## Research findings\n" + "\n".join(parts)
+    result = "## Research findings\n" + "\n".join(parts)
+    logger.debug("[planresearch] built research block len=%d", len(result))
+    return result

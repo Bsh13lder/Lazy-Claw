@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.config import Config
 from lazyclaw.llm.providers.base import BaseLLMProvider, LLMMessage, LLMResponse
 from lazyclaw.llm.providers.openai_provider import OpenAIProvider
 from lazyclaw.llm.providers.anthropic_provider import AnthropicProvider
+
+logger = logging.getLogger(__name__)
 
 
 class LLMRouter:
@@ -29,9 +33,13 @@ class LLMRouter:
 
             settings = await _load_eco_settings(self._config, user_id)
             return settings.mode == MODE_CLAUDE
-        except Exception:
+        except Exception as exc:
             # Never let the mode probe break a chat call — degrade to the
             # normal provider path.
+            logger.debug(
+                "[llm] claude-mode probe failed, defaulting to provider path: "
+                "%s: %s", type(exc).__name__, exc,
+            )
             return False
 
     def _eco_router(self):
@@ -109,11 +117,22 @@ class LLMRouter:
             )
             if key:
                 self._vault_key_cache[vault_key] = (key, time.monotonic())
+            else:
+                logger.debug(
+                    "[llm] vault has no key for provider=%s", provider_name,
+                )
             return key
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as exc:
+            # Never log the key itself — only the failure type/provider.
+            logger.warning(
+                "[llm] api-key vault lookup failed for provider=%s: %s: %s",
+                provider_name, type(exc).__name__, exc,
+            )
             return None
 
     def _create_provider(self, provider_name: str, api_key: str) -> BaseLLMProvider:
+        # Log which concrete provider is being instantiated (never the key).
+        logger.debug("[llm] instantiating provider=%s", provider_name)
         if provider_name == "openai":
             return OpenAIProvider(api_key)
         elif provider_name == "anthropic":
@@ -158,11 +177,18 @@ class LLMRouter:
         # EcoRouter must still go through the user's subscription/SDK, never the
         # dead API key. EcoRouter-managed transports skip this (no recursion).
         if not self._eco_managed and await self._is_claude_mode(user_id):
+            logger.debug(
+                "[llm] raw router.chat rerouted to EcoRouter (CLAUDE mode, "
+                "eco_managed=%s)", self._eco_managed,
+            )
             return await self._eco_router().chat(
                 messages, user_id=user_id, model=model, role="worker", **kwargs,
             )
         model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
+        logger.debug(
+            "[llm] router.chat model=%s → provider=%s", model, provider_name,
+        )
 
         # Ollama doesn't need an API key — skip key check
         if provider_name == "ollama" and provider_name not in self._providers:

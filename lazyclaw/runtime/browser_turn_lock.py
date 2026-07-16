@@ -140,6 +140,10 @@ class _Holder:
         # merely INHERITED this holder via contextvars copy-on-create_task
         # (→ must get its own holder so it serializes against the parent).
         self.task: asyncio.Task | None = None
+        # Diagnostics-only (never read for control flow): the user this holder
+        # last acquired the lock for, so `release()` can log it even though the
+        # method itself takes no user_id parameter.
+        self._diag_user_id: str | None = None
 
     async def acquire(self, user_id: str) -> bool:
         """Acquire the per-(user, role) live-Brave lock for this turn (idempotent).
@@ -149,20 +153,36 @@ class _Holder:
         """
         async with self._guard:
             if self.held:
+                logger.debug(
+                    "[turnlock] already held holder=%s user=%s role=%s "
+                    "(idempotent re-acquire)",
+                    id(self), user_id[:8] if user_id else None, self.role,
+                )
                 return True
             lock = _get_user_lock(user_id, self.role)
+            logger.debug(
+                "[turnlock] acquiring holder=%s user=%s role=%s",
+                id(self), user_id[:8] if user_id else None, self.role,
+            )
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=ACQUIRE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 logger.warning(
                     "Live-browser lock acquire timed out after %.0fs for user %s "
-                    "— proceeding UNLOCKED (possible browser race)",
+                    "— proceeding UNLOCKED (possible browser race) "
+                    "holder=%s role=%s",
                     ACQUIRE_TIMEOUT_S,
                     user_id[:8],
+                    id(self), self.role,
                 )
                 return False
             self._lock = lock
             self.held = True
+            self._diag_user_id = user_id
+            logger.debug(
+                "[turnlock] acquired holder=%s user=%s role=%s",
+                id(self), user_id[:8] if user_id else None, self.role,
+            )
             return True
 
     async def release(self) -> None:
@@ -171,11 +191,28 @@ class _Holder:
                 try:
                     self._lock.release()
                 except RuntimeError:
+                    logger.warning(
+                        "[turnlock] release: lock already released "
+                        "holder=%s user=%s role=%s",
+                        id(self),
+                        self._diag_user_id[:8] if self._diag_user_id else None,
+                        self.role,
+                        exc_info=True,
+                    )
+                else:
                     logger.debug(
-                        "live-browser lock already released", exc_info=True
+                        "[turnlock] released holder=%s user=%s role=%s",
+                        id(self),
+                        self._diag_user_id[:8] if self._diag_user_id else None,
+                        self.role,
                     )
                 self.held = False
                 self._lock = None
+            else:
+                logger.debug(
+                    "[turnlock] release no-op (not held) holder=%s role=%s",
+                    id(self), self.role,
+                )
 
 
 _holder_var: contextvars.ContextVar["_Holder | None"] = contextvars.ContextVar(
@@ -212,11 +249,22 @@ async def browser_turn_scope(role: str = DEFAULT_ROLE, *, user_id: str | None = 
         current = asyncio.current_task()
         if existing is not None and existing.task is current:
             # Genuine same-task nesting — the outer scope owns holder + release.
+            logger.debug(
+                "[turnlock] scope re-entered (same-task nesting) holder=%s "
+                "role=%s user=%s",
+                id(existing), role, user_id[:8] if user_id else None,
+            )
             yield
             return
         holder = _Holder(role=role)
         holder.task = current
         token = _holder_var.set(holder)
+        logger.debug(
+            "[turnlock] scope opened holder=%s role=%s user=%s "
+            "inherited_holder=%s",
+            id(holder), role, user_id[:8] if user_id else None,
+            existing is not None,
+        )
         try:
             yield
         finally:
@@ -226,6 +274,10 @@ async def browser_turn_scope(role: str = DEFAULT_ROLE, *, user_id: str | None = 
             if role == VISIBLE_ROLE and user_id:
                 await _close_agent_tab_if_created(user_id)
             _holder_var.reset(token)
+            logger.debug(
+                "[turnlock] scope closed holder=%s role=%s user=%s",
+                id(holder), role, user_id[:8] if user_id else None,
+            )
     finally:
         _role_var.reset(role_token)
 
@@ -266,8 +318,8 @@ async def _close_agent_tab_if_created(user_id: str) -> None:
             total_tabs = len(tabs)
         except Exception:
             logger.debug(
-                "agent-tab auto-close: tabs() failed — skipping close",
-                exc_info=True,
+                "[turnlock] agent-tab auto-close: tabs() failed — skipping "
+                "close user=%s", user_id[:8], exc_info=True,
             )
             return
 
@@ -287,7 +339,8 @@ async def _close_agent_tab_if_created(user_id: str) -> None:
             )
     except Exception:
         logger.debug(
-            "agent-tab auto-close failed (non-fatal)", exc_info=True
+            "[turnlock] agent-tab auto-close failed (non-fatal) user=%s",
+            user_id[:8], exc_info=True,
         )
 
 
@@ -316,8 +369,14 @@ async def live_browser_guard(
         acquired = True
     except asyncio.TimeoutError:
         logger.debug(
-            "live_browser_guard busy (%.0fs) for user %s — caller should skip",
-            timeout, user_id[:8],
+            "[turnlock] live_browser_guard busy (%.0fs) for user %s role=%s "
+            "— caller should skip",
+            timeout, user_id[:8], role,
+        )
+    else:
+        logger.debug(
+            "[turnlock] live_browser_guard acquired user=%s role=%s",
+            user_id[:8], role,
         )
     try:
         yield acquired
@@ -326,7 +385,15 @@ async def live_browser_guard(
             try:
                 lock.release()
             except RuntimeError:
-                logger.debug("live_browser_guard lock already released", exc_info=True)
+                logger.warning(
+                    "[turnlock] live_browser_guard lock already released "
+                    "user=%s role=%s", user_id[:8], role, exc_info=True,
+                )
+            else:
+                logger.debug(
+                    "[turnlock] live_browser_guard released user=%s role=%s",
+                    user_id[:8], role,
+                )
 
 
 async def acquire_live_browser_if_needed(user_id: str, tool_name: str) -> bool:
@@ -340,5 +407,13 @@ async def acquire_live_browser_if_needed(user_id: str, tool_name: str) -> bool:
         return False
     holder = _holder_var.get()
     if holder is None:
+        logger.debug(
+            "[turnlock] no active turn scope for tool=%s user=%s — "
+            "skipping lock", tool_name, user_id[:8] if user_id else None,
+        )
         return False
+    logger.debug(
+        "[turnlock] acquire_live_browser_if_needed tool=%s user=%s role=%s",
+        tool_name, user_id[:8] if user_id else None, holder.role,
+    )
     return await holder.acquire(user_id)

@@ -99,7 +99,10 @@ async def _mirror_background_result(
     try:
         from lazyclaw.lazybrain import store as lb_store
     except Exception:
-        logger.debug("lazybrain store import failed", exc_info=True)
+        logger.debug(
+            "[taskrunner] lazybrain store import failed task=%s user=%s",
+            task_id[:8], user_id[:8], exc_info=True,
+        )
         return None
 
     instr = (instruction or "").strip()
@@ -129,7 +132,10 @@ async def _mirror_background_result(
             )
             lines.extend(["", "### Stats", stats])
         except Exception:
-            pass
+            logger.debug(
+                "[taskrunner] mirror stats formatting failed task=%s",
+                task_id[:8], exc_info=True,
+            )
 
     body = "\n".join(lines)
     title = f"Research · {task_name}"
@@ -151,7 +157,10 @@ async def _mirror_background_result(
         )
         return note.get("id")
     except Exception:
-        logger.debug("save_note failed for background mirror", exc_info=True)
+        logger.debug(
+            "[taskrunner] save_note failed for background mirror task=%s user=%s",
+            task_id[:8], user_id[:8], exc_info=True,
+        )
         return None
 
 
@@ -423,6 +432,11 @@ class TaskRunner:
         """
         # Validate limits
         if caller_depth >= MAX_TASK_DEPTH:
+            logger.warning(
+                "[taskrunner] submit rejected: max nesting depth reached "
+                "user=%s caller_depth=%d max_depth=%d",
+                user_id, caller_depth, MAX_TASK_DEPTH,
+            )
             raise RuntimeError(
                 f"Max background nesting depth ({MAX_TASK_DEPTH}) reached. "
                 f"This task is already running inside another background task "
@@ -430,12 +444,22 @@ class TaskRunner:
                 f"spawning a third level."
             )
         if len(self._running) >= MAX_GLOBAL_TASKS:
+            logger.warning(
+                "[taskrunner] submit rejected: global task cap reached "
+                "user=%s running=%d max=%d",
+                user_id, len(self._running), MAX_GLOBAL_TASKS,
+            )
             raise RuntimeError(
                 f"Maximum {MAX_GLOBAL_TASKS} background tasks running globally. "
                 f"Wait for one to finish or cancel with /tasks."
             )
         user_count = sum(1 for u in self._task_users.values() if u == user_id)
         if user_count >= MAX_PER_USER_TASKS:
+            logger.warning(
+                "[taskrunner] submit rejected: per-user task cap reached "
+                "user=%s user_count=%d max=%d",
+                user_id, user_count, MAX_PER_USER_TASKS,
+            )
             raise RuntimeError(
                 f"Maximum {MAX_PER_USER_TASKS} background tasks per user. "
                 f"Wait for one to finish or cancel with /tasks."
@@ -553,7 +577,10 @@ class TaskRunner:
                 fanout_group_id=fanout_group_id,
             ))
         except Exception:
-            logger.debug("task_event_bus publish (started) failed", exc_info=True)
+            logger.debug(
+                "[taskrunner] task_event_bus publish (started) failed task=%s",
+                task_id[:8], exc_info=True,
+            )
 
         logger.info(
             "Background task %s (%s) started for user %s",
@@ -658,6 +685,11 @@ class TaskRunner:
                                 else json.dumps(args, default=str)
                             )
                         except Exception:
+                            logger.debug(
+                                "[taskrunner] tool_call args json.dumps failed "
+                                "task=%s tool=%s",
+                                _bound_task_id, tool_name, exc_info=True,
+                            )
                             args_text = str(args)
                         partial = {
                             "kind": "tool",
@@ -691,6 +723,10 @@ class TaskRunner:
                                 else json.dumps(result_text, default=str)
                             )
                         except Exception:
+                            logger.debug(
+                                "[taskrunner] tool_result json.dumps failed task=%s",
+                                _bound_task_id, exc_info=True,
+                            )
                             result_text = str(result_text)
                         target["result_summary"] = " ".join(result_text.split())[:200]
                         started = target.pop("_started_at", time.monotonic())
@@ -710,7 +746,10 @@ class TaskRunner:
                     event.metadata.setdefault("bg_task_id", _bound_task_id)
                     event.metadata.setdefault("bg_task_name", _bg_task_display_name)
                 except Exception:
-                    logger.debug("bg event tagging failed", exc_info=True)
+                    logger.debug(
+                        "[taskrunner] bg event tagging failed task=%s",
+                        _bound_task_id, exc_info=True,
+                    )
 
                 await _original_cb.on_event(event)
 
@@ -753,6 +792,10 @@ class TaskRunner:
             # knows what ran. Real diagnosis still lives in the logs, but
             # this turns "??? task completed" into something readable.
             if not (result or "").strip() and _captured_summary is not None:
+                logger.debug(
+                    "[taskrunner] empty-reply fallback triggered task=%s tools=%d",
+                    task_id[:8], len(_captured_summary.tools_used or []),
+                )
                 tools = list(_captured_summary.tools_used or [])
                 duration_s = (_captured_summary.duration_ms or 0) // 1000
                 if tools:
@@ -787,8 +830,8 @@ class TaskRunner:
             if _looks_like_stranded_dispatch_promise(result, _tools_used):
                 logger.warning(
                     "Background task %s stored a stranded dispatch promise "
-                    "(%.80r) — rewriting to honest status",
-                    task_id[:8], result,
+                    "(len=%d) — rewriting to honest status",
+                    task_id[:8], len(result or ""),
                 )
                 result = (
                     "⏳ This task dispatched background subagents and then "
@@ -849,7 +892,10 @@ class TaskRunner:
                             break
                     _files_touched.sort()
                 except OSError:
-                    logger.debug("workspace glob failed", exc_info=True)
+                    logger.debug(
+                        "[taskrunner] workspace glob failed task=%s dir=%s",
+                        task_id[:8], _workspace_dir, exc_info=True,
+                    )
             _files_blob = (
                 encrypt(json.dumps(_files_touched), key)
                 if _files_touched else None
@@ -948,7 +994,10 @@ class TaskRunner:
                     fanout_group_id=_group_id,
                 ))
             except Exception:
-                logger.debug("task_event_bus publish (done) failed", exc_info=True)
+                logger.debug(
+                    "[taskrunner] task_event_bus publish (done) failed task=%s",
+                    task_id[:8], exc_info=True,
+                )
 
         except asyncio.TimeoutError:
             _status = "failed"
@@ -990,7 +1039,10 @@ class TaskRunner:
                     fanout_group_id=_group_id,
                 ))
             except Exception:
-                logger.debug("task_event_bus publish (timeout) failed", exc_info=True)
+                logger.debug(
+                    "[taskrunner] task_event_bus publish (timeout) failed task=%s",
+                    task_id[:8], exc_info=True,
+                )
 
         except asyncio.CancelledError:
             _status = "cancelled"
@@ -1041,7 +1093,10 @@ class TaskRunner:
                     fanout_group_id=_group_id,
                 ))
             except Exception:
-                logger.debug("task_event_bus publish (cancel) failed", exc_info=True)
+                logger.debug(
+                    "[taskrunner] task_event_bus publish (cancel) failed task=%s",
+                    task_id[:8], exc_info=True,
+                )
 
         except Exception as exc:
             _status = "failed"
@@ -1083,7 +1138,10 @@ class TaskRunner:
                     fanout_group_id=_group_id,
                 ))
             except Exception:
-                logger.debug("task_event_bus publish (fail) failed", exc_info=True)
+                logger.debug(
+                    "[taskrunner] task_event_bus publish (fail) failed task=%s",
+                    task_id[:8], exc_info=True,
+                )
 
         finally:
             # ALWAYS clean up (prevents memory leaks)
@@ -1124,6 +1182,11 @@ class TaskRunner:
         populated before any sibling can settle (race-free).
         """
         if self._lane_queue is None or not task_ids:
+            logger.debug(
+                "[taskrunner] register_subagent_fanout no-op group=%s "
+                "lane_queue_wired=%s task_count=%d",
+                group_id, self._lane_queue is not None, len(task_ids),
+            )
             return False
         group = self._brain_groups.get(group_id)
         if group is None:
@@ -1184,10 +1247,15 @@ class TaskRunner:
         round_no, granted_at = entry
         if time.monotonic() - granted_at > _RETRY_ROUND_TTL_S:
             logger.debug(
-                "retry-round grant for user %s expired — starting at 0",
-                user_id,
+                "[taskrunner] retry-round grant for user=%s expired "
+                "(age=%.1fs > ttl=%.1fs) — starting at 0",
+                user_id, time.monotonic() - granted_at, _RETRY_ROUND_TTL_S,
             )
             return 0
+        logger.debug(
+            "[taskrunner] retry-round %d claimed for user=%s",
+            round_no, user_id,
+        )
         return round_no
 
     def _grant_retry_round(self, user_id: str, next_round: int) -> None:
@@ -1195,6 +1263,10 @@ class TaskRunner:
         if getattr(self, "_fanout_retry_rounds", None) is None:
             self._fanout_retry_rounds = {}
         self._fanout_retry_rounds[user_id] = (next_round, time.monotonic())
+        logger.debug(
+            "[taskrunner] retry-round %d granted for user=%s",
+            next_round, user_id,
+        )
 
     def _record_brain_result(self, outcome: _FanoutResult) -> None:
         """Append a settled brain-fan-out task to its group; if this was
@@ -1210,8 +1282,8 @@ class TaskRunner:
                 break
         if target_group is None:
             logger.debug(
-                "_record_brain_result: no group owns task %s",
-                outcome.task_id,
+                "[taskrunner] _record_brain_result: no group owns task=%s success=%s",
+                outcome.task_id[:8], outcome.success,
             )
             return
         target_group.pending.discard(outcome.task_id)
@@ -1249,7 +1321,10 @@ class TaskRunner:
             from lazyclaw.runtime.streaming_setting import get_bg_streaming
             _quiet = not await get_bg_streaming(self._config, group.user_id)
         except Exception:
-            logger.debug("bg_streaming lookup failed in _consolidate", exc_info=True)
+            logger.debug(
+                "[taskrunner] bg_streaming lookup failed in _consolidate group=%s",
+                group_id, exc_info=True,
+            )
 
         # BUG-1 note: this 1-result streaming branch fires ONE
         # ``background_done`` card and returns early — it does NOT run a
@@ -1259,8 +1334,16 @@ class TaskRunner:
         # below only guards the multi-result synthetic-turn path).
         if len(group.results) == 1 and not _quiet:
             r = group.results[0]
+            logger.debug(
+                "[taskrunner] consolidate group=%s single-result fast path "
+                "success=%s", group_id, r.success,
+            )
             cb = group.consolidator_cb
             if cb is None:
+                logger.debug(
+                    "[taskrunner] consolidate group=%s single-result: no "
+                    "consolidator callback — dropping", group_id,
+                )
                 return
             kind = "background_done" if r.success else "background_failed"
             meta: dict = {
@@ -1303,6 +1386,12 @@ class TaskRunner:
             not r.success or _carries_report(r) for r in group.results
         )
         _any_succeeded = any(r.success for r in group.results)
+        logger.debug(
+            "[taskrunner] consolidate group=%s results=%d failure_present=%s "
+            "any_succeeded=%s retry_round=%d",
+            group_id, len(group.results), _failure_present, _any_succeeded,
+            group.retry_round,
+        )
 
         lines = [
             f"{CONSOLIDATION_TURN_PREFIX} — {len(group.results)} tasks finished]",
@@ -1412,9 +1501,9 @@ class TaskRunner:
         ):
             logger.warning(
                 "%s consolidation draft claims success while ALL %d "
-                "subagents failed (group=%s) — draft preview: %.200s",
+                "subagents failed (group=%s) — draft_len=%d",
                 COHERENCE_LOG_TAG, len(group.results), group_id,
-                result_text,
+                len(result_text or ""),
             )
 
         # ── Streaming-ON terminal `done` for the live bubble (BUG 1) ─────
@@ -1527,7 +1616,10 @@ class TaskRunner:
             try:
                 return decrypt(value, key) if is_encrypted(value) else value
             except Exception:
-                logger.debug("list_all: decrypt failed", exc_info=True)
+                logger.debug(
+                    "[taskrunner] list_all: decrypt failed for user=%s",
+                    user_id[:8], exc_info=True,
+                )
                 return None
 
         tasks = []
@@ -1547,12 +1639,18 @@ class TaskRunner:
                 try:
                     mcp_transcript = _json.loads(transcript_raw) or []
                 except Exception:
-                    logger.debug("list_all: transcript JSON parse failed", exc_info=True)
+                    logger.debug(
+                        "[taskrunner] list_all: transcript JSON parse failed task=%s",
+                        str(row[0])[:8], exc_info=True,
+                    )
             if files_raw:
                 try:
                     files_touched = _json.loads(files_raw) or []
                 except Exception:
-                    logger.debug("list_all: files JSON parse failed", exc_info=True)
+                    logger.debug(
+                        "[taskrunner] list_all: files JSON parse failed task=%s",
+                        str(row[0])[:8], exc_info=True,
+                    )
 
             tasks.append({
                 "id": row[0],
@@ -1578,6 +1676,10 @@ class TaskRunner:
         """Cancel a running task. Returns True if cancelled."""
         uid = self._task_users.get(task_id)
         if uid != user_id:
+            logger.debug(
+                "[taskrunner] cancel denied: task=%s not owned by user=%s",
+                task_id[:8], user_id,
+            )
             return False
 
         task = self._running.get(task_id)
@@ -1585,6 +1687,10 @@ class TaskRunner:
             task.cancel()
             logger.info("Cancelled background task %s", task_id[:8])
             return True
+        logger.debug(
+            "[taskrunner] cancel no-op: task=%s already done or not tracked",
+            task_id[:8],
+        )
         return False
 
     async def cancel_all(self) -> int:

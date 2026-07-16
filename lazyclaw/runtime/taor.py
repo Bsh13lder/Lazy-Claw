@@ -12,8 +12,11 @@ Effort levels:
 """
 from __future__ import annotations
 
+import logging
 import re
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class EffortLevel(str, Enum):
@@ -58,7 +61,10 @@ _PLAN_BYPASS = re.compile(
 
 def has_plan_bypass_phrase(message: str) -> bool:
     """True when the user told us to skip plan mode for this turn."""
-    return bool(_PLAN_BYPASS.search(message or ""))
+    bypassed = bool(_PLAN_BYPASS.search(message or ""))
+    if bypassed:
+        logger.debug("[taor] plan-bypass phrase detected — skipping plan mode this turn")
+    return bypassed
 
 
 def detect_effort(message: str, has_tools: bool = True) -> EffortLevel:
@@ -73,6 +79,7 @@ def detect_effort(message: str, has_tools: bool = True) -> EffortLevel:
       6. Default → MEDIUM.
     """
     if not has_tools:
+        logger.debug("[taor] detect_effort: no tools available -> LOW")
         return EffortLevel.LOW
 
     stripped = message.strip()
@@ -86,20 +93,39 @@ def detect_effort(message: str, has_tools: bool = True) -> EffortLevel:
 
     # Short messages with no complex intent → LOW
     if word_count <= 5 and not _HIGH_EFFORT.search(stripped):
+        logger.debug(
+            "[taor] detect_effort: short message (words=%d) -> LOW", word_count,
+        )
         return EffortLevel.LOW
 
     # Simple informational queries with no complex action → LOW
     if _LOW_EFFORT.match(stripped) and not _HIGH_EFFORT.search(stripped):
+        logger.debug(
+            "[taor] detect_effort: low-effort pattern match (words=%d) -> LOW",
+            word_count,
+        )
         return EffortLevel.LOW
 
     high_matches = _HIGH_EFFORT.findall(stripped)
     if not high_matches:
+        logger.debug(
+            "[taor] detect_effort: no high-effort keywords (words=%d) -> MEDIUM",
+            word_count,
+        )
         return EffortLevel.MEDIUM
 
     # Many high-effort keywords or very long message → MAX
     if len(high_matches) >= 3 or word_count > 60:
+        logger.debug(
+            "[taor] detect_effort: %d high-effort keyword(s), words=%d -> MAX",
+            len(high_matches), word_count,
+        )
         return EffortLevel.MAX
 
+    logger.debug(
+        "[taor] detect_effort: %d high-effort keyword(s), words=%d -> HIGH",
+        len(high_matches), word_count,
+    )
     return EffortLevel.HIGH
 
 
@@ -303,6 +329,7 @@ def parse_plan_steps(plan_text: str) -> list[str]:
             # Skip the header row that happens to match (e.g. bolded "**Plan**")
             if step and not step.lower().startswith("plan"):
                 steps.append(step)
+    logger.debug("[taor] parse_plan_steps: parsed %d step(s)", len(steps))
     return steps
 
 
@@ -328,9 +355,11 @@ def verify_response(
         (passed, failure_reason) — failure_reason is None when passed.
     """
     if effort == EffortLevel.LOW:
+        logger.debug("[taor] verify_response: effort=LOW -> skip verification, pass")
         return True, None
 
     if not final_response or not final_response.strip():
+        logger.debug("[taor] verify_response: FAIL reason=empty_response effort=%s", effort.value)
         return False, "Empty response — agent produced no output."
 
     lower = final_response.lower()
@@ -351,6 +380,11 @@ def verify_response(
     )
     failed_results = [r for r in tool_results if _FAILED_MARKER in r]
     if failed_results and _success_claim.search(final_response) and not _ack_failure.search(final_response):
+        logger.debug(
+            "[taor] verify_response: FAIL reason=unacknowledged_tool_failure "
+            "effort=%s failed_results=%d",
+            effort.value, len(failed_results),
+        )
         reason_preview = failed_results[-1]
         idx = reason_preview.find(_FAILED_MARKER)
         snippet = reason_preview[idx:idx + 120].replace("\n", " ")
@@ -375,6 +409,11 @@ def verify_response(
                 "issue", "wrong", "unfortunately",
             )
             if not any(w in lower for w in _ack_words):
+                logger.debug(
+                    "[taor] verify_response: FAIL reason=unhandled_tool_errors "
+                    "effort=%s unhandled=%d",
+                    effort.value, len(unhandled),
+                )
                 return False, (
                     "Tool errors were detected but the response does not "
                     f"address them: {unhandled[0]}"
@@ -388,6 +427,11 @@ def verify_response(
         "i need more information before i can",
     )
     if any(p in lower for p in _deferral_phrases):
+        logger.debug(
+            "[taor] verify_response: FAIL reason=deferred_response effort=%s",
+            effort.value,
+        )
         return False, "Response deferred the task instead of completing it."
 
+    logger.debug("[taor] verify_response: PASS effort=%s", effort.value)
     return True, None

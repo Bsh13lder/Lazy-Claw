@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any
 
@@ -522,8 +523,16 @@ class ClaudeSDKProvider(BaseLLMProvider):
         try:
             import claude_agent_sdk  # noqa: F401
         except ImportError:
+            logger.debug(
+                "[provider:claude_sdk] verify_key: claude-agent-sdk not importable",
+            )
             return False
-        return self._claude_bin is not None
+        if self._claude_bin is None:
+            logger.debug(
+                "[provider:claude_sdk] verify_key: `claude` binary not found",
+            )
+            return False
+        return True
 
     async def health_check(self) -> bool:
         return await self.verify_key()
@@ -611,6 +620,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         stop_reason: str | None = None
         session_id: str | None = None
         api_error: str | None = None
+        _t0 = time.monotonic()
 
         try:
             async for msg in sdk_query(prompt=prompt_text, options=options):
@@ -765,6 +775,17 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 len(tool_calls), [tc.name for tc in tool_calls],
             )
 
+        # Provider call boundary summary — latency + finish + token/cost
+        # telemetry (never prompt/response text).
+        logger.debug(
+            "[provider:claude_sdk] chat done model=%s latency=%dms stop=%s "
+            "tool_calls=%d tokens_in=%s tokens_out=%s api_equiv_cost=$%.4f",
+            self._model, int((time.monotonic() - _t0) * 1000), stop_reason,
+            len(tool_calls or []),
+            usage.get("prompt_tokens"), usage.get("completion_tokens"),
+            api_equiv_cost,
+        )
+
         return LLMResponse(
             content=content,
             model=f"claude-sdk ({self._model})",
@@ -841,6 +862,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         session_id: str | None = None
         api_error: str | None = None
         model_label = f"claude-sdk ({self._model})"
+        _t0 = time.monotonic()
 
         try:
             async for msg in sdk_query(prompt=prompt_text, options=options):
@@ -925,6 +947,14 @@ class ClaudeSDKProvider(BaseLLMProvider):
             usage["stop_reason"] = stop_reason
         if session_id:
             usage["session_id"] = session_id
+
+        logger.debug(
+            "[provider:claude_sdk] stream done model=%s latency=%dms stop=%s "
+            "tool_calls=%d tokens_in=%s tokens_out=%s",
+            self._model, int((time.monotonic() - _t0) * 1000), stop_reason,
+            len(tool_calls or []),
+            usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        )
 
         # Terminal chunk: empty delta, tool calls + usage attached.
         yield StreamChunk(
@@ -1137,24 +1167,38 @@ def check_claude_sdk_auth() -> tuple[bool, str]:
     try:
         import claude_agent_sdk  # noqa: F401
     except ImportError:
+        logger.warning(
+            "[provider:claude_sdk] auth check: claude-agent-sdk not installed",
+        )
         return False, (
             "claude-agent-sdk is not installed. Run "
             "`pip install claude-agent-sdk>=0.1.81` or rebuild Docker."
         )
 
     if _find_claude_binary() is None:
+        logger.debug(
+            "[provider:claude_sdk] auth check: no `claude` binary — SDK unused",
+        )
         return True, ""  # SDK unused — silent.
 
     import sys
     if sys.platform == "darwin" and not os.path.exists("/.dockerenv"):
+        logger.debug(
+            "[provider:claude_sdk] auth check: macOS host — trusting Keychain cred",
+        )
         return True, ""
 
     cred_path = os.path.expanduser("~/.claude/.credentials.json")
     if not os.path.isfile(cred_path) or os.path.getsize(cred_path) == 0:
+        logger.warning(
+            "[provider:claude_sdk] auth check: `claude` present but credentials "
+            "file missing/empty — SDK transport not logged in",
+        )
         return False, (
             "Claude CLI is installed but not logged in (SDK transport "
             "won't work either). Run `docker exec -it lazyclaw claude "
             "/login` or `claude /login` on the host."
         )
 
+    logger.debug("[provider:claude_sdk] auth check: ready")
     return True, ""

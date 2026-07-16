@@ -86,7 +86,11 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
 
     try:
         settings = json.loads(result[0])
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "[eco] user settings JSON unparseable for user=%s — using defaults: "
+            "%s", user_id, type(exc).__name__,
+        )
         return dict(DEFAULT_ECO)
 
     eco = settings.get("eco", {})
@@ -200,7 +204,11 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
     if result and result[0]:
         try:
             current_settings = json.loads(result[0])
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "[eco] existing settings JSON unparseable for user=%s on update "
+                "— overwriting with fresh doc: %s", user_id, type(exc).__name__,
+            )
             current_settings = {}
 
     # Update eco section (immutable pattern)

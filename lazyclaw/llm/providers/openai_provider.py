@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 
 import openai
 
 from lazyclaw.llm.providers.base import BaseLLMProvider, LLMMessage, LLMResponse, ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIProvider(BaseLLMProvider):
@@ -51,7 +55,24 @@ class OpenAIProvider(BaseLLMProvider):
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
-        response = await self._client.chat.completions.create(**create_kwargs)
+        logger.debug(
+            "[provider:openai] chat start model=%s tools=%d",
+            model, len(tools or []),
+        )
+        _t0 = time.monotonic()
+        try:
+            response = await self._client.chat.completions.create(**create_kwargs)
+        except Exception as exc:
+            # Provider call boundary — surface which model/provider failed and
+            # the error TYPE without leaking prompt/response content.
+            logger.warning(
+                "[provider:openai] chat failed model=%s tools=%d after %dms: %s: %s",
+                model, len(tools or []),
+                int((time.monotonic() - _t0) * 1000),
+                type(exc).__name__, exc,
+            )
+            raise
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
         choice = response.choices[0]
 
         usage = None
@@ -72,6 +93,14 @@ class OpenAIProvider(BaseLLMProvider):
                 )
                 for tc in choice.message.tool_calls
             ]
+
+        logger.debug(
+            "[provider:openai] chat done model=%s latency=%dms finish=%s "
+            "tool_calls=%d tokens_in=%s tokens_out=%s",
+            response.model, _latency_ms, choice.finish_reason,
+            len(parsed_tool_calls or []),
+            (usage or {}).get("prompt_tokens"), (usage or {}).get("completion_tokens"),
+        )
 
         return LLMResponse(
             content=choice.message.content or "",
@@ -206,4 +235,5 @@ class OpenAIProvider(BaseLLMProvider):
             )
             return True
         except openai.AuthenticationError:
+            logger.debug("[provider:openai] verify_key: authentication rejected")
             return False

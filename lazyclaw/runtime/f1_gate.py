@@ -85,12 +85,13 @@ def _any_channel_read_called(tool_history: list[str]) -> bool:
         from lazyclaw.runtime.agent import _is_channel_read_tool
 
         return any(_is_channel_read_tool(n) for n in tool_history)
-    except Exception:
+    except Exception as exc:
         # Fallback: reuse the detector module's channel-read patterns so
         # the gate keeps working even if agent.py can't be imported.
-        logger.debug(
-            "f1_gate: agent._is_channel_read_tool import failed; "
-            "using verifier fallback", exc_info=True,
+        logger.warning(
+            "[f1] agent._is_channel_read_tool import failed; using "
+            "verifier fallback error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
         )
         try:
             from lazyclaw.runtime.f1_content_verifier import (
@@ -98,10 +99,11 @@ def _any_channel_read_called(tool_history: list[str]) -> bool:
             )
 
             return _was_channel_read_tool_called(tool_history)
-        except Exception:
-            logger.debug(
-                "f1_gate: verifier fallback also failed; "
-                "treating turn as non-channel-read", exc_info=True,
+        except Exception as exc2:
+            logger.warning(
+                "[f1] verifier fallback also failed; treating turn as "
+                "non-channel-read error_type=%s: %s",
+                type(exc2).__name__, exc2, exc_info=True,
             )
             return False
 
@@ -131,6 +133,11 @@ def evaluate_grounding(
     try:
         # Step 1 — observe-only on non-channel-read turns.
         if not _any_channel_read_called(tool_history or []):
+            logger.debug(
+                "[f1] evaluate_grounding: non-channel-read turn "
+                "(tool_calls=%d) — observe-only, ok=True",
+                len(tool_history or []),
+            )
             return _OK_VERDICT
 
         # Lazy imports keep this module import-light AND let the
@@ -154,6 +161,11 @@ def evaluate_grounding(
         verdict = detect_confabulation(
             reply or "", tool_history, tool_results,
         )
+        logger.debug(
+            "[f1] evaluate_grounding: primary verdict kind=%r "
+            "is_confabulation=%s",
+            verdict.kind, verdict.is_confabulation,
+        )
 
         # Step 2b — phase-2 channel-gated unverified-quote enforcement.
         phase2_block = False
@@ -161,6 +173,9 @@ def evaluate_grounding(
         if phase2_enforcement_verdict is not None:
             phase2_block, phase2_reason = phase2_enforcement_verdict(
                 reply or "", tool_history, tool_results,
+            )
+            logger.debug(
+                "[f1] evaluate_grounding: phase2_block=%s", phase2_block,
             )
 
         if not (verdict.is_confabulation or phase2_block):
@@ -170,10 +185,15 @@ def evaluate_grounding(
         # spoon-feeds the raw tool data verbatim. ``build_raw_data_injection``
         # selects the most-recent successful read payload itself.
         if verdict.is_confabulation:
+            # NEVER log the offending phrase verbatim — it can carry
+            # reply-body text (failure_claim) or a quote-block wikilink
+            # token (wikilink_in_quote). ``reason`` is log-context only
+            # (consumed solely by logger.warning in teams/runner.py) —
+            # length is enough to size the finding.
             reason = (
                 f"confabulation kind={verdict.kind!r} "
                 f"tool={verdict.tool_name!r} "
-                f"phrase={verdict.offending_phrase!r} "
+                f"phrase_len={len(verdict.offending_phrase or '')} "
                 f"unverified_quotes={verdict.unverified_quote_count}"
             )
             inj_reason = "confabulation"
@@ -189,15 +209,21 @@ def evaluate_grounding(
             tool_results,
             reason=inj_reason,
         )
+        logger.debug(
+            "[f1] evaluate_grounding: blocking (ok=False) kind=%r "
+            "corrective_len=%d",
+            verdict.kind, len(corrective or ""),
+        )
         return GroundingVerdict(
             ok=False,
             reason=reason,
             corrective_injection=corrective,
         )
-    except Exception:
+    except Exception as exc:
         # FAIL-OPEN: a crashing detector must not break the specialist.
         logger.warning(
-            "f1_gate: grounding evaluation raised — failing OPEN "
-            "(shipping specialist reply un-gated)", exc_info=True,
+            "[f1] grounding evaluation raised — failing OPEN (shipping "
+            "specialist reply un-gated) error_type=%s: %s",
+            type(exc).__name__, exc, exc_info=True,
         )
         return _OK_VERDICT

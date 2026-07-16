@@ -243,7 +243,11 @@ async def mark_run_outcome(
             key = await get_user_dek(config, user_id)
             encrypted_error = encrypt(error[:500], key)
         except Exception as exc:
-            logger.debug("mark_run_outcome: encrypting error failed: %s", exc)
+            logger.debug(
+                "[heartbeat] mark_run_outcome: encrypting error failed "
+                "(job=%s user=%s): %s",
+                job_id, user_id, exc,
+            )
             encrypted_error = None
 
     async with db_session(config) as db:
@@ -253,3 +257,17 @@ async def mark_run_outcome(
             (status, encrypted_error, job_id, user_id),
         )
         await db.commit()
+
+    # Failed cron/job outcomes are otherwise silent — surface at WARNING so a
+    # repeatedly-failing background job is visible without DEBUG logging.
+    # Deliberately logs only ids + status (never the decrypted error text).
+    if status == "failed":
+        logger.warning(
+            "[heartbeat] job %s recorded FAILED outcome (user=%s)",
+            job_id, user_id,
+        )
+    else:
+        logger.debug(
+            "[heartbeat] job %s outcome=%s (user=%s)",
+            job_id, status, user_id,
+        )

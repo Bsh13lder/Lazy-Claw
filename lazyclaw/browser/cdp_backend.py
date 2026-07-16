@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 CDP_IDLE_TIMEOUT = 300
 
 
+def _log_host(url: str | None) -> str:
+    """Bare hostname for safe logging — NEVER logs path/query (may carry tokens).
+
+    Diagnostic-only helper. Returns ``"?"`` on empty/parse failure so a log
+    line always has a stable placeholder. This is the ONLY shape of a URL we
+    are allowed to emit to logs (an OAuth callback / signed-download URL can
+    smuggle secrets in the query string).
+    """
+    if not url:
+        return "?"
+    try:
+        from urllib.parse import urlparse
+
+        return (urlparse(url).hostname or "?").lower()
+    except Exception:
+        return "?"
+
+
 async def _target_needs_host_browser(
     target_url: str | None, user_id: str | None,
 ) -> bool:
@@ -347,7 +365,27 @@ class CDPBackend:
                     extra={"phase": "pre", "frame_b64": pre},
                 )
 
-        result = await coro
+        # Redact single-char press_key targets — those are literal keystroke
+        # content (never log typed text). Named keys (Enter/Tab/…) + CSS
+        # selectors are safe to trace.
+        safe_target = target
+        if action == "press_key" and target and len(target) == 1:
+            safe_target = "<char>"
+        tab_id = self._current_tab.id[:24] if self._current_tab else "?"
+        _t0 = time.monotonic()
+        try:
+            result = await coro
+        except Exception as exc:
+            logger.warning(
+                "[browser] action=%s target=%s tab=%s status=error err=%s dur_ms=%d",
+                action, safe_target, tab_id, type(exc).__name__,
+                (time.monotonic() - _t0) * 1000.0,
+            )
+            raise
+        logger.debug(
+            "[browser] action=%s target=%s tab=%s status=ok dur_ms=%d",
+            action, safe_target, tab_id, (time.monotonic() - _t0) * 1000.0,
+        )
 
         if capture_frames:
             post = await self._grab_frame_b64()
@@ -928,10 +966,16 @@ class CDPBackend:
                             self._just_created_ids.add(tab.id)
                         return [tab]
         except Exception as exc:
-            logger.warning("Failed to create tab: %s", exc)
+            logger.warning(
+                "[browser] action=create_tab host=%s status=error err=%s: %s",
+                _log_host(url), type(exc).__name__, exc,
+            )
         return []
 
     async def goto(self, url: str) -> None:
+        _nav_host = _log_host(url)
+        _nav_t0 = time.monotonic()
+        logger.debug("[browser] action=goto host=%s status=start", _nav_host)
         conn = await self._ensure_connected(target_url=url)
 
         self._emit(
@@ -955,6 +999,10 @@ class CDPBackend:
             # SPAs need time to render after hash change (Gmail: 1-2s)
             await asyncio.sleep(random.uniform(1.5, 2.5))
             await self._post_nav_emit(url)
+            logger.debug(
+                "[browser] action=goto host=%s status=ok nav=spa dur_ms=%d",
+                _nav_host, (time.monotonic() - _nav_t0) * 1000.0,
+            )
             return
 
         await conn.send("Page.navigate", {"url": url})
@@ -971,9 +1019,16 @@ class CDPBackend:
             await wait_for_page_ready(conn, timeout=5.0)
             await detect_and_solve_cloudflare(conn, timeout=20.0)
         except Exception:
-            logger.warning("Page ready / Cloudflare detection failed after navigation", exc_info=True)
+            logger.warning(
+                "[browser] page-ready/Cloudflare handling failed after nav host=%s",
+                _nav_host, exc_info=True,
+            )
 
         await self._post_nav_emit(url)
+        logger.debug(
+            "[browser] action=goto host=%s status=ok nav=full dur_ms=%d",
+            _nav_host, (time.monotonic() - _nav_t0) * 1000.0,
+        )
 
     async def _post_nav_emit(self, requested_url: str) -> None:
         """Emit navigate event with final URL+title and capture a thumbnail."""
@@ -1038,6 +1093,7 @@ class CDPBackend:
         return inner.get("value", inner.get("description", ""))
 
     async def screenshot(self, full_page: bool = False) -> bytes:
+        _shot_t0 = time.monotonic()
         conn = await self._ensure_connected()
         params: dict = {"format": "png", "quality": 80}
         if full_page:
@@ -1081,6 +1137,12 @@ class CDPBackend:
         self._emit(
             kind="action", action="screenshot",
             detail="Captured screenshot",
+        )
+        # Log byte-count only (never the image bytes / page content).
+        logger.debug(
+            "[browser] action=screenshot tab=%s full_page=%s bytes=%d dur_ms=%d",
+            self._current_tab.id[:24] if self._current_tab else "?",
+            full_page, len(png_bytes), (time.monotonic() - _shot_t0) * 1000.0,
         )
         return png_bytes
 
@@ -1265,6 +1327,10 @@ class CDPBackend:
     async def tabs(self) -> list[TabInfo]:
         chrome_tabs = await list_chrome_tabs(self._port, host=self._tab_list_host())
         current_id = self._current_tab.id if self._current_tab else ""
+        logger.debug(
+            "[browser] action=tabs source=%s count=%d",
+            self._cdp_source or "?", len(chrome_tabs),
+        )
         return [
             TabInfo(
                 id=t.id,
@@ -1279,7 +1345,15 @@ class CDPBackend:
         chrome_tabs = await list_chrome_tabs(self._port, host=self._tab_list_host())
         target = next((t for t in chrome_tabs if t.id == tab_id), None)
         if not target:
+            logger.warning(
+                "[browser] action=switch_tab tab=%s status=not_found (of %d tabs)",
+                tab_id[:24], len(chrome_tabs),
+            )
             raise ValueError(f"Tab not found: {tab_id}")
+        logger.debug(
+            "[browser] action=switch_tab tab=%s host=%s focus=%s",
+            tab_id[:24], _log_host(target.url), focus,
+        )
 
         # Close old connection, connect to new tab
         if self._conn:
@@ -1420,7 +1494,15 @@ class CDPBackend:
         if nodes:
             _format_node(nodes[0], 0)
 
-        return "\n".join(lines)
+        tree = "\n".join(lines)
+        # Log the READ action: node count + output size ONLY, never the tree
+        # text (page content must not enter logs).
+        logger.debug(
+            "[browser] action=read tab=%s nodes=%d chars=%d",
+            self._current_tab.id[:24] if self._current_tab else "?",
+            len(nodes), len(tree),
+        )
+        return tree
 
     async def find_element_by_role(self, description: str) -> dict | None:
         """Find an element by role/label description and return its coordinates.
@@ -1561,7 +1643,11 @@ class CDPBackend:
             )
             return {"role": role_name, "name": label}
         except Exception as exc:
-            logger.debug("click_by_role failed: %s", exc)
+            logger.warning(
+                "[browser] action=click_by_role tab=%s status=error err=%s: %s",
+                self._current_tab.id[:24] if self._current_tab else "?",
+                type(exc).__name__, exc,
+            )
 
         return None
 
@@ -1750,7 +1836,15 @@ class CDPBackend:
         result = await conn.send("Target.createTarget", params)
         target_id = result.get("targetId", "")
         if not target_id:
+            logger.warning(
+                "[browser] action=new_tab host=%s background=%s status=no_target_id",
+                _log_host(url), background,
+            )
             raise RuntimeError("Target.createTarget returned no targetId")
+        logger.debug(
+            "[browser] action=new_tab host=%s background=%s tab=%s",
+            _log_host(url), background, target_id[:24],
+        )
         return target_id
 
     async def attach_to_target(self, target_id: str) -> str:
@@ -1788,8 +1882,12 @@ class CDPBackend:
                 kind="action", action="close_tab", target=target_id[:24],
                 detail="Closed tab",
             )
+            logger.debug("[browser] action=close_tab tab=%s status=ok", target_id[:24])
         except Exception as exc:
-            logger.debug("close_tab %s failed: %s", target_id, exc)
+            logger.warning(
+                "[browser] action=close_tab tab=%s status=error err=%s",
+                target_id[:24], type(exc).__name__,
+            )
 
     @property
     def backend_type(self) -> str:

@@ -58,7 +58,10 @@ def _dispatch_concurrency() -> int:
             if n >= 1:
                 return n
         except ValueError:
-            pass
+            logger.debug(
+                "[dispatch] invalid LAZYCLAW_DISPATCH_CONCURRENCY=%r — using default",
+                raw,
+            )
     return 4
 
 
@@ -212,13 +215,23 @@ class AgentDispatcher:
             async with sem:
                 return await self._run_subagent(cfg, user_id)
 
+        logger.debug(
+            "[dispatch] sync dispatch() invoked: %d subagent(s), user=%s, concurrency_cap=%d",
+            len(configs), user_id[:8] if user_id else "", cap,
+        )
         if len(configs) > cap:
             logger.info(
                 "dispatch: %d tasks, capping concurrency at %d",
                 len(configs), cap,
             )
         tasks = [_run_with_cap(cfg) for cfg in configs]
-        return list(await asyncio.gather(*tasks))
+        results = list(await asyncio.gather(*tasks))
+        succeeded = sum(1 for r in results if r.success)
+        logger.debug(
+            "[dispatch] sync dispatch() settled: %d/%d succeeded",
+            succeeded, len(results),
+        )
+        return results
 
     async def submit_async(
         self,
@@ -254,6 +267,13 @@ class AgentDispatcher:
         """
         if not configs:
             return []
+        logger.debug(
+            "[dispatch] background submit_async() invoked: %d subagent(s), "
+            "agent_types=%s, user=%s",
+            len(configs),
+            [c.agent_type.value for c in configs],
+            user_id[:8] if user_id else "",
+        )
         task_ids: list[str] = [
             f"subagent-{uuid.uuid4().hex[:8]}" for _ in configs
         ]
@@ -264,7 +284,9 @@ class AgentDispatcher:
                 on_register(list(task_ids))
             except Exception:
                 logger.debug(
-                    "submit_async on_register hook failed", exc_info=True,
+                    "submit_async on_register hook failed for %d task(s), "
+                    "fanout_group_id=%s",
+                    len(task_ids), fanout_group_id, exc_info=True,
                 )
         for cfg, task_id in zip(configs, task_ids):
             bg = asyncio.create_task(
@@ -319,6 +341,12 @@ class AgentDispatcher:
             )
 
         kind = "background_done" if result.success else "background_failed"
+        logger.debug(
+            "[dispatch] background subagent settled: type=%s task=%s kind=%s "
+            "result_len=%d duration_ms=%d",
+            cfg.agent_type.value, task_id, kind,
+            len(result.result or ""), result.duration_ms,
+        )
         try:
             task_event_bus.publish(task_event_bus.TaskEvent(
                 user_id=user_id,
@@ -335,7 +363,8 @@ class AgentDispatcher:
             ))
         except Exception:
             logger.debug(
-                "task_event_bus publish failed for %s", task_id, exc_info=True,
+                "task_event_bus publish failed for %s (kind=%s)",
+                task_id, kind, exc_info=True,
             )
 
         # RC2: feed the settled result into the fan-out group so the last
@@ -348,8 +377,8 @@ class AgentDispatcher:
                     await _maybe
             except Exception:
                 logger.debug(
-                    "submit_async on_settle hook failed for %s",
-                    task_id, exc_info=True,
+                    "submit_async on_settle hook failed for %s (fanout_group_id=%s)",
+                    task_id, fanout_group_id, exc_info=True,
                 )
 
     async def _run_subagent(
@@ -378,6 +407,12 @@ class AgentDispatcher:
         # can stop a single subagent without taking down the rest.
         sub_cancel = CancellationToken()
 
+        logger.debug(
+            "[dispatch] _run_subagent start: type=%s task=%s user=%s timeout=%ds",
+            cfg.agent_type.value, task_id,
+            user_id[:8] if user_id else "", cfg.timeout,
+        )
+
         # Register with TeamLead so the Activity panel shows the subagent
         # alongside specialists and background tasks.
         if self._team_lead is not None:
@@ -393,7 +428,9 @@ class AgentDispatcher:
                 )
             except Exception:
                 logger.debug(
-                    "team_lead.register failed for %s", task_id, exc_info=True,
+                    "team_lead.register failed for %s (agent_type=%s, user=%s)",
+                    task_id, cfg.agent_type.value,
+                    user_id[:8] if user_id else "", exc_info=True,
                 )
 
         # Background subagents are silent on the chat WS by design — events
@@ -436,10 +473,16 @@ class AgentDispatcher:
                         self._team_lead.fail(task_id, error=result.error or "")
                 except Exception:
                     logger.debug(
-                        "team_lead.complete/fail failed for %s",
-                        task_id, exc_info=True,
+                        "team_lead.complete/fail failed for %s (agent_type=%s)",
+                        task_id, cfg.agent_type.value, exc_info=True,
                     )
 
+            logger.debug(
+                "[dispatch] _run_subagent done: type=%s task=%s success=%s "
+                "result_len=%d duration_ms=%d",
+                cfg.agent_type.value, task_id, result.success,
+                len(result.result or ""), duration_ms,
+            )
             return SubagentResult(
                 agent_type=cfg.agent_type,
                 task=cfg.task,
@@ -454,8 +497,9 @@ class AgentDispatcher:
             duration_ms = int((time.monotonic() - start) * 1000)
             err = f"Timed out after {cfg.timeout}s"
             logger.warning(
-                "Subagent %s timed out after %ds: %.60s",
-                cfg.agent_type.value, cfg.timeout, cfg.task,
+                "[dispatch] Subagent %s (task=%s) timed out after %ds "
+                "(task_len=%d chars)",
+                cfg.agent_type.value, task_id, cfg.timeout, len(cfg.task),
             )
             if self._team_lead is not None:
                 try:
@@ -477,8 +521,10 @@ class AgentDispatcher:
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
             logger.error(
-                "Subagent %s failed: %s — %.60s",
-                cfg.agent_type.value, exc, cfg.task,
+                "[dispatch] Subagent %s (task=%s) failed: %s: %s "
+                "(task_len=%d chars)",
+                cfg.agent_type.value, task_id, type(exc).__name__, exc,
+                len(cfg.task),
             )
             if self._team_lead is not None:
                 try:

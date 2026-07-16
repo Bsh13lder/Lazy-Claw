@@ -38,8 +38,12 @@ void backgroundSyncDispatcher() {
     try {
       await runHeadlessSync();
       return true;
-    } catch (_) {
+    } catch (e) {
       // Returning false asks the OS to retry with backoff.
+      debugPrint(
+        'backgroundSyncDispatcher: headless sync failed — asking OS to retry '
+        'with backoff: $e',
+      );
       return false;
     }
   });
@@ -57,6 +61,7 @@ Future<void> runHeadlessSync() async {
   // (no NAT hairpin), so the old `ServerConfig.load()` meant background sync
   // could NEVER run there. probing self-heals to the LAN host in that case.
   final baseUrl = await ServerConfig.resolveBaseUrl();
+  debugPrint('runHeadlessSync: starting headless sync against $baseUrl');
   final client = ApiClient(baseUrl: baseUrl);
   // DEDICATED connection (singleInstance: false): with sqflite's default
   // singleInstance: true, native handles are keyed by PATH — this background
@@ -73,8 +78,9 @@ Future<void> runHeadlessSync() async {
         TaskDao(db),
         TasksRepository(DioTasksTransport(client)),
       ).sync();
-    } catch (_) {
+    } catch (e) {
       // Task sync failure is non-fatal — continue with remaining domains.
+      debugPrint('runHeadlessSync: task sync failed (non-fatal): $e');
     }
 
     // Repaint the home-screen Tasks widget off the freshly synced cache.
@@ -83,8 +89,9 @@ Future<void> runHeadlessSync() async {
     // [updateTasksWidget] is internally guarded and never throws.
     try {
       await updateTasksWidget(await TaskDao(db).list());
-    } catch (_) {
+    } catch (e) {
       // Widget repaint is non-fatal.
+      debugPrint('runHeadlessSync: tasks widget repaint failed (non-fatal): $e');
     }
 
     // Notes
@@ -93,8 +100,9 @@ Future<void> runHeadlessSync() async {
         NoteDao(db),
         NotesRepository(DioNotesTransport(client)),
       ).sync();
-    } catch (_) {
+    } catch (e) {
       // Note sync failure is non-fatal — continue with remaining domains.
+      debugPrint('runHeadlessSync: note sync failed (non-fatal): $e');
     }
 
     // Budgets (projects + expenses share one cursor)
@@ -103,8 +111,9 @@ Future<void> runHeadlessSync() async {
         BudgetsDao(db),
         BudgetsRepository(DioBudgetsTransport(client)),
       ).sync();
-    } catch (_) {
+    } catch (e) {
       // Budgets sync failure is non-fatal.
+      debugPrint('runHeadlessSync: budgets sync failed (non-fatal): $e');
     }
 
     // Documents (Sheets/Docs/PDF): drain outbox + pull /changes for each kind so
@@ -116,12 +125,17 @@ Future<void> runHeadlessSync() async {
       for (final kind in DocKind.values) {
         try {
           await DocumentSync(docDao, docRepo, kind).sync();
-        } catch (_) {
+        } catch (e) {
           // One kind failing must not abort the others.
+          debugPrint(
+            'runHeadlessSync: document sync failed for kind=${kind.api} '
+            '(non-fatal): $e',
+          );
         }
       }
-    } catch (_) {
+    } catch (e) {
       // Document sync failure is non-fatal.
+      debugPrint('runHeadlessSync: document sync setup failed (non-fatal): $e');
     }
 
     // Server-notification feed: surface watcher/background-job/escalation
@@ -131,11 +145,13 @@ Future<void> runHeadlessSync() async {
     try {
       await LocalNotifications.init();
       await pullNotificationsFeed(client);
-    } catch (_) {
+    } catch (e) {
       // Notification catch-up is non-fatal.
+      debugPrint('runHeadlessSync: notification catch-up failed (non-fatal): $e');
     }
   } finally {
     await db.close();
+    debugPrint('runHeadlessSync: headless sync pass complete');
   }
 }
 
@@ -155,8 +171,12 @@ Future<void> registerBackgroundSync() async {
       existingWorkPolicy: ExistingWorkPolicy.keep,
       constraints: Constraints(networkType: NetworkType.connected),
     );
-  } catch (_) {
+  } catch (e) {
     // Best-effort: foreground sync (on load / refresh / reachability flip)
     // still keeps the cache fresh even if background scheduling is unavailable.
+    debugPrint(
+      'registerBackgroundSync: WorkManager registration unavailable — relying '
+      'on foreground sync only: $e',
+    );
   }
 }

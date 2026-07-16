@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/budget_entry.dart';
@@ -1057,6 +1058,16 @@ class BudgetsDao {
         healed++;
       }
     });
+    if (projRows.isNotEmpty ||
+        expRows.isNotEmpty ||
+        entryRows.isNotEmpty ||
+        healed > 0) {
+      debugPrint(
+        'BudgetsDao.reenqueueOrphanedCreates: orphan candidates — '
+        'projects=${projRows.length} expenses=${expRows.length} '
+        'entries=${entryRows.length}; re-enqueued $healed stranded create(s)',
+      );
+    }
     return healed;
   }
 
@@ -1253,6 +1264,7 @@ class BudgetsDao {
       'payload': jsonEncode(payload),
       'created_at': createdAt,
     });
+    debugPrint('BudgetsDao: queued outbox op=$op entity=$entity id=$entityId');
   }
 
   Project _projectFromRow(Map<String, Object?> row) => Project(

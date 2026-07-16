@@ -70,7 +70,18 @@ async def request_checkpoint(
     if not user_id or not name:
         return {"approved": False, "reason": "missing user or checkpoint name"}
 
+    # Log that a gate fired + which action class (the ``name``), NEVER the
+    # ``detail`` payload (may echo page/transaction content).
+    logger.info(
+        "[browser] checkpoint gate fired user=%s action_class=%s",
+        user_id, name,
+    )
+
     if has_approved(user_id, name):
+        logger.debug(
+            "[browser] checkpoint auto-approved user=%s action_class=%s",
+            user_id, name,
+        )
         return {"approved": True, "reason": "auto-approved (previously confirmed)"}
 
     # Replace any older pending checkpoint for this user (only one at a time).
@@ -106,6 +117,12 @@ async def request_checkpoint(
             _pending.pop(user_id, None)
 
     decision = pending.decision or {"approved": False, "reason": "unknown"}
+    # Log approved bool + action class only — the free-text ``reason`` may
+    # carry a user-typed rejection note, so it stays out of logs.
+    logger.info(
+        "[browser] checkpoint resolved user=%s action_class=%s approved=%s",
+        user_id, name, decision.get("approved"),
+    )
     if decision.get("approved"):
         remember_approved(user_id, name)
     return decision

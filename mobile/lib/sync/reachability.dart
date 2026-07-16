@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/api/api_client.dart';
 
@@ -95,6 +96,12 @@ class Reachability {
 
   void _set(bool next) {
     final changed = next != _value;
+    if (changed) {
+      debugPrint(
+        'Reachability: transition ${_value ? 'online' : 'offline'} → '
+        '${next ? 'online' : 'offline'} (host reachable=$next)',
+      );
+    }
     _value = next;
     if (changed) _controller.add(next);
   }

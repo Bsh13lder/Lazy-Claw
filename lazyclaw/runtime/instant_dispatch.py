@@ -192,6 +192,10 @@ async def try_instant_dispatch(
     """
     if registry is None or not message or not user_id:
         return None
+    logger.debug(
+        "[dispatch] instant_dispatch check: user=%s message_len=%d",
+        user_id[:8] if user_id else "", len(message),
+    )
     # Strip a single known cron/heartbeat prefix so ``[JOB:foo] check upwork
     # inbox`` lights up the same route as ``check upwork inbox``. Unknown
     # bracketed prefixes are left in place — they have to be handled by the
@@ -215,10 +219,12 @@ async def try_instant_dispatch(
         try:
             params = route.params_builder(m)
             output = await skill.execute(user_id, params)
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "instant_dispatch %s raised — falling back to brain path",
-                route.skill_name, exc_info=True,
+                "instant_dispatch %s raised (%s: %s) for user=%s — "
+                "falling back to brain path",
+                route.skill_name, type(exc).__name__, exc,
+                user_id[:8] if user_id else "", exc_info=True,
             )
             return None
         if not isinstance(output, str):
@@ -229,8 +235,8 @@ async def try_instant_dispatch(
             return None
         elapsed_ms = int((time.monotonic() - start) * 1000)
         logger.info(
-            "instant_dispatch HIT route=%s skill=%s elapsed=%dms",
-            route.description, route.skill_name, elapsed_ms,
+            "instant_dispatch HIT route=%s skill=%s elapsed=%dms output_len=%d",
+            route.description, route.skill_name, elapsed_ms, len(output),
         )
         return InstantDispatchResult(
             output=output,
@@ -238,4 +244,7 @@ async def try_instant_dispatch(
             elapsed_ms=elapsed_ms,
             route_description=route.description,
         )
+    logger.debug(
+        "[dispatch] instant_dispatch MISS — no route matched, falling back to brain path",
+    )
     return None

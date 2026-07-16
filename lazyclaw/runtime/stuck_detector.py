@@ -7,8 +7,11 @@ the agent loop to act on.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,10 @@ def detect_inline_pivot(
         count += 1
     if count < threshold:
         return None
+    logger.debug(
+        "[stuck] inline-pivot trip tool=%s consecutive=%d threshold=%d outcome=blocked",
+        last[0], count, threshold,
+    )
     return PivotSignal(
         reason="same_shape_inline_loop",
         tool_name=last[0],
@@ -107,6 +114,7 @@ def detect_captcha(tool_result: str) -> StuckSignal | None:
 
     match = _CAPTCHA_RE.search(tool_result)
     if match:
+        logger.debug("[stuck] captcha trip tool=browser outcome=blocked")
         return StuckSignal(
             reason="captcha",
             tool_name="browser",
@@ -215,8 +223,17 @@ def detect_tool_loop(
         last_n_results = results[-limit:]
         for i in range(1, len(last_n_results)):
             if _similarity_ratio(last_n_results[i - 1], last_n_results[i]) < 0.85:
+                logger.debug(
+                    "[stuck] tool_loop trip=SUPPRESSED tool=%s consecutive=%d "
+                    "limit=%d outcome=allowed (results diverged — batch progress)",
+                    last_tool, limit, limit,
+                )
                 return None
 
+    logger.debug(
+        "[stuck] tool_loop trip tool=%s consecutive=%d limit=%d outcome=blocked",
+        last_tool, limit, limit,
+    )
     return StuckSignal(
         reason="loop",
         tool_name=last_tool,
@@ -258,6 +275,10 @@ def detect_repeated_errors(
             break
 
     if error_count >= _MIN_ERROR_STREAK:
+        logger.debug(
+            "[stuck] repeated_error trip tool=%s consecutive=%d limit=%d outcome=blocked",
+            last_tool, error_count, _MIN_ERROR_STREAK,
+        )
         return StuckSignal(
             reason="repeated_error",
             tool_name=last_tool,
@@ -370,6 +391,10 @@ def detect_intent_flail(
         return None
 
     prefix = failing_group[0].rstrip("_")
+    logger.debug(
+        "[stuck] intent_flail trip group=%s tool=%s group_errors=%d outcome=blocked",
+        prefix, last_tool, group_error_count,
+    )
     return StuckSignal(
         reason="intent_flail",
         tool_name=last_tool,
@@ -430,6 +455,10 @@ def detect_same_result(
 
     # All similar — agent is stuck
     preview = base[:80].replace("\n", " ")
+    logger.debug(
+        "[stuck] same_result trip result_len=%d threshold=%d outcome=blocked",
+        len(base), threshold,
+    )
     return StuckSignal(
         reason="same_result",
         tool_name="unknown",
@@ -483,6 +512,10 @@ def detect_no_progress(
         # No verifier output (old snapshot/read actions) — don't count
 
     if failed_streak >= _NO_PROGRESS_THRESHOLD:
+        logger.debug(
+            "[stuck] no_progress trip tool=browser consecutive=%d limit=%d outcome=blocked",
+            failed_streak, _NO_PROGRESS_THRESHOLD,
+        )
         return StuckSignal(
             reason="no_progress",
             tool_name="browser",
@@ -532,6 +565,11 @@ def detect_hallucinated_element(
             break
 
     if hallucination_streak >= _HALLUCINATION_THRESHOLD:
+        logger.debug(
+            "[stuck] hallucinated_element trip tool=browser consecutive=%d "
+            "limit=%d outcome=blocked",
+            hallucination_streak, _HALLUCINATION_THRESHOLD,
+        )
         return StuckSignal(
             reason="hallucinated_element",
             tool_name="browser",
@@ -559,27 +597,32 @@ def detect_stuck(
     if last_result:
         signal = detect_captcha(last_result)
         if signal:
+            logger.debug("[stuck] detect_stuck resolved via=captcha")
             return signal
 
     # Hallucinated element: agent keeps clicking refs that don't exist
     signal = detect_hallucinated_element(tool_history, tool_results)
     if signal:
+        logger.debug("[stuck] detect_stuck resolved via=hallucinated_element")
         return signal
 
     # No progress: last N browser actions all failed verification
     signal = detect_no_progress(tool_history, tool_results)
     if signal:
+        logger.debug("[stuck] detect_stuck resolved via=no_progress")
         return signal
 
     # Repeated errors
     signal = detect_repeated_errors(tool_history, tool_results)
     if signal:
+        logger.debug("[stuck] detect_stuck resolved via=repeated_errors")
         return signal
 
     # Intent flail — catches the "n8n failed → pivot to run_command / browser"
     # pattern where the plain repeated-error counter resets on tool-name change.
     signal = detect_intent_flail(tool_history, tool_results)
     if signal:
+        logger.debug("[stuck] detect_stuck resolved via=intent_flail")
         return signal
 
     # Same result (different args but identical output — SPA not navigating, etc.)
@@ -593,12 +636,14 @@ def detect_stuck(
                 context=signal.context,
                 needs_browser=signal.needs_browser,
             )
+        logger.debug("[stuck] detect_stuck resolved via=same_result")
         return signal
 
     # Tool loop — pass results so batch reads with varying content
     # (e.g. email_get(id=X) 24× → 24 different emails) don't false-fire.
     signal = detect_tool_loop(tool_history, results=tool_results)
     if signal:
+        logger.debug("[stuck] detect_stuck resolved via=tool_loop")
         return signal
 
     return None

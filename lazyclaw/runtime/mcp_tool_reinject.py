@@ -33,9 +33,10 @@ def snapshot_mcp_tool_names(registry: Any) -> set[str]:
             name = (tool_info.get("function") or {}).get("name")
             if name:
                 names.add(name)
+        logger.debug("[mcpreinject] snapshot captured %d MCP tool name(s)", len(names))
         return names
     except Exception:
-        logger.debug("snapshot_mcp_tool_names failed", exc_info=True)
+        logger.warning("[mcpreinject] snapshot_mcp_tool_names failed", exc_info=True)
         return set()
 
 
@@ -105,10 +106,14 @@ def reinject_mcp_tools(
             tools.append(schema)
             existing_names.add(name)
             newly_injected.append(name)
+        logger.debug(
+            "[mcpreinject] reinjected %d tool(s): %s",
+            len(newly_injected), newly_injected,
+        )
         return newly_injected
     except Exception:
         logger.warning(
-            "reinject_mcp_tools failed; returning empty list",
+            "[mcpreinject] reinject_mcp_tools failed; returning empty list",
             exc_info=True,
         )
         return []

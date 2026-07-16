@@ -91,9 +91,14 @@ def _assert_transition(old: GoalStatus, new: GoalStatus) -> None:
     if old == new:
         return  # idempotent — re-applying same status is fine
     if (old, new) not in _VALID_TRANSITIONS:
+        logger.warning(
+            "[goal] rejected invalid transition %s -> %s",
+            old.value, new.value,
+        )
         raise InvalidGoalTransition(
             f"cannot transition {old.value!r} → {new.value!r}"
         )
+    logger.debug("[goal] transition %s -> %s", old.value, new.value)
 
 
 # ── Data model ───────────────────────────────────────────────────────
@@ -212,7 +217,10 @@ def _plan_from_envelope(payload: str | None) -> dict:
     try:
         return json.loads(payload)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("goal_executor.plan_from_envelope failed to parse")
+        logger.warning(
+            "[goal] plan_from_envelope failed to parse (payload_len=%d)",
+            len(payload) if payload else 0,
+        )
         return {}
 
 
@@ -281,7 +289,10 @@ class GoalRepository:
         try:
             status = GoalStatus(status_str)
         except ValueError:
-            logger.warning("goal_executor unknown status %r in row %s", status_str, id_)
+            logger.warning(
+                "[goal] unknown status %r in row=%s — coercing to FAILED",
+                status_str, id_,
+            )
             status = GoalStatus.FAILED
 
         return Goal(
@@ -514,7 +525,10 @@ class GoalExecutor:
             )
             lb_results = lb_hits.get("results") or []
         except Exception:
-            logger.debug("goal_executor.start lazybrain lookup failed", exc_info=True)
+            logger.debug(
+                "[goal] start: lazybrain lookup failed user=%s",
+                user_id[:8], exc_info=True,
+            )
             lb_results = []
 
         # 2. Gather zero-LLM context (4 parallel lanes).
@@ -524,7 +538,10 @@ class GoalExecutor:
                 self._config, user_id, title,
             )
         except Exception:
-            logger.debug("goal_executor.start plan_research failed", exc_info=True)
+            logger.debug(
+                "[goal] start: plan_research failed user=%s",
+                user_id[:8], exc_info=True,
+            )
             research_md = ""
 
         enriched_message = _build_enriched_message(title, hints, lb_results, research_md)
@@ -537,7 +554,10 @@ class GoalExecutor:
                 self._config, user_id, enriched_message, timeout_s=12.0,
             )
         except Exception:
-            logger.warning("goal_executor.start build_fix_plan failed", exc_info=True)
+            logger.warning(
+                "[goal] start: build_fix_plan failed user=%s",
+                user_id[:8], exc_info=True,
+            )
 
         steps = tuple(
             GoalStep(idx=i, description=desc)
@@ -573,6 +593,12 @@ class GoalExecutor:
             account_slug=account_slug,
             last_action="drafted plan" if plan else "draft failed — LLM unavailable",
             last_progress_at=time.time(),
+        )
+        logger.debug(
+            "[goal] start: drafted id=%s user=%s status=%s steps=%d "
+            "questions=%d confidence=%s",
+            goal.id, user_id[:8], initial_status.value, len(steps),
+            len(questions), confidence,
         )
         goal = await self._repo.create(goal)
 
@@ -620,6 +646,12 @@ class GoalExecutor:
             next_status = GoalStatus.EXECUTING
 
         _assert_transition(goal.status, next_status)
+        logger.info(
+            "[goal] submit_answers id=%s user=%s %s -> %s "
+            "(answered=%d, remaining=%d)",
+            goal_id, user_id[:8], goal.status.value, next_status.value,
+            len(answers), len(remaining),
+        )
         updated = replace(
             goal,
             status=next_status,
@@ -652,17 +684,21 @@ class GoalExecutor:
         )
         if callback is None:
             logger.info(
-                "goal_executor.dispatch user=%s id=%s — no dispatch_callback "
+                "[goal] dispatch user=%s id=%s — no dispatch_callback "
                 "configured (state machine paused at EXECUTING)",
                 goal.user_id, goal.id,
             )
             return
+        logger.debug(
+            "[goal] dispatch id=%s user=%s account_slug=%s work_type=%s",
+            goal.id, goal.user_id, goal.account_slug, goal.work_type,
+        )
         try:
             await callback(goal)
         except Exception as exc:
             logger.exception(
-                "goal_executor.dispatch failed user=%s id=%s",
-                goal.user_id, goal.id,
+                "[goal] dispatch failed user=%s id=%s error_type=%s",
+                goal.user_id, goal.id, type(exc).__name__,
             )
             await self._fail(goal, f"dispatch error: {exc!s}")
 
@@ -700,6 +736,10 @@ class GoalExecutor:
             last_action=action or f"step {idx} {status}",
             last_progress_at=now,
         )
+        logger.debug(
+            "[goal] mark_step id=%s user=%s idx=%d %s -> %s",
+            goal_id, user_id[:8], idx, existing.status, status,
+        )
         return await self._repo.update(updated)
 
     async def mark_done(self, user_id: str, goal_id: str) -> Goal:
@@ -707,6 +747,10 @@ class GoalExecutor:
         if goal is None:
             raise LookupError(f"goal not found: {goal_id}")
         _assert_transition(goal.status, GoalStatus.DONE)
+        logger.info(
+            "[goal] mark_done id=%s user=%s %s -> done",
+            goal_id, user_id[:8], goal.status.value,
+        )
         return await self._repo.update(replace(
             goal,
             status=GoalStatus.DONE,
@@ -722,6 +766,10 @@ class GoalExecutor:
         if goal is None:
             raise LookupError(f"goal not found: {goal_id}")
         _assert_transition(goal.status, GoalStatus.BLOCKED)
+        logger.info(
+            "[goal] mark_blocked id=%s user=%s %s -> blocked (reason_len=%d)",
+            goal_id, user_id[:8], goal.status.value, len(reason or ""),
+        )
         return await self._repo.update(replace(
             goal,
             status=GoalStatus.BLOCKED,
@@ -732,6 +780,10 @@ class GoalExecutor:
 
     async def _fail(self, goal: Goal, reason: str) -> Goal:
         _assert_transition(goal.status, GoalStatus.FAILED)
+        logger.info(
+            "[goal] fail id=%s user=%s %s -> failed (reason_len=%d)",
+            goal.id, goal.user_id, goal.status.value, len(reason or ""),
+        )
         return await self._repo.update(replace(
             goal,
             status=GoalStatus.FAILED,
@@ -762,7 +814,18 @@ class GoalExecutor:
         if goal is None:
             raise LookupError(f"goal not found: {goal_id}")
         if goal.code_session_id == sid:
+            logger.debug(
+                "[goal] set_code_session_id id=%s user=%s — already latched "
+                "session=%s (no-op)",
+                goal_id, user_id[:8], sid[:8] if sid else sid,
+            )
             return goal
+        logger.info(
+            "[goal] set_code_session_id id=%s user=%s latched session=%s "
+            "(prior=%s)",
+            goal_id, user_id[:8], sid[:8] if sid else sid,
+            goal.code_session_id[:8] if goal.code_session_id else None,
+        )
         return await self._repo.update(replace(goal, code_session_id=sid))
 
     async def continue_code(
@@ -785,17 +848,32 @@ class GoalExecutor:
         answer that unblocks them.
         """
         if not instruction.strip():
+            logger.debug(
+                "[goal] continue_code rejected: empty instruction "
+                "id=%s user=%s",
+                goal_id, user_id[:8],
+            )
             raise ValueError("instruction is required")
         goal = await self._repo.get(user_id, goal_id)
         if goal is None:
             raise LookupError(f"goal not found: {goal_id}")
         if goal.is_terminal():
+            logger.debug(
+                "[goal] continue_code rejected: terminal goal id=%s "
+                "user=%s status=%s",
+                goal_id, user_id[:8], goal.status.value,
+            )
             raise InvalidGoalTransition(
                 f"cannot continue terminal goal {goal_id} "
                 f"(status={goal.status.value})"
             )
         wt = (goal.work_type or "").strip().lower()
         if wt not in self.CODE_WORK_TYPES:
+            logger.debug(
+                "[goal] continue_code rejected: work_type=%r not in code "
+                "types id=%s user=%s",
+                wt, goal_id, user_id[:8],
+            )
             raise InvalidGoalTransition(
                 f"continue_code rejected: work_type={wt!r} not in "
                 f"{sorted(self.CODE_WORK_TYPES)}"
@@ -803,6 +881,10 @@ class GoalExecutor:
 
         if goal.status == GoalStatus.BLOCKED:
             _assert_transition(goal.status, GoalStatus.EXECUTING)
+            logger.info(
+                "[goal] continue_code id=%s user=%s blocked -> executing",
+                goal_id, user_id[:8],
+            )
             goal = await self._repo.update(replace(
                 goal,
                 status=GoalStatus.EXECUTING,
@@ -827,10 +909,16 @@ class GoalExecutor:
         )
         if callback is None:
             logger.warning(
-                "continue_code user=%s id=%s — no 'code' dispatch registered",
-                user_id, goal_id,
+                "[goal] continue_code user=%s id=%s — no 'code' dispatch "
+                "registered",
+                user_id[:8], goal_id,
             )
             return goal
+        logger.debug(
+            "[goal] continue_code dispatching id=%s user=%s "
+            "instruction_len=%d",
+            goal_id, user_id[:8], len(instruction),
+        )
         try:
             # Stash the continuation instruction in a module-scoped map
             # keyed by goal_id. The dispatch_code_goal handler pops it on
@@ -842,7 +930,9 @@ class GoalExecutor:
         except Exception as exc:
             _CONTINUATION_INSTRUCTIONS.pop(goal_id, None)
             logger.exception(
-                "continue_code dispatch failed user=%s id=%s", user_id, goal_id,
+                "[goal] continue_code dispatch failed user=%s id=%s "
+                "error_type=%s",
+                user_id[:8], goal_id, type(exc).__name__,
             )
             await self._fail(goal, f"continue_code error: {exc!s}")
         return goal
@@ -853,8 +943,16 @@ class GoalExecutor:
         if goal is None:
             raise LookupError(f"goal not found: {goal_id}")
         if goal.is_terminal():
+            logger.debug(
+                "[goal] abort no-op: id=%s user=%s already terminal (%s)",
+                goal_id, user_id[:8], goal.status.value,
+            )
             return goal  # already terminal, no-op
         _assert_transition(goal.status, GoalStatus.ABORTED)
+        logger.info(
+            "[goal] abort id=%s user=%s %s -> aborted",
+            goal_id, user_id[:8], goal.status.value,
+        )
         return await self._repo.update(replace(
             goal,
             status=GoalStatus.ABORTED,

@@ -283,6 +283,10 @@ async def save_skill_lesson(
                 if clean_params is not None else ""
             )
         except Exception:
+            logger.debug(
+                "[lesson] params_block json.dumps failed topic=%s action=%s, "
+                "falling back to str()", topic, action, exc_info=True,
+            )
             params_block = str(clean_params)[:_STRING_REDACTION_LIMIT * 4]
 
         slug = _intent_slug(intent)
@@ -291,6 +295,10 @@ async def save_skill_lesson(
 
         # Look for an existing card with the same canonical title key.
         existing = await _find_by_title_key(config, user_id, title_key)
+        logger.debug(
+            "[lesson] lookup topic=%s action=%s intent_slug=%s decision=%s",
+            topic, action, slug, "upsert" if existing else "insert",
+        )
 
         tags = [
             "lesson", "auto", "owner/agent",
@@ -330,6 +338,10 @@ async def save_skill_lesson(
                         from lazyclaw.runtime.turn_counter import current_turn
                         effective_pending_turn = current_turn(user_id)
                     except Exception:
+                        logger.debug(
+                            "[lesson] current_turn lookup failed for demote "
+                            "topic=%s action=%s", topic, action, exc_info=True,
+                        )
                         effective_pending_turn = None
                 # Refresh tags + importance to match the demoted state.
                 tags = [
@@ -373,7 +385,10 @@ async def save_skill_lesson(
                     source="skill_lesson_upsert",
                 )
             except Exception:
-                logger.debug("publish_note_saved failed", exc_info=True)
+                logger.debug(
+                    "[lesson] publish_note_saved failed id=%s topic=%s",
+                    note_id, topic, exc_info=True,
+                )
             logger.info(
                 "skill_lesson upserted: topic=%s action=%s outcome=%s "
                 "replay_count=%d id=%s",
@@ -414,7 +429,10 @@ async def save_skill_lesson(
                 note.get("tags"), source="skill_lesson",
             )
         except Exception:
-            logger.debug("publish_note_saved failed", exc_info=True)
+            logger.debug(
+                "[lesson] publish_note_saved failed id=%s topic=%s",
+                note["id"], topic, exc_info=True,
+            )
 
         logger.info(
             "skill_lesson created: topic=%s action=%s outcome=%s id=%s",
@@ -460,13 +478,24 @@ async def transition_outcome(
         from lazyclaw.lazybrain import store as lb_store
         from lazyclaw.lazybrain.frontmatter import parse_frontmatter
     except Exception:
+        logger.warning(
+            "[lesson] transition_outcome lazybrain import failed lesson=%s "
+            "target=%s", lesson_id, target, exc_info=True,
+        )
         return {"ok": False, "reason": "lazybrain unavailable"}
 
     note = await lb_store.get_note(config, user_id, lesson_id)
     if not note:
+        logger.debug(
+            "[lesson] transition_outcome lesson not found id=%s", lesson_id,
+        )
         return {"ok": False, "reason": "lesson not found"}
     tags = [str(t) for t in (note.get("tags") or [])]
     if "kind/shape" not in tags:
+        logger.debug(
+            "[lesson] transition_outcome not a skill-shape lesson id=%s",
+            lesson_id,
+        )
         return {"ok": False, "reason": "not a skill-shape lesson"}
 
     # Read current outcome from frontmatter (the source of truth — tag
@@ -474,11 +503,19 @@ async def transition_outcome(
     props, _body, _has = parse_frontmatter(note.get("content") or "")
     current = str(props.get("outcome") or "")
     if current not in {OUTCOME_PENDING, OUTCOME_VERIFIED}:
+        logger.debug(
+            "[lesson] transition_outcome rejected id=%s current=%s target=%s",
+            lesson_id, current, target,
+        )
         return {
             "ok": False,
             "reason": f"can't transition from outcome={current!r}",
         }
     if current == target:
+        logger.debug(
+            "[lesson] transition_outcome noop id=%s outcome=%s",
+            lesson_id, current,
+        )
         return {
             "ok": True, "lesson_id": lesson_id,
             "from": current, "to": target,
@@ -552,6 +589,10 @@ async def transition_outcome(
         except Exception:
             logger.debug("typed-edge writeback failed", exc_info=True)
 
+    logger.info(
+        "[lesson] transition_outcome ok id=%s from=%s to=%s",
+        lesson_id, current, target,
+    )
     return {
         "ok": True,
         "lesson_id": lesson_id,
@@ -599,8 +640,15 @@ async def _audit_dropped_lessons(
                 ),
             )
             await db.commit()
+        logger.debug(
+            "[lesson] audit dropped-lessons write ok topic=%s count=%d",
+            topic, len(dropped),
+        )
     except Exception:
-        logger.debug("audit dropped-lessons failed", exc_info=True)
+        logger.debug(
+            "[lesson] audit dropped-lessons failed topic=%s count=%d",
+            topic, len(dropped), exc_info=True,
+        )
 
 
 async def _find_by_title_key(
@@ -628,7 +676,10 @@ async def _find_by_title_key(
             return None
         return await lb_store.get_note(config, user_id, row[0])
     except Exception:
-        logger.debug("skill_lesson: find_by_title_key failed", exc_info=True)
+        logger.debug(
+            "[lesson] find_by_title_key failed title_key=%s",
+            title_key[:16] if title_key else None, exc_info=True,
+        )
         return None
 
 
@@ -676,8 +727,15 @@ async def recall_skill_lessons(
         )
         results = hit.get("results") or []
     except Exception:
-        logger.debug("skill_lesson recall failed", exc_info=True)
+        logger.debug(
+            "[lesson] recall_skill_lessons search failed topic=%s "
+            "intent_slug=%s", topic, _intent_slug(intent), exc_info=True,
+        )
         return []
+    logger.debug(
+        "[lesson] recall_skill_lessons topic=%s intent_slug=%s k=%d "
+        "raw_results=%d", topic, _intent_slug(intent), k, len(results),
+    )
 
     out: list[dict] = []
     dropped: list[tuple[str, str]] = []
@@ -716,6 +774,10 @@ async def recall_skill_lessons(
         if len(out) >= k:
             break
 
+    logger.debug(
+        "[lesson] recall_skill_lessons topic=%s matched=%d dropped=%d",
+        topic, len(out), len(dropped),
+    )
     if dropped:
         # Best-effort, fire-and-forget — recall must never wait on audit IO.
         try:
@@ -726,7 +788,10 @@ async def recall_skill_lessons(
                 )
             )
         except Exception:
-            logger.debug("schedule audit-drop failed", exc_info=True)
+            logger.debug(
+                "[lesson] schedule audit-drop failed topic=%s count=%d",
+                topic, len(dropped), exc_info=True,
+            )
     return out
 
 
@@ -756,7 +821,10 @@ async def recall_known_bad_shapes(
         )
         results = hit.get("results") or []
     except Exception:
-        logger.debug("recall_known_bad failed", exc_info=True)
+        logger.debug(
+            "[lesson] recall_known_bad failed topic=%s intent_slug=%s",
+            topic, _intent_slug(intent), exc_info=True,
+        )
         return []
 
     out: list[dict] = []
@@ -777,6 +845,9 @@ async def recall_known_bad_shapes(
         })
         if len(out) >= k:
             break
+    logger.debug(
+        "[lesson] recall_known_bad topic=%s matched=%d", topic, len(out),
+    )
     return out
 
 
@@ -809,6 +880,10 @@ def _parse_lesson_body(body: str) -> dict:
         try:
             params = json.loads(j.group(1))
         except Exception:
+            logger.debug(
+                "[lesson] _parse_lesson_body json parse failed, "
+                "falling back to raw string", exc_info=True,
+            )
             params = j.group(1)
     return {
         "topic": _truncate(fields.get("topic", ""), _EXEMPLAR_FIELD_LIMIT),
@@ -841,6 +916,10 @@ def format_lessons_as_exemplars(lessons: list[dict]) -> str:
             try:
                 pretty = json.dumps(params, ensure_ascii=False, indent=2)
             except Exception:
+                logger.debug(
+                    "[lesson] format_lessons_as_exemplars pretty-print "
+                    "failed, using str()", exc_info=True,
+                )
                 pretty = str(params)
             pretty = _truncate(pretty, _EXEMPLAR_PARAMS_LIMIT)
             blocks.append("Working parameters:")
@@ -868,6 +947,10 @@ def format_known_bad_as_warnings(known_bad: list[dict]) -> str:
             try:
                 pretty = json.dumps(params, ensure_ascii=False, indent=2)
             except Exception:
+                logger.debug(
+                    "[lesson] format_known_bad_as_warnings pretty-print "
+                    "failed, using str()", exc_info=True,
+                )
                 pretty = str(params)
             pretty = _truncate(pretty, _EXEMPLAR_PARAMS_LIMIT)
             blocks.append("Parameters that did NOT work:")

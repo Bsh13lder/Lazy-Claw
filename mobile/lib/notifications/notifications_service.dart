@@ -100,15 +100,18 @@ class NotificationsFeedService {
 /// resume, chat WS-connect, or the headless WorkManager pass) — it constructs
 /// its own collaborators and swallows all errors.
 ///
-/// Each shown notification carries the `chat` payload so a tap deep-links into
-/// the Chat tab via the existing pending-action plumbing.
+/// Each shown notification carries its resolved in-app route as the payload
+/// (`/inbox/<id>`, `/tasks`, `/notifications`, …) so a tap deep-links to the
+/// exact target instead of the old catch-all Chat tab. A notification with no
+/// specific deep_link falls back to the Notification Center, so a tap is never
+/// a dead end.
 Future<void> pullNotificationsFeed(ApiClient client) async {
   final service = NotificationsFeedService(
     repo: NotificationsRepository(DioNotificationsTransport(client)),
     show: (n) => LocalNotifications.showServerNotification(
       n.title.isNotEmpty ? n.title : 'LazyClaw',
       n.body.isNotEmpty ? n.body : n.title,
-      payload: 'chat',
+      payload: n.routePath,
     ),
     loadSince: SettingsPrefs.loadNotificationsSince,
     saveSince: SettingsPrefs.saveNotificationsSince,

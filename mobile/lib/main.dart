@@ -5,6 +5,7 @@ import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'core/actions/app_actions.dart';
+import 'core/actions/pending_deep_link.dart';
 import 'wake/native_wake_service.dart';
 import 'core/actions/deep_link_service.dart';
 import 'core/crash_log.dart';
@@ -154,19 +155,24 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
       if (mounted) ref.read(wakeEnabledProvider);
     });
 
-    // Deep-link a tapped server notification into the Chat tab. Reuses the
-    // pending-action plumbing: the listener in [build] navigates + clears it.
-    // The hook is set here (after init) so it has provider access; it is read
-    // at call time, so binding it after [LocalNotifications.init] is fine.
-    LocalNotifications.onSelectNotification = (_) {
+    // Deep-link a tapped server notification to its target route. The payload
+    // IS the route path (`/inbox/<id>`, `/tasks`, `/notifications`, …) resolved
+    // when the notification was shown; a missing/empty payload falls back to
+    // the Notification Center so a tap is never a dead end. The listener in
+    // [build] performs the actual navigation + clears it.
+    LocalNotifications.onSelectNotification = (payload) {
       if (!mounted) return;
-      ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+      final route = (payload != null && payload.isNotEmpty)
+          ? payload
+          : '/notifications';
+      ref.read(pendingDeepLinkProvider.notifier).state = route;
     };
     // Cold-start: app launched BY tapping a server notification.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final payload = await LocalNotifications.consumeLaunchPayload();
       if (payload != null && mounted) {
-        ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+        ref.read(pendingDeepLinkProvider.notifier).state =
+            payload.isNotEmpty ? payload : '/notifications';
       }
     });
 
@@ -241,6 +247,20 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
     ref.listen<AppAction?>(pendingActionProvider, (_, next) {
       if (next == null) return;
       _navigateForAction(router, next);
+    });
+
+    // Navigate to a tapped notification's target route. Shell roots swap the
+    // tab (`go`); deeper routes push over the shell. Cleared after dispatch.
+    ref.listen<String?>(pendingDeepLinkProvider, (_, next) {
+      if (next == null || next.isEmpty) return;
+      if (kShellRootPaths.contains(next)) {
+        router.go(next);
+      } else {
+        router.push(next);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(pendingDeepLinkProvider.notifier).state = null;
+      });
     });
 
     // COLD-START SAFETY NET: a widget/shortcut can fire the deep link while auth

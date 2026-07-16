@@ -125,6 +125,86 @@ void main() {
     });
   });
 
+    test('parses spine enrichment: severity, deep_link, read_at, unread', () async {
+      final t = _FakeTransport({
+        'notifications': [
+          {
+            'id': 'n1',
+            'kind': 'channel_message',
+            'title': 'WhatsApp',
+            'body': 'Hi',
+            'created_at': '2026-07-16T09:00:00Z',
+            'severity': 'important',
+            'deep_link': {'type': 'thread', 'id': 't-9', 'channel': 'whatsapp'},
+            'read_at': null,
+            'repeat_count': 3,
+          },
+        ],
+        'unread': 5,
+        'now': '2026-07-16T10:00:00Z',
+      });
+      final feed = await NotificationsRepository(t).fetchSince();
+      expect(feed.unread, 5);
+      final n = feed.notifications.first;
+      expect(n.severity, 'important');
+      expect(n.deepLink, {'type': 'thread', 'id': 't-9', 'channel': 'whatsapp'});
+      expect(n.isUnread, isTrue);
+      expect(n.repeatCount, 3);
+      expect(n.routePath, '/inbox/t-9');
+    });
+
+    test('routePath falls back to the center when deep_link is absent', () async {
+      final t = _FakeTransport(_feed());
+      final feed = await NotificationsRepository(t).fetchSince();
+      expect(feed.notifications.first.routePath, '/notifications');
+    });
+
+    test('read_at present marks the notification read', () async {
+      final t = _FakeTransport({
+        'notifications': [
+          {'id': 'n1', 'read_at': '2026-07-16T09:30:00Z'},
+        ],
+        'now': '',
+      });
+      final feed = await NotificationsRepository(t).fetchSince();
+      expect(feed.notifications.first.isUnread, isFalse);
+    });
+
+  // ── read-state endpoints ────────────────────────────────────────────────────
+  group('NotificationsRepository read-state', () {
+    test('fetchUnreadCount GETs /unread-count and parses {unread}', () async {
+      final t = _FakeTransport({'unread': 7});
+      final n = await NotificationsRepository(t).fetchUnreadCount();
+      expect(t.lastMethod, 'GET');
+      expect(t.lastPath, '/api/notifications/unread-count');
+      expect(n, 7);
+    });
+
+    test('markRead POSTs ids and returns marked count', () async {
+      final t = _FakeTransport({'marked': 2});
+      final n = await NotificationsRepository(t).markRead(['a', 'b']);
+      expect(t.lastMethod, 'POST');
+      expect(t.lastPath, '/api/notifications/read');
+      expect(t.lastBody, {'ids': ['a', 'b']});
+      expect(n, 2);
+    });
+
+    test('markRead short-circuits on empty ids (no request)', () async {
+      final t = _FakeTransport({'marked': 0});
+      final n = await NotificationsRepository(t).markRead([]);
+      expect(n, 0);
+      expect(t.lastMethod, isNull);
+    });
+
+    test('markAllRead POSTs /read-all and returns marked count', () async {
+      final t = _FakeTransport({'marked': 4});
+      final n = await NotificationsRepository(t).markAllRead();
+      expect(t.lastMethod, 'POST');
+      expect(t.lastPath, '/api/notifications/read-all');
+      expect(n, 4);
+    });
+  });
+
   // ── getChannel ────────────────────────────────────────────────────────────
   group('NotificationsRepository.getChannel', () {
     test('GETs /api/settings/notifications and parses {channel}', () async {

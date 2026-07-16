@@ -11,6 +11,7 @@ import '../models/project.dart';
 import '../models/task.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
+import '../providers/notifications_center_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../ui/ui.dart';
 import 'expenses/budget_math.dart';
@@ -126,12 +127,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ? LzSyncState.syncing
             : LzSyncState.synced;
 
+    // Unread notification count for the app-bar bell badge (fails soft to 0).
+    final unreadNotifications =
+        ref.watch(unreadCountProvider).valueOrNull ?? 0;
+
     return LzScaffold(
       appBar: LzAppBar(
         title: _greeting(),
         gradientTitle: true,
         large: false,
         actions: [
+          IconButton(
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.notifications_none,
+                    color: AppColors.textSecondary),
+                if (unreadNotifications > 0)
+                  Positioned(
+                    right: -6,
+                    top: -6,
+                    child: LzBadge(count: unreadNotifications),
+                  ),
+              ],
+            ),
+            tooltip: 'Notifications',
+            onPressed: () => context.push('/notifications'),
+          ),
           IconButton(
             icon: const Icon(Icons.auto_awesome, color: AppColors.accent),
             tooltip: 'Hey Lazy',

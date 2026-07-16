@@ -1,22 +1,32 @@
-"""In-app notification feed endpoint.
+"""In-app notification feed endpoint (the Notification Center backend).
 
-The mobile app polls this to pull server-originated notifications it hasn't
-seen yet — the same delta pattern as the offline-sync ``/changes`` feeds:
+The mobile/web apps poll this to pull server-originated notifications they
+haven't seen yet — the same delta pattern as the offline-sync ``/changes``
+feeds:
 
-  GET /api/notifications?since=<iso> → {notifications: [...], now: "<iso>"}
+  GET  /api/notifications?since=<iso>  → {notifications: [...], unread, now}
+  POST /api/notifications/read         {ids:[...]} → {marked}
+  POST /api/notifications/read-all     → {marked}
+  GET  /api/notifications/unread-count → {unread}
 
-There is no server-side ack: the client persists ``now`` and sends it back as
-``since`` on the next pull. Only notifications recorded for ``app`` / ``both``
-channels land here (see ``lazyclaw.notifications.channel``).
+The client persists ``now`` and sends it back as ``since`` on the next pull.
+Read-state is tracked server-side (``read_at``) so the unread badge and "mark
+read" survive a reinstall. Every discrete event is recorded here regardless of
+the telegram/app/both toggle (see ``lazyclaw.notifications.spine``).
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.gateway.auth import User, get_current_user
-from lazyclaw.notifications.feed_store import get_notifications_since
+from lazyclaw.notifications.feed_store import (
+    get_notifications_since,
+    get_unread_count,
+    mark_all_read,
+    mark_read,
+)
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
@@ -36,7 +46,37 @@ async def list_notifications(
 ):
     """Delta feed of in-app notifications for the authenticated user.
 
-    Returns the raw ``{notifications, now}`` shape (mirrors ``/changes``) —
-    NOT wrapped in a success/data envelope.
+    Returns the raw ``{notifications, unread, now}`` shape (mirrors ``/changes``)
+    — NOT wrapped in a success/data envelope.
     """
     return await get_notifications_since(config, user.id, since)
+
+
+@router.get("/unread-count")
+async def unread_count(
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Current unread notification count (for the tab badge)."""
+    return {"unread": await get_unread_count(config, user.id)}
+
+
+@router.post("/read")
+async def read_notifications(
+    ids: list[str] = Body(..., embed=True, description="Notification ids to mark read."),
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Mark specific notifications read (scoped to the caller)."""
+    marked = await mark_read(config, user.id, ids)
+    return {"marked": marked}
+
+
+@router.post("/read-all")
+async def read_all_notifications(
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Mark every unread notification for the caller read."""
+    marked = await mark_all_read(config, user.id)
+    return {"marked": marked}

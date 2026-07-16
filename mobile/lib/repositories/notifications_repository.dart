@@ -32,6 +32,11 @@ enum NotificationChannel {
 // ── Feed models ─────────────────────────────────────────────────────────────
 
 /// One server-originated notification from `GET /api/notifications`.
+///
+/// The Notification-Spine backend (2026-07-16) enriches each row with
+/// `severity`, a structured `deep_link` tap target, a `repeat_count` (dedup
+/// collapse) and server-side `read_at` state. All are parsed tolerantly so an
+/// older backend that omits them still works.
 class ServerNotification {
   final String id;
   final String kind;
@@ -39,22 +44,72 @@ class ServerNotification {
   final String body;
   final String createdAt;
 
+  /// `info | normal | important | urgent` — drives row accent + icon.
+  final String severity;
+
+  /// Structured tap target `{type, id, channel}` or null. `type ∈
+  /// thread|task|watcher|chat|goal|page`.
+  final Map<String, dynamic>? deepLink;
+
+  /// Server ISO timestamp when marked read, or null while unread.
+  final String? readAt;
+
+  /// How many collapsed repeats this row represents (>=1).
+  final int repeatCount;
+
   const ServerNotification({
     required this.id,
     required this.kind,
     required this.title,
     required this.body,
     required this.createdAt,
+    this.severity = 'normal',
+    this.deepLink,
+    this.readAt,
+    this.repeatCount = 1,
   });
 
-  factory ServerNotification.fromJson(Map<String, dynamic> json) =>
-      ServerNotification(
-        id: (json['id'] ?? '').toString(),
-        kind: (json['kind'] ?? '').toString(),
-        title: (json['title'] ?? '').toString(),
-        body: (json['body'] ?? '').toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-      );
+  bool get isUnread => readAt == null || readAt!.isEmpty;
+
+  /// The in-app route a tap on this notification should open. Falls back to the
+  /// Notification Center itself so a tap is NEVER a dead end (fixes the old
+  /// hard-coded `'chat'` payload that discarded all routing context).
+  String get routePath {
+    final dl = deepLink;
+    if (dl != null) {
+      final type = (dl['type'] ?? '').toString();
+      final id = (dl['id'] ?? '').toString();
+      switch (type) {
+        case 'thread':
+          if (id.isNotEmpty) return '/inbox/$id';
+          break;
+        case 'task':
+          return '/tasks';
+        case 'watcher':
+          return '/more/watchers';
+        case 'chat':
+          return '/chat';
+      }
+    }
+    return '/notifications';
+  }
+
+  factory ServerNotification.fromJson(Map<String, dynamic> json) {
+    final rawLink = json['deep_link'];
+    return ServerNotification(
+      id: (json['id'] ?? '').toString(),
+      kind: (json['kind'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      body: (json['body'] ?? '').toString(),
+      createdAt: (json['created_at'] ?? '').toString(),
+      severity: (json['severity'] ?? 'normal').toString(),
+      deepLink: rawLink is Map ? Map<String, dynamic>.from(rawLink) : null,
+      readAt: json['read_at']?.toString(),
+      repeatCount: json['repeat_count'] is int
+          ? json['repeat_count'] as int
+          : int.tryParse('${json['repeat_count'] ?? 1}') ?? 1,
+    );
+  }
 }
 
 /// One delta page from `GET /api/notifications?since=<iso>`:
@@ -68,7 +123,14 @@ class NotificationFeed {
   /// on client clocks / individual `created_at` values).
   final String now;
 
-  const NotificationFeed({required this.notifications, required this.now});
+  /// Total unread across the whole store (the tab-badge count), 0 when absent.
+  final int unread;
+
+  const NotificationFeed({
+    required this.notifications,
+    required this.now,
+    this.unread = 0,
+  });
 }
 
 // ── Transport seam (testable) ───────────────────────────────────────────────
@@ -141,7 +203,42 @@ class NotificationsRepository {
               ServerNotification.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
       now: (body['now'] ?? '').toString(),
+      unread: body['unread'] is int
+          ? body['unread'] as int
+          : int.tryParse('${body['unread'] ?? 0}') ?? 0,
     );
+  }
+
+  // ── Read-state (Notification Center) ────────────────────────────────────
+
+  /// Current unread count for the badge. `GET /api/notifications/unread-count`.
+  /// Returns 0 on any parse issue.
+  Future<int> fetchUnreadCount() async {
+    final json = await _t.getJson('/api/notifications/unread-count');
+    final body = _unwrap(json);
+    return body['unread'] is int
+        ? body['unread'] as int
+        : int.tryParse('${body['unread'] ?? 0}') ?? 0;
+  }
+
+  /// Mark specific notifications read. `POST /api/notifications/read {ids}`.
+  /// Returns how many rows the server marked.
+  Future<int> markRead(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final json = await _t.postJson('/api/notifications/read', {'ids': ids});
+    final body = _unwrap(json);
+    return body['marked'] is int
+        ? body['marked'] as int
+        : int.tryParse('${body['marked'] ?? 0}') ?? 0;
+  }
+
+  /// Mark every unread notification read. `POST /api/notifications/read-all`.
+  Future<int> markAllRead() async {
+    final json = await _t.postJson('/api/notifications/read-all', const {});
+    final body = _unwrap(json);
+    return body['marked'] is int
+        ? body['marked'] as int
+        : int.tryParse('${body['marked'] ?? 0}') ?? 0;
   }
 
   // ── Channel preference ──────────────────────────────────────────────────

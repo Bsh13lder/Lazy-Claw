@@ -17,6 +17,7 @@ import '../../screens/more/specialists_screen.dart';
 import '../../screens/more/vault_screen.dart';
 import '../../screens/more/watchers_screen.dart';
 import '../../screens/activity/activity_screen.dart';
+import '../../screens/notifications/notifications_center_screen.dart';
 import '../../screens/assistant/lazy_assistant_screen.dart';
 import '../../screens/documents/documents_screen.dart';
 import '../../screens/inbox/inbox_thread_screen.dart';
@@ -147,6 +148,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Agent activity — full-screen over bottom nav, reached from the chat
       // app-bar ⚡ button and the Power-tools hub.
       GoRoute(path: '/activity', builder: (ctx, _) => const ActivityScreen()),
+
+      // Notification Center — the durable home for everything the server fired.
+      // Full-screen over bottom nav; reached from the Home app-bar bell and as
+      // the fallback target of any notification tap.
+      GoRoute(
+        path: '/notifications',
+        builder: (ctx, _) => const NotificationsCenterScreen(),
+      ),
 
       // Hey Lazy — on-device voice assistant (full-screen over bottom nav).
       GoRoute(path: '/assistant', builder: (ctx, _) => const LazyAssistantScreen()),

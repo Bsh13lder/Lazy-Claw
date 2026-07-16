@@ -125,8 +125,9 @@ async def test_notifier_both_sends_and_records(cfg):
     assert await _feed_count(cfg) == 1
 
 
-async def test_notifier_telegram_sends_no_feed(cfg):
-    # Default telegram channel.
+async def test_notifier_telegram_sends_and_records_feed(cfg):
+    # Default telegram channel. Spine (2026-07-16): discrete task events are
+    # recorded durably ALWAYS; telegram mode still sends AND now records.
     bot = _FakeBot()
     notifier = TelegramNotifier(
         bot=bot, admin_chat_id_fn=lambda: "123", config=cfg,
@@ -134,7 +135,7 @@ async def test_notifier_telegram_sends_no_feed(cfg):
     await notifier.on_event(_bg_failed_event())
 
     assert len(bot.sends) == 1
-    assert await _feed_count(cfg) == 0
+    assert await _feed_count(cfg) == 1
 
 
 async def test_notifier_without_config_is_telegram_only(cfg):

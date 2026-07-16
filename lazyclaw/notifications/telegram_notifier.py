@@ -158,21 +158,31 @@ class TelegramNotifier:
                     "TelegramNotifier channel resolve failed", exc_info=True,
                 )
 
+        # Durable record — ALWAYS (regardless of channel toggle). Task done /
+        # failed / help are discrete events that belong in the Notification
+        # Center even for telegram-only users (Spine, 2026-07-16). Suppressed
+        # events already returned above (text is falsy); no-config notifiers
+        # never resolve an admin_uid → stay Telegram-only.
         if admin_uid is not None:
             try:
-                from lazyclaw.notifications.channel import should_record_feed
+                from lazyclaw.notifications.feed_store import (
+                    record_notification,
+                )
 
-                if should_record_feed(channel):
-                    from lazyclaw.notifications.feed_store import (
-                        record_notification,
-                    )
-
-                    kind = getattr(event, "kind", "info") or "info"
-                    await record_notification(
-                        self._config, admin_uid, kind,
-                        _KIND_TITLES.get(kind, "Notification"),
-                        _strip_html(text),
-                    )
+                kind = getattr(event, "kind", "info") or "info"
+                severity = (
+                    "important"
+                    if kind in ("background_failed", "help_needed")
+                    else "normal"
+                )
+                # admin_uid is only set inside the `self._config is not None`
+                # block above, so config is guaranteed present here.
+                await record_notification(
+                    self._config, admin_uid, kind,  # type: ignore[arg-type]
+                    _KIND_TITLES.get(kind, "Notification"),
+                    _strip_html(text),
+                    severity=severity,
+                )
             except Exception:
                 logger.warning(
                     "TelegramNotifier feed record failed", exc_info=True,

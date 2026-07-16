@@ -426,15 +426,35 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("notifications table migration skipped", exc_info=True)
 
-        # meta: encrypted JSON sidecar for feed entries (thread_ref for
-        # tap-to-open deep links on channel_message notifications).
+        # meta: encrypted JSON sidecar for feed entries (deep_link + actions +
+        # thread_ref for tap-to-open + action buttons on the Notification Center).
+        # severity/dedup_key/read_at: plaintext Notification-Spine columns
+        # (2026-07-16) — severity drives client rendering, dedup_key collapses
+        # oscillating watchers/nags, read_at powers the unread badge.
         try:
             cols = await db.execute("PRAGMA table_info(notifications)")
             names = [r[1] for r in await cols.fetchall()]
             if "meta" not in names:
                 await db.execute("ALTER TABLE notifications ADD COLUMN meta TEXT")
+            if "severity" not in names:
+                await db.execute(
+                    "ALTER TABLE notifications "
+                    "ADD COLUMN severity TEXT NOT NULL DEFAULT 'normal'"
+                )
+            if "dedup_key" not in names:
+                await db.execute(
+                    "ALTER TABLE notifications ADD COLUMN dedup_key TEXT"
+                )
+            if "read_at" not in names:
+                await db.execute(
+                    "ALTER TABLE notifications ADD COLUMN read_at TEXT"
+                )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notifications_dedup "
+                "ON notifications(user_id, dedup_key)"
+            )
         except Exception:
-            logger.debug("notifications.meta migration skipped", exc_info=True)
+            logger.debug("notifications spine migration skipped", exc_info=True)
 
         # ── Unified-comms: channel inbox-thread metadata ──────────────────
         # Stores one encrypted row per (user, channel, contact) thread so the

@@ -8,10 +8,12 @@ directly — bypassing the per-user channel toggle (``telegram`` | ``app`` |
 ``both``), so "in-app only" users kept receiving Telegram pushes and never
 saw those entries in the mobile feed.
 
-This module is the single funnel both wiring sites now call:
+This module is the single funnel both wiring sites now call. Since the
+Notification Spine (2026-07-16) the durable in-app feed row is recorded
+ALWAYS; the toggle controls Telegram loudness only:
 
-  * ``telegram`` (default) → Telegram send only (legacy behaviour).
-  * ``app``                → record to the in-app feed, skip Telegram.
+  * ``telegram`` (default) → record to the feed AND send to Telegram.
+  * ``app``                → record to the feed, skip Telegram.
   * ``both``               → record to the feed AND send to Telegram.
 
 Fail-open contract: any routing/lookup error degrades to the legacy
@@ -29,7 +31,6 @@ from typing import Any, Awaitable, Callable
 from lazyclaw.notifications.channel import (
     get_notification_channel,
     resolve_admin_user_id,
-    should_record_feed,
     should_send_telegram,
 )
 from lazyclaw.notifications.feed_store import record_notification
@@ -66,7 +67,11 @@ async def deliver_heartbeat_push(
         admin_uid = None
         channel = "telegram"
 
-    if admin_uid and should_record_feed(channel):
+    # Durable record — ALWAYS, regardless of the channel toggle. The in-app
+    # Notification Center is the source of truth for "what happened"; the
+    # toggle controls Telegram loudness only (Spine, 2026-07-16). Only the
+    # no-admin fail-open path skips the record.
+    if admin_uid:
         try:
             await record_notification(
                 config, admin_uid, kind, _derive_push_title(text), text,

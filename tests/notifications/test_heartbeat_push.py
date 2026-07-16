@@ -51,7 +51,10 @@ def user_id():
     return "u1"
 
 
-async def test_telegram_mode_sends_telegram_no_feed(monkeypatch, config, user_id):
+async def test_telegram_mode_sends_telegram_and_records_feed(monkeypatch, config, user_id):
+    # Spine (2026-07-16): the durable feed row is recorded ALWAYS; telegram
+    # mode still sends AND now also records (the Notification Center is the
+    # source of truth for "what happened").
     monkeypatch.setattr(
         heartbeat_push, "get_notification_channel",
         AsyncMock(return_value="telegram"),
@@ -60,7 +63,8 @@ async def test_telegram_mode_sends_telegram_no_feed(monkeypatch, config, user_id
     await deliver_heartbeat_push(config, "🔔 Task reminder", telegram_send=send)
     send.assert_awaited_once()
     feed = await get_notifications_since(config, user_id, None)
-    assert feed["notifications"] == []
+    assert len(feed["notifications"]) == 1
+    assert feed["notifications"][0]["body"] == "🔔 Task reminder"
 
 
 async def test_app_mode_records_feed_skips_telegram(monkeypatch, config, user_id):

@@ -57,6 +57,38 @@ class ServerConfig {
   /// pinned to a host it can't reach.
   static BaseUrlOverrideStore overrideStore = const SecureBaseUrlOverrideStore();
 
+  /// The production store for the LAST-KNOWN-GOOD auto-resolved host. Kept as a
+  /// named constant so tests can restore it after swapping in an in-memory one.
+  static const BaseUrlOverrideStore defaultLastResolvedStore =
+      SecureBaseUrlOverrideStore(storageKey: 'settings.last_resolved_base_url');
+
+  /// Persists the host [resolveBaseUrl] last settled on (via [rememberResolved])
+  /// so [seedBaseUrl] can seed the NEXT cold start directly to it — no probe,
+  /// and no background URL switch on the common repeat-launch path. Swappable
+  /// for an in-memory store in tests.
+  static BaseUrlOverrideStore lastResolvedStore = defaultLastResolvedStore;
+
+  /// The last auto-resolved reachable host, or `null` when none recorded yet.
+  /// Never throws — a failing store resolves to `null`.
+  static Future<String?> loadLastResolved() async {
+    try {
+      return await lastResolvedStore.load();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Record [url] as the last-known-good host (called after [resolveBaseUrl]
+  /// settles, from [GatewayController.reresolve]). Best-effort — never throws.
+  static Future<void> rememberResolved(String url) async {
+    try {
+      await lastResolvedStore.save(normalizeBaseUrl(url));
+    } catch (_) {
+      // Persistence is an optimization for the NEXT launch; a failure here must
+      // never disrupt the current one.
+    }
+  }
+
   /// The user's saved override, or `null` when unset. Never throws — a failing
   /// store resolves to `null` so resolution always makes progress.
   static Future<String?> loadOverride() async {
@@ -121,6 +153,27 @@ class ServerConfig {
     kLanFallbackIpBaseUrl,
     kLanFallbackBaseUrl,
   ];
+
+  /// The NON-BLOCKING startup seed for the active gateway.
+  ///
+  /// Order (all cheap local reads — NO network probe):
+  ///   1. the saved manual OVERRIDE (the user's explicit pin wins);
+  ///   2. else the LAST-KNOWN-GOOD auto-resolved host (so a home-WiFi repeat
+  ///      launch seeds straight to the LAN host that answered last time, and the
+  ///      background [GatewayController.reresolve] then resolves to that SAME
+  ///      host — no URL switch, so `authProvider` is not rebuilt out from under
+  ///      a just-restored session);
+  ///   3. else [kDefaultBaseUrl].
+  ///
+  /// This is what `main()` awaits before `runApp()`, so the first frame renders
+  /// instantly instead of blocking 3s-per-host on [resolveBaseUrl]'s
+  /// reachability probes — a cold widget launch is ALWAYS a full `main()`, so
+  /// that probe was a multi-second black screen on every such launch.
+  /// Reachability-based host selection is deferred to a post-first-frame
+  /// background [GatewayController.reresolve]. Never throws (a failing store
+  /// yields the default so seeding always makes progress).
+  static Future<String> seedBaseUrl() async =>
+      (await loadOverride()) ?? (await loadLastResolved()) ?? kDefaultBaseUrl;
 
   /// Resolves the gateway to use.
   ///

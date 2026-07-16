@@ -25,17 +25,22 @@ abstract class BaseUrlOverrideStore {
 /// `null` so a missing plugin (unit test) or a locked keystore can never crash
 /// URL resolution.
 class SecureBaseUrlOverrideStore implements BaseUrlOverrideStore {
-  const SecureBaseUrlOverrideStore();
+  /// [storageKey] selects WHICH secure-storage entry this store reads/writes.
+  /// Defaults to the manual-override [key] (unchanged behavior); the last-known-
+  /// good auto-resolved host uses its own key so the two never collide.
+  const SecureBaseUrlOverrideStore({this.storageKey = key});
 
   /// Secure-storage key for the manual base URL.
   static const String key = 'settings.manual_base_url';
+
+  final String storageKey;
 
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
 
   @override
   Future<String?> load() async {
     try {
-      final v = await _storage.read(key: key);
+      final v = await _storage.read(key: storageKey);
       if (v == null) return null;
       final t = v.trim();
       return t.isEmpty ? null : t;
@@ -45,10 +50,10 @@ class SecureBaseUrlOverrideStore implements BaseUrlOverrideStore {
   }
 
   @override
-  Future<void> save(String url) => _storage.write(key: key, value: url);
+  Future<void> save(String url) => _storage.write(key: storageKey, value: url);
 
   @override
-  Future<void> clear() => _storage.delete(key: key);
+  Future<void> clear() => _storage.delete(key: storageKey);
 }
 
 /// In-memory override store for tests (and any transient, non-persistent use).

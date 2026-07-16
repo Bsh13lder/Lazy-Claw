@@ -19,10 +19,12 @@ import 'package:lazyclaw_mobile/core/constants/app_constants.dart';
 void main() {
   setUp(() {
     ServerConfig.overrideStore = InMemoryBaseUrlOverrideStore();
+    ServerConfig.lastResolvedStore = InMemoryBaseUrlOverrideStore();
   });
   tearDown(() {
-    // Restore the production store so no cross-test bleed occurs.
+    // Restore the production stores so no cross-test bleed occurs.
     ServerConfig.overrideStore = const SecureBaseUrlOverrideStore();
+    ServerConfig.lastResolvedStore = ServerConfig.defaultLastResolvedStore;
   });
 
   group('override persistence', () {
@@ -107,6 +109,71 @@ void main() {
     test('no override, nothing reachable → fail-safe to primary', () async {
       final url = await ServerConfig.resolveBaseUrl(probe: (b) async => false);
       expect(url, kDefaultBaseUrl);
+    });
+  });
+
+  group('seedBaseUrl (non-blocking startup seed)', () {
+    // The startup seed must NEVER touch the network — it exists so `main()` can
+    // render the first frame instantly instead of blocking on the 3s-per-host
+    // reachability probes. Reachability resolution is deferred to a background
+    // `GatewayController.reresolve()` after the first frame. These tests pin the
+    // "no probe, just the cheap saved-override-or-default" contract.
+    test('returns the saved override when one is set (no network)', () async {
+      ServerConfig.overrideStore =
+          InMemoryBaseUrlOverrideStore('http://box.lan:9000');
+      expect(await ServerConfig.seedBaseUrl(), 'http://box.lan:9000');
+    });
+
+    test('returns kDefaultBaseUrl when no override and no last-known-good',
+        () async {
+      expect(await ServerConfig.seedBaseUrl(), kDefaultBaseUrl);
+    });
+
+    test('falls back to the last-known-good host when no override is set',
+        () async {
+      // The host that answered last time is remembered so the NEXT cold start
+      // seeds to it directly — the common home-WiFi repeat launch then resolves
+      // to the SAME host in the background (no URL switch → no auth rebuild).
+      await ServerConfig.rememberResolved(kLanFallbackIpBaseUrl);
+      expect(await ServerConfig.seedBaseUrl(), kLanFallbackIpBaseUrl);
+    });
+
+    test('an explicit override still wins over the last-known-good', () async {
+      ServerConfig.overrideStore =
+          InMemoryBaseUrlOverrideStore('http://box.lan:9000');
+      await ServerConfig.rememberResolved(kLanFallbackIpBaseUrl);
+      expect(await ServerConfig.seedBaseUrl(), 'http://box.lan:9000');
+    });
+
+    test('a whitespace-only stored override seeds the default, not blank',
+        () async {
+      ServerConfig.overrideStore = InMemoryBaseUrlOverrideStore('   ');
+      expect(await ServerConfig.seedBaseUrl(), kDefaultBaseUrl);
+    });
+
+    test('never throws — a failing store seeds the default', () async {
+      ServerConfig.overrideStore = _ThrowingOverrideStore();
+      expect(await ServerConfig.seedBaseUrl(), kDefaultBaseUrl);
+    });
+
+    test('a failing last-known-good store seeds the default (never throws)',
+        () async {
+      ServerConfig.lastResolvedStore = _ThrowingOverrideStore();
+      expect(await ServerConfig.seedBaseUrl(), kDefaultBaseUrl);
+    });
+  });
+
+  group('last-known-good persistence', () {
+    test('rememberResolved round-trips through loadLastResolved', () async {
+      expect(await ServerConfig.loadLastResolved(), isNull);
+      await ServerConfig.rememberResolved(kLanFallbackIpBaseUrl);
+      expect(await ServerConfig.loadLastResolved(), kLanFallbackIpBaseUrl);
+    });
+
+    test('loadLastResolved never throws — a failing store resolves to null',
+        () async {
+      ServerConfig.lastResolvedStore = _ThrowingOverrideStore();
+      expect(await ServerConfig.loadLastResolved(), isNull);
     });
   });
 

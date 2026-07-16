@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/config/server_config.dart';
@@ -24,6 +26,10 @@ class GatewayController extends StateNotifier<String> {
   Future<void> reresolve({HealthProbe? probe}) async {
     final resolved = await ServerConfig.resolveBaseUrl(probe: probe);
     if (resolved != state) state = resolved;
+    // Remember the host that answered so the NEXT cold start seeds straight to
+    // it (see [ServerConfig.seedBaseUrl]). Fire-and-forget — a persistence
+    // failure must never disrupt the live switch.
+    unawaited(ServerConfig.rememberResolved(resolved));
   }
 
   /// Persist an explicit manual override and adopt it immediately. The URL is

@@ -32,9 +32,11 @@ ProviderContainer _makeContainer({String seed = kDefaultBaseUrl}) {
 void main() {
   setUp(() {
     ServerConfig.overrideStore = InMemoryBaseUrlOverrideStore();
+    ServerConfig.lastResolvedStore = InMemoryBaseUrlOverrideStore();
   });
   tearDown(() {
     ServerConfig.overrideStore = const SecureBaseUrlOverrideStore();
+    ServerConfig.lastResolvedStore = ServerConfig.defaultLastResolvedStore;
   });
 
   test('activeBaseUrlProvider seeds from the bootstrap URL', () {
@@ -68,6 +70,17 @@ void main() {
         .reresolve(probe: (b) async => true);
     expect(c.read(activeBaseUrlProvider), kDefaultBaseUrl);
     expect(switches, 0);
+  });
+
+  test('reresolve persists the resolved host as the last-known-good seed',
+      () async {
+    // So the NEXT cold start seeds directly to the host that just answered,
+    // avoiding a background URL switch (and the auth rebuild it triggers).
+    final c = _makeContainer();
+    await c.read(activeBaseUrlProvider.notifier).reresolve(
+          probe: (b) async => b == kLanFallbackIpBaseUrl,
+        );
+    expect(await ServerConfig.loadLastResolved(), kLanFallbackIpBaseUrl);
   });
 
   test('reresolve honors a reachable override', () async {

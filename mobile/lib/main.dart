@@ -65,12 +65,15 @@ Future<void> main() async {
     );
   };
 
-  // Resolve the startup gateway: a saved manual override first, else the first
-  // reachable of [DuckDNS front door → LAN mDNS → LAN IP]. This only SEEDS the
-  // runtime-switchable GatewayController — the app can re-resolve later (on
-  // resume / manual reconnect) so a network change doesn't strand it on a dead
-  // URL.
-  final baseUrl = await ServerConfig.resolveBaseUrl();
+  // SEED the startup gateway WITHOUT any network probe: the saved manual
+  // override if set, else the DuckDNS front door. Blocking on the reachability
+  // probe here (3s timeout PER host, tried in sequence) was the cold-start black
+  // screen — a widget/shortcut launch is always a full `main()`, so every such
+  // launch paid 3–6s of blank screen before the first frame. Reachability-based
+  // host selection now happens in the BACKGROUND after the first frame via
+  // GatewayController.reresolve() (see _LazyClawAppState.initState), which flips
+  // the active URL only when a DIFFERENT candidate actually answers.
+  final baseUrl = await ServerConfig.seedBaseUrl();
 
   // Open the encrypted offline DB up front so the Tasks tab is instant and
   // works with the backend unreachable. The resilient path retries the file DB
@@ -117,6 +120,27 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
     // now reachable. Cheap — it only flips the active URL when a DIFFERENT
     // candidate wins, and honors any manual override. NOT run per-request.
     WidgetsBinding.instance.addObserver(this);
+
+    // Deferred reachability resolution. `main()` now seeds the gateway WITHOUT a
+    // network probe (instant first frame); this runs the real 3s-per-host probe
+    // AFTER the first frame is on screen, flipping the active URL only if a
+    // DIFFERENT candidate actually answers (e.g. seeded to last-known-good LAN
+    // but the phone moved to cellular where the DuckDNS front door wins). On the
+    // common home-WiFi repeat launch the seed already equals the resolved host,
+    // so this is a silent no-op. When it DOES switch, `activeBaseUrlProvider`
+    // changes rebuild `apiClientProvider` → `authProvider` (fresh notifier at
+    // `unauthenticated`), so we re-run `checkSession` against the newly-active
+    // host — otherwise a background host switch would strand a signed-in user on
+    // /login. Fire-and-forget; reresolve swallows its own failures.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final before = ref.read(activeBaseUrlProvider);
+      await ref.read(activeBaseUrlProvider.notifier).reresolve();
+      if (!mounted) return;
+      if (ref.read(activeBaseUrlProvider) != before) {
+        ref.read(authProvider.notifier).checkSession();
+      }
+    });
 
     Future.microtask(() => ref.read(authProvider.notifier).checkSession());
 

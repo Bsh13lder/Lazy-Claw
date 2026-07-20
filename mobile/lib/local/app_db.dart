@@ -40,7 +40,7 @@ import 'uuid.dart';
 ///     `deleted_budget_entries`); this table lets the Log render offline and
 ///     reflect cross-device top-ups, and (Phase 1B) lets a top-up be queued
 ///     offline as a real audit row instead of a silent budget bump.
-const int kAppDbVersion = 9;
+const int kAppDbVersion = 10;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -328,6 +328,24 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
   // existing table untouched.
   if (oldVersion < 9) {
     await createAppDbSchema(db);
+  }
+  // v9 → v10: rewind the shared budgets sync cursor ONCE.
+  //
+  // The budget ledger (`budget_entry_cache`, added in v9) shares a SINGLE
+  // 'budgets' cursor (`kBudgetsCursorEntity`) with projects + expenses. A user
+  // who ran the app before v9 already had that cursor advanced — by ordinary
+  // project/expense pulls — PAST their existing top-ups. So after upgrading, the
+  // delta pull (`fetchChanges(since=<advanced cursor>)`) returns ZERO
+  // budget_entries (the server filters `updated_at > since`) and the stranded
+  // project row too — leaving the per-project Log empty and the project budget
+  // stale, permanently (2026-07-20 incident: 12 server top-ups never synced).
+  //
+  // Deleting the 'budgets' cursor makes the next `getCursor()` return null, so
+  // the following sync fetches a FULL snapshot (since=null) that backfills every
+  // server top-up AND the authoritative project budgets. One-time; harmless when
+  // the row is absent (fresh installs never reach here).
+  if (oldVersion < 10) {
+    await db.delete('sync_state', where: 'entity = ?', whereArgs: ['budgets']);
   }
 }
 

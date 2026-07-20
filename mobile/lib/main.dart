@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import 'core/actions/pending_deep_link.dart';
 import 'wake/native_wake_service.dart';
 import 'core/actions/deep_link_service.dart';
 import 'core/crash_log.dart';
+import 'core/config/lan_discovery.dart';
 import 'core/config/server_config.dart';
 import 'core/router/app_router.dart';
 import 'core/self_update.dart';
@@ -76,6 +78,14 @@ Future<void> main() async {
   // the active URL only when a DIFFERENT candidate actually answers.
   final baseUrl = await ServerConfig.seedBaseUrl();
 
+  // Wire the LAN sweep as the resolver's last resort (composition root — unit
+  // tests never run main(), so resolution in tests can't fire a real sweep),
+  // and register persisted DISCOVERED hosts as server aliases BEFORE the first
+  // auth-cache read, so a launch on a sweep-found host still unlocks offline
+  // mode + keeps the session (no forced re-login after a DHCP move).
+  ServerConfig.lanSweep = LanDiscovery.sweepAllInterfaces;
+  await ServerConfig.seedDynamicAliases();
+
   // Open the encrypted offline DB up front so the Tasks tab is instant and
   // works with the backend unreachable. The resilient path retries the file DB
   // then falls back to an ephemeral in-memory DB — it ALWAYS returns a usable
@@ -133,14 +143,9 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
     // `unauthenticated`), so we re-run `checkSession` against the newly-active
     // host — otherwise a background host switch would strand a signed-in user on
     // /login. Fire-and-forget; reresolve swallows its own failures.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final before = ref.read(activeBaseUrlProvider);
-      await ref.read(activeBaseUrlProvider.notifier).reresolve();
-      if (!mounted) return;
-      if (ref.read(activeBaseUrlProvider) != before) {
-        ref.read(authProvider.notifier).checkSession();
-      }
+      unawaited(_reresolveAndRevalidate());
     });
 
     Future.microtask(() => ref.read(authProvider.notifier).checkSession());
@@ -228,10 +233,31 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.resumed) {
-      // Fire-and-forget: re-probe candidates and switch only if a different
-      // host is now first-reachable. Failures are swallowed inside the resolver.
-      ref.read(activeBaseUrlProvider.notifier).reresolve();
+      // Re-probe candidates (switching the active URL only if a different host
+      // now wins) AND re-validate auth + reachability against the result — a
+      // resume after a network change must recover a stuck-offline session.
+      unawaited(_reresolveAndRevalidate());
     }
+  }
+
+  /// Re-resolve the active gateway, then UNCONDITIONALLY re-validate auth +
+  /// reachability against whatever host is now active.
+  ///
+  /// The re-validation is deliberately NOT gated on the URL changing. Two
+  /// cold-start failure modes made the app show "offline" on Home while the
+  /// chat WebSocket was in fact connected to the same host (2026-07-20):
+  ///   * the very first `checkSession` / reachability probe can fire before the
+  ///     OS network stack is fully up, fail, and — with the seed already equal
+  ///     to the resolved host — never re-run because the URL never "changed";
+  ///   * a resume after the phone found the server used to re-resolve but never
+  ///     re-checked auth, stranding a signed-in user offline.
+  /// `checkSession` is single-flight and `Reachability.refresh` is idempotent,
+  /// so re-running both on every resolve is cheap and safe.
+  Future<void> _reresolveAndRevalidate() async {
+    await ref.read(activeBaseUrlProvider.notifier).reresolve();
+    if (!mounted) return;
+    unawaited(ref.read(authProvider.notifier).checkSession());
+    unawaited(ref.read(reachabilityProvider).refresh());
   }
 
   @override

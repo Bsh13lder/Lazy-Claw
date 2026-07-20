@@ -46,12 +46,24 @@ void main() {
     await r.dispose();
   });
 
-  test('no OS link → never even pings the host', () async {
+  test(
+      'host ping is AUTHORITATIVE: reachable even when the OS reports no link '
+      '(connectivity_plus false-negatives on some ROMs/hotspots must not '
+      'strand the app offline while the server actually answers — 2026-07-20)',
+      () async {
     final probe = _FakeProbe(link: false, host: true);
     final r = Reachability(probe);
     await r.start();
+    expect(r.value, isTrue);
+    expect(probe.pingCount, greaterThan(0));
+    await r.dispose();
+  });
+
+  test('no OS link AND host down → offline', () async {
+    final probe = _FakeProbe(link: false, host: false);
+    final r = Reachability(probe);
+    await r.start();
     expect(r.value, isFalse);
-    expect(probe.pingCount, 0);
     await r.dispose();
   });
 

@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import '../constants/app_constants.dart';
 import 'base_url_override_store.dart';
+import 'lan_discovery.dart';
+import 'server_aliases.dart';
 
 /// Probes a gateway for reachability. Returns `true` when the host answered the
 /// health check with a 2xx, `false` on timeout / network error / non-2xx.
@@ -25,6 +28,12 @@ class GatewayStatus {
     required this.reachable,
   });
 }
+
+/// The outcome of [ServerConfig.resolveGateway]: the URL to use plus whether a
+/// host actually ANSWERED. `reachable: false` means [url] is only the
+/// fail-safe (override or default) — callers must not persist it as the
+/// last-known-good host, or an unreachable fail-safe clobbers a good seed.
+typedef ResolvedGateway = ({String url, bool reachable});
 
 class ServerConfig {
   /// Short timeout for the startup reachability probe. Startup is never blocked
@@ -88,6 +97,69 @@ class ServerConfig {
       // never disrupt the current one.
     }
   }
+
+  // ── Discovered-host persistence (LAN sweep results) ─────────────────────
+
+  /// The production store for LAN-sweep DISCOVERED hosts — a JSON string list,
+  /// most-recent first, capped at [kMaxDiscoveredHosts]. Named so tests can
+  /// restore it after swapping in an in-memory one.
+  static const BaseUrlOverrideStore defaultDiscoveredStore =
+      SecureBaseUrlOverrideStore(storageKey: 'settings.discovered_hosts');
+
+  /// Swappable for an in-memory store in tests.
+  static BaseUrlOverrideStore discoveredStore = defaultDiscoveredStore;
+
+  /// The persisted discovered hosts (normalized, most-recent first). Never
+  /// throws — a missing/corrupt store reads as empty.
+  static Future<List<String>> loadDiscovered() async {
+    try {
+      final raw = await discoveredStore.load();
+      if (raw == null) return const [];
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return [
+        for (final e in decoded)
+          if (e is String && e.trim().isNotEmpty) normalizeBaseUrl(e),
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Record [url] as a discovered gateway host: registered as a server alias
+  /// IMMEDIATELY (so the switch to it cannot force a re-login) and persisted
+  /// most-recent-first for future resolutions. After a successful save the
+  /// dynamic alias set is reconciled to EXACTLY the capped persisted list, so
+  /// a host evicted from the cap also stops being an alias (the registry must
+  /// honor the same cap as the store). Best-effort — never throws.
+  static Future<void> rememberDiscovered(String url) async {
+    final n = normalizeBaseUrl(url);
+    ServerAliasRegistry.add(n);
+    try {
+      final list = await loadDiscovered();
+      final capped =
+          [n, ...list.where((u) => u != n)].take(kMaxDiscoveredHosts).toList();
+      await discoveredStore.save(jsonEncode(capped));
+      ServerAliasRegistry.syncDynamic(capped);
+    } catch (_) {
+      // Persistence is an optimization for future launches; a failure here
+      // must never disrupt the resolution that just succeeded — the add()
+      // above already covers THIS session.
+    }
+  }
+
+  /// Startup seed: register every persisted discovered host as a server alias
+  /// so the SYNCHRONOUS alias checks (offline auth cache) know them before the
+  /// first resolution runs. Called from `main()`; cheap (one storage read).
+  static Future<void> seedDynamicAliases() async {
+    ServerAliasRegistry.seed(await loadDiscovered());
+  }
+
+  /// The production LAN sweep, or `null` when not wired. `main()` sets this to
+  /// [LanDiscovery.sweepAllInterfaces] at startup (the composition root), so
+  /// unit tests — which never run `main()` — can never fire a real network
+  /// sweep by accident.
+  static LanSweep? lanSweep;
 
   /// The user's saved override, or `null` when unset. Never throws — a failing
   /// store resolves to `null` so resolution always makes progress.
@@ -175,55 +247,127 @@ class ServerConfig {
   static Future<String> seedBaseUrl() async =>
       (await loadOverride()) ?? (await loadLastResolved()) ?? kDefaultBaseUrl;
 
-  /// Resolves the gateway to use.
+  /// Back-compat wrapper around [resolveGateway] — returns only the URL.
+  static Future<String> resolveBaseUrl({HealthProbe? probe}) async =>
+      (await resolveGateway(probe: probe)).url;
+
+  /// Resolves the gateway to use, reporting whether a host actually answered.
   ///
-  /// 1. If a manual OVERRIDE is set, it is tried FIRST. When reachable it's
-  ///    returned — the user's explicit choice wins.
-  /// 2. If the override is set but UNREACHABLE, we do NOT blindly return it:
-  ///    we fall through to the [_candidates] and return the first that answers.
-  ///    A dead override (e.g. pinned to a since-vanished LAN IP) must never
-  ///    brick the app — the login screen has no server-URL field to escape it,
-  ///    so an unreachable pin used to be a hard lockout. The explicit choice is
-  ///    only set aside when a DIFFERENT host actually answers.
-  /// 3. Otherwise the [_candidates] are probed in order and the FIRST that
-  ///    answers `/api/health` is returned, so the app self-heals whether it's on
-  ///    cellular (public front door) or home WiFi (LAN host).
-  /// 4. If nothing answers at all: with an override set we return it (the
-  ///    explicit choice is preserved as a last resort, diagnosable via
-  ///    [probeAll]); otherwise we fall back to [kDefaultBaseUrl] so behavior
-  ///    matches the pre-probe build.
-  static Future<String> resolveBaseUrl({HealthProbe? probe}) async {
+  /// 1. If a manual OVERRIDE is set, it is probed FIRST, alone. When reachable
+  ///    it's returned — the user's explicit choice wins.
+  /// 2. CONCRETE candidates (IP / DuckDNS — reliable) are probed as ONE
+  ///    PARALLEL batch (worst case costs one probe timeout, not one per host)
+  ///    and the highest-priority host that answered wins:
+  ///      last-known-good → DuckDNS front door → pinned LAN IP → persisted
+  ///      DISCOVERED hosts → USB loopback ([kUsbLoopbackBaseUrl], `adb reverse`).
+  /// 3. If no concrete host answers and a LAN sweep is wired ([lanSweep], or
+  ///    the [sweep] parameter in tests), the sweep hunts the phone's own
+  ///    subnets for the gateway — the recovery path for "DHCP moved the Mac".
+  ///    A find is adopted, persisted via [rememberDiscovered], returned
+  ///    reachable.
+  /// 4. mDNS `.local` hosts ([kLanFallbackBaseUrl]) are the ABSOLUTE last
+  ///    resort — probed only after concrete candidates AND the sweep fail.
+  ///    Dart's `HttpClient` on Android resolves `.local` only intermittently,
+  ///    so a `.local` that "answers" one probe then fails every real request
+  ///    must NEVER win over — or suppress the discovery of — a concrete IP.
+  ///    (2026-07-20 stuck-offline incident: the Mac's IP moved, the app
+  ///    latched onto flaky `.local`, and the sweep never ran because `.local`
+  ///    had "answered".)
+  /// 5. Otherwise the fail-safe: the override if set (explicit choice
+  ///    preserved, diagnosable via [probeAll]), else [kDefaultBaseUrl] —
+  ///    flagged `reachable: false` so callers don't persist it.
+  ///
+  /// A dead override never bricks the app (the login screen has no server-URL
+  /// field to escape it): it is only set aside when a DIFFERENT host answers.
+  static Future<ResolvedGateway> resolveGateway({
+    HealthProbe? probe,
+    LanSweep? sweep,
+  }) async {
     final check = probe ?? _defaultProbe;
+    final doSweep = sweep ?? lanSweep;
 
     final override = await loadOverride();
-    if (override != null) {
-      try {
-        if (await check(override)) return override;
-      } catch (_) {
-        // Probe threw — treat as unreachable and fall through to candidates.
-      }
-      // Override unreachable: prefer any auto candidate that actually answers
-      // over a dead pin (anti-brick). Skip re-probing the override itself.
-      for (final url in _candidates) {
-        if (url == override) continue;
-        try {
-          if (await check(url)) return url;
-        } catch (_) {
-          // Probe threw unexpectedly — treat as unreachable, try the next.
-        }
-      }
-      // Nothing else reachable either — keep the user's explicit choice.
-      return override;
+    if (override != null && await _safeCheck(check, override)) {
+      return (url: override, reachable: true);
     }
 
-    for (final url in _candidates) {
+    // Partition every candidate into CONCRETE (IP/DuckDNS) and MDNS (`.local`).
+    // Concrete always outranks mDNS AND the sweep runs between them, so a
+    // moved-IP scenario resolves to a reliable IP, never a flaky `.local`.
+    final lastGood = await loadLastResolved();
+    final discovered = await loadDiscovered();
+    final concrete = <String>[];
+    final mdns = <String>[];
+    final seen = <String>{if (override != null) normalizeBaseUrl(override)};
+    void addCandidate(String url) {
+      final n = normalizeBaseUrl(url);
+      if (!seen.add(n)) return;
+      (_isMdnsHost(n) ? mdns : concrete).add(n);
+    }
+
+    if (lastGood != null) addCandidate(lastGood);
+    _candidates.forEach(addCandidate);
+    discovered.forEach(addCandidate);
+    addCandidate(kUsbLoopbackBaseUrl);
+
+    // 1) Concrete candidates — parallel probe, highest-priority answerer wins.
+    final concreteHit = await _firstReachable(check, concrete);
+    if (concreteHit != null) return (url: concreteHit, reachable: true);
+
+    // 2) LAN sweep — finds the current concrete IP when everything moved.
+    if (doSweep != null) {
       try {
-        if (await check(url)) return url;
+        final found = await doSweep();
+        if (found.isNotEmpty) {
+          final url = normalizeBaseUrl(found.first);
+          await rememberDiscovered(url);
+          return (url: url, reachable: true);
+        }
       } catch (_) {
-        // Probe threw unexpectedly — treat as unreachable, try the next.
+        // A failing sweep must never break resolution — fall through.
       }
     }
-    return kDefaultBaseUrl;
+
+    // 3) mDNS `.local` — absolute last resort (see step 4 in the doc above).
+    final mdnsHit = await _firstReachable(check, mdns);
+    if (mdnsHit != null) return (url: mdnsHit, reachable: true);
+
+    // 4) Fail-safe — override if set, else default; flagged unreachable.
+    return (url: override ?? kDefaultBaseUrl, reachable: false);
+  }
+
+  /// Probes [urls] concurrently and returns the FIRST (highest-priority) that
+  /// answers, or `null` when none do. Probes start together but are awaited in
+  /// order, so the call returns as soon as the top host answers without waiting
+  /// for slower losers to time out ([_safeCheck] swallows their late failures).
+  static Future<String?> _firstReachable(
+      HealthProbe check, List<String> urls) async {
+    final answering = [for (final url in urls) _safeCheck(check, url)];
+    for (var i = 0; i < urls.length; i++) {
+      if (await answering[i]) return urls[i];
+    }
+    return null;
+  }
+
+  /// True when [url]'s host is an mDNS `.local` name — unreliable to resolve in
+  /// Dart's `HttpClient` on Android, hence demoted to last-resort in
+  /// [resolveGateway]. Never throws (a malformed URL is treated as concrete).
+  static bool _isMdnsHost(String url) {
+    try {
+      return Uri.parse(url).host.toLowerCase().endsWith('.local');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Runs [check] on [url], swallowing sync AND async probe exceptions into
+  /// `false` so one exploding probe can never abort the whole resolution.
+  static Future<bool> _safeCheck(HealthProbe check, String url) async {
+    try {
+      return await check(url);
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Probes EVERY known gateway (the override, if set, then the auto
@@ -234,12 +378,17 @@ class ServerConfig {
   static Future<List<GatewayStatus>> probeAll({HealthProbe? probe}) async {
     final check = probe ?? _defaultProbe;
     final override = await loadOverride();
+    final lastGood = await loadLastResolved();
+    final discovered = await loadDiscovered();
 
     final planned = <({String url, String label})>[
       if (override != null) (url: override, label: 'Custom (saved)'),
       (url: kDefaultBaseUrl, label: 'Remote (DuckDNS)'),
       (url: kLanFallbackBaseUrl, label: 'LAN (mDNS)'),
       (url: kLanFallbackIpBaseUrl, label: 'LAN (IP)'),
+      (url: kUsbLoopbackBaseUrl, label: 'USB (adb reverse)'),
+      if (lastGood != null) (url: lastGood, label: 'Last known good'),
+      for (final url in discovered) (url: url, label: 'Discovered (LAN scan)'),
     ];
 
     final seen = <String>{};

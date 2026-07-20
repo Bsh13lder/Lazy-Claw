@@ -178,13 +178,17 @@ void main() {
   });
 
   group('probeAll', () {
-    test('no override → the three auto candidates, each with its reachability',
+    test('no override → the four auto candidates, each with its reachability',
         () async {
       final statuses = await ServerConfig.probeAll(
         probe: (b) async => b == kLanFallbackIpBaseUrl,
       );
-      expect(statuses.map((s) => s.url).toList(),
-          [kDefaultBaseUrl, kLanFallbackBaseUrl, kLanFallbackIpBaseUrl]);
+      expect(statuses.map((s) => s.url).toList(), [
+        kDefaultBaseUrl,
+        kLanFallbackBaseUrl,
+        kLanFallbackIpBaseUrl,
+        kUsbLoopbackBaseUrl,
+      ]);
       expect(
         statuses.firstWhere((s) => s.url == kLanFallbackIpBaseUrl).reachable,
         isTrue,
@@ -201,7 +205,7 @@ void main() {
       final statuses = await ServerConfig.probeAll(
         probe: (b) async => b == 'http://box.lan:9000',
       );
-      expect(statuses.length, 4);
+      expect(statuses.length, 5);
       expect(statuses.first.url, 'http://box.lan:9000');
       expect(statuses.first.reachable, isTrue);
     });
@@ -210,8 +214,8 @@ void main() {
       ServerConfig.overrideStore =
           InMemoryBaseUrlOverrideStore(kDefaultBaseUrl);
       final statuses = await ServerConfig.probeAll(probe: (b) async => false);
-      expect(statuses.length, 3);
-      expect(statuses.map((s) => s.url).toSet().length, 3);
+      expect(statuses.length, 4);
+      expect(statuses.map((s) => s.url).toSet().length, 4);
     });
 
     test('a probe that throws for a candidate is reported unreachable',

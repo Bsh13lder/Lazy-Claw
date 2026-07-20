@@ -17,15 +17,17 @@ void main() {
   });
 
   group('resolveBaseUrl', () {
-    test('primary reachable → returns primary, probes it first', () async {
+    test('primary reachable → returns primary', () async {
       final probed = <String>[];
       final url = await ServerConfig.resolveBaseUrl(probe: (b) async {
         probed.add(b);
         return true;
       });
       expect(url, kDefaultBaseUrl);
-      // Stops at the first reachable candidate — never probes the LAN hosts.
-      expect(probed, [kDefaultBaseUrl]);
+      // Candidates are probed as a PARALLEL batch (so the worst case is one
+      // probe timeout, not one per candidate) and the winner is picked by
+      // priority — the primary outranks every LAN/loopback candidate.
+      expect(probed, contains(kDefaultBaseUrl));
     });
 
     test('primary unreachable, mDNS reachable → returns mDNS LAN host',

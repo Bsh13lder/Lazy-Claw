@@ -83,6 +83,45 @@ void main() {
     expect(await ServerConfig.loadLastResolved(), kLanFallbackIpBaseUrl);
   });
 
+  test(
+      'reresolve does NOT overwrite the last-known-good seed when nothing '
+      'answers (the unreachable fail-safe must not clobber a good seed)',
+      () async {
+    // Regression: reresolve used to remember WHATEVER resolution returned —
+    // including the fail-safe default when every candidate was dead — which
+    // overwrote a genuinely-working remembered LAN host and made the NEXT
+    // cold start seed to an unreachable URL.
+    await ServerConfig.rememberResolved('http://192.168.0.15:18789');
+    final c = _makeContainer();
+    await c
+        .read(activeBaseUrlProvider.notifier)
+        .reresolve(probe: (b) async => false);
+    expect(await ServerConfig.loadLastResolved(), 'http://192.168.0.15:18789');
+  });
+
+  test('overlapping reresolve calls coalesce into ONE resolution', () async {
+    // reresolve fires from two un-synchronized sites (cold-start post-frame +
+    // every app resume). Overlapping calls must share one in-flight resolution
+    // — otherwise both can reach the "nothing answered" branch and stack TWO
+    // concurrent 48-socket LAN sweeps (and race the discovered-store write).
+    final c = _makeContainer();
+    var defaultProbes = 0;
+    Future<void> call() => c.read(activeBaseUrlProvider.notifier).reresolve(
+          probe: (b) async {
+            if (b == kDefaultBaseUrl) defaultProbes++;
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            return true;
+          },
+        );
+    await Future.wait([call(), call()]);
+    expect(defaultProbes, 1,
+        reason: 'the second call must piggyback on the in-flight resolution');
+
+    // A LATER call (no overlap) runs a fresh resolution again.
+    await call();
+    expect(defaultProbes, 2);
+  });
+
   test('reresolve honors a reachable override', () async {
     ServerConfig.overrideStore =
         InMemoryBaseUrlOverrideStore('http://box.lan:9000');

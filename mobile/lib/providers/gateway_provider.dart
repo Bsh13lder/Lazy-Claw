@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/config/lan_discovery.dart';
 import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
 
@@ -18,18 +19,40 @@ final bootstrapBaseUrlProvider = Provider<String>((ref) => kDefaultBaseUrl);
 class GatewayController extends StateNotifier<String> {
   GatewayController(super.initialUrl);
 
-  /// Re-run [ServerConfig.resolveBaseUrl] (honoring any saved override) and
-  /// switch the active URL only when a DIFFERENT candidate is now
-  /// first-reachable. Cheap and idempotent — the common "same host still
-  /// reachable" case mutates nothing (so it can't needlessly churn the API
-  /// client / auth state).
-  Future<void> reresolve({HealthProbe? probe}) async {
-    final resolved = await ServerConfig.resolveBaseUrl(probe: probe);
-    if (resolved != state) state = resolved;
-    // Remember the host that answered so the NEXT cold start seeds straight to
-    // it (see [ServerConfig.seedBaseUrl]). Fire-and-forget — a persistence
-    // failure must never disrupt the live switch.
-    unawaited(ServerConfig.rememberResolved(resolved));
+  /// The resolution currently in flight, if any. reresolve fires from two
+  /// un-synchronized sites (cold-start post-frame callback + every app
+  /// resume); overlapping calls must SHARE one resolution — otherwise both
+  /// can reach the "nothing answered" branch and stack two concurrent
+  /// 48-socket LAN sweeps (and race the discovered-store read-modify-write).
+  Future<void>? _inflight;
+
+  /// Re-run [ServerConfig.resolveGateway] (honoring any saved override, with
+  /// the LAN sweep as the last resort) and switch the active URL only when a
+  /// DIFFERENT candidate is now first-reachable. Cheap and idempotent — the
+  /// common "same host still reachable" case mutates nothing (so it can't
+  /// needlessly churn the API client / auth state). Overlapping calls
+  /// coalesce onto the in-flight resolution.
+  Future<void> reresolve({HealthProbe? probe, LanSweep? sweep}) {
+    final inflight = _inflight;
+    if (inflight != null) return inflight;
+    final run = _reresolveNow(probe: probe, sweep: sweep)
+        .whenComplete(() => _inflight = null);
+    _inflight = run;
+    return run;
+  }
+
+  Future<void> _reresolveNow({HealthProbe? probe, LanSweep? sweep}) async {
+    final resolved =
+        await ServerConfig.resolveGateway(probe: probe, sweep: sweep);
+    if (resolved.url != state) state = resolved.url;
+    // Remember the host that ANSWERED so the NEXT cold start seeds straight to
+    // it (see [ServerConfig.seedBaseUrl]). Only a reachable host — persisting
+    // the unreachable fail-safe would clobber a genuinely-good seed with a
+    // dead URL. Fire-and-forget — a persistence failure must never disrupt
+    // the live switch.
+    if (resolved.reachable) {
+      unawaited(ServerConfig.rememberResolved(resolved.url));
+    }
   }
 
   /// Persist an explicit manual override and adopt it immediately. The URL is

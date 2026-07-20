@@ -85,11 +85,21 @@ class Reachability {
     await refresh();
   }
 
-  /// Re-evaluate reachability now (OS link gate, then active host ping) and
-  /// emit on the stream only when the value actually changes.
+  /// Re-evaluate reachability now and emit on the stream only when the value
+  /// actually changes.
+  ///
+  /// The `/api/health` ping is AUTHORITATIVE: if our backend answers, we ARE
+  /// online — full stop. We deliberately do NOT gate the ping behind
+  /// `connectivity_plus`'s `hasLink()`. That heuristic false-NEGATIVES on some
+  /// Android ROMs / hotspot / VPN configs, and gating the ping behind it
+  /// stranded the app "offline" (Home badge + sync frozen) even while the chat
+  /// WebSocket — which never consults `hasLink()` — was connected to the very
+  /// same host (2026-07-20 incident). The OS link state still drives WHEN we
+  /// re-check (the [onChanged] subscription), but never vetoes a server that
+  /// actually responds. When genuinely offline the ping just fails fast → still
+  /// correctly offline.
   Future<bool> refresh() async {
-    final hasLink = await _probe.hasLink();
-    final next = hasLink ? await _probe.pingHost() : false;
+    final next = await _probe.pingHost();
     _set(next);
     return next;
   }

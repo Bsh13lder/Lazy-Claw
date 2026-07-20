@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../../models/user.dart';
-import '../constants/app_constants.dart';
+import '../config/server_aliases.dart';
 
 /// Secure-storage key for the last successfully authenticated user.
 const String kAuthCacheKey = 'auth.last_user';
@@ -54,12 +54,15 @@ User? decodeAuthCachePayload(String? raw, {required String baseUrl}) {
 
 /// True when [cached] (a stored `base_url`) and [current] address the SAME
 /// server: an exact match, OR both are known aliases of the one self-hosted box
-/// ([kServerAliases]). A foreign URL never matches an alias, so offline mode
-/// still can't be unlocked against a different server.
+/// per [ServerAliasRegistry] — the static `kServerAliases` PLUS any
+/// runtime-DISCOVERED host (LAN sweep), so the automatic switch to a
+/// discovered IP can't force a re-login. A foreign URL never matches an
+/// alias, so offline mode still can't be unlocked against a different server.
 bool _sameServer(Object? cached, String current) {
   if (cached is! String) return false;
   if (cached == current) return true;
-  return kServerAliases.contains(cached) && kServerAliases.contains(current);
+  return ServerAliasRegistry.isAlias(cached) &&
+      ServerAliasRegistry.isAlias(current);
 }
 
 /// Production cache backed by [FlutterSecureStorage] (same store the server

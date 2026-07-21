@@ -210,8 +210,8 @@ class ServerConfig {
 
   /// The gateways the app will try at startup, in preference order.
   ///
-  /// 1. [kDefaultBaseUrl] — the public DuckDNS + Caddy front door. Works on
-  ///    cellular and away from home.
+  /// 1. [kDefaultBaseUrl] — the public Tailscale Funnel front door. Works on
+  ///    cellular and away from home (outbound tunnel — CGNAT/VPN can't block it).
   /// 2. [kLanFallbackIpBaseUrl] — the Mac's LAN IP directly. Probed BEFORE the
   ///    mDNS name because Dart's `HttpClient` frequently can't resolve `.local`
   ///    (it hangs the full probe timeout, then fails), so the raw IP is the
@@ -383,7 +383,7 @@ class ServerConfig {
 
     final planned = <({String url, String label})>[
       if (override != null) (url: override, label: 'Custom (saved)'),
-      (url: kDefaultBaseUrl, label: 'Remote (DuckDNS)'),
+      (url: kDefaultBaseUrl, label: 'Remote (Funnel)'),
       (url: kLanFallbackBaseUrl, label: 'LAN (mDNS)'),
       (url: kLanFallbackIpBaseUrl, label: 'LAN (IP)'),
       (url: kUsbLoopbackBaseUrl, label: 'USB (adb reverse)'),

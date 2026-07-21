@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ⚠️ DEAD-CODE (2026-07-21): superseded by Tailscale Funnel. The DuckDNS + router
+# port-forward remote path is UNREACHABLE under Vodafone CGNAT. DELETE this +
+# install-duckdns-updater.sh + the launchd agent `com.lazyclaw.duckdns` AFTER the
+# Funnel cutover is verified on cellular. See memory: project_frp_tunnel_remote_access.
+#
 # Keeps a DuckDNS subdomain pointed at this Mac's current public IPv4.
 #
 # We detect our IPv4 explicitly and send it, rather than leaving `ip=` blank for

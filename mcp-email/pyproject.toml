@@ -9,7 +9,7 @@ description = "Email MCP server — send/read/search email via SMTP+IMAP. Works 
 requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "aiosmtplib>=3.0.0",
     "aioimaplib>=1.1.0",
 ]

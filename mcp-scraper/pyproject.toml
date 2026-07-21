@@ -16,7 +16,7 @@ readme = "README.md"
 # crawl4ai itself is NOT a dep here — its source lives in mcp_scraper/_vendor/.
 dependencies = [
     # MCP transport
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "fastmcp>=2.14.2",
 
     # Wrapper (FastMCP server) deps

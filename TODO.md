@@ -1,5 +1,30 @@
 # TODO
 
+## Shipped since 2026-06-13 (catch-up, recorded 2026-07-21)
+Work that landed while this file was stale — details in DOCS.md / MEMORY:
+- [x] Telegram chat visual upgrade (2026-06-22)
+- [x] MiniMax full integration — generative image + TTS (2026-06-22) + tool hardening (2026-07-02)
+- [x] "Hey Lazy" tiered on-device assistant + wake word — `mobile/lib/assistant/`, `mobile/lib/wake/` (2026-06-25 → 29)
+- [x] Tasks smart reschedule + Overdue segment + lists (2026-06-26 → 29)
+- [x] Claude-native switch — MODE_CLAUDE Opus 4.8[1m] brain + Sonnet 5, token re-login button (2026-07-04/05)
+- [x] Unified `agent` dispatch tool (Claude Code dispatcher pattern) — merged `68757ae` (2026-07-08); legacy delegate/dispatch_subagents/run_background demoted during soak
+- [x] Reserva duplicate + delete-freeze 7-phase fix pass — APK 1.21.44+104 (2026-07-08 → 15)
+- [x] Mobile offline-first budget ledger, pull + write paths (2026-07-14/15)
+- [x] Notification spine — durable typed feed + mobile Notification Center — merged `f486365` (2026-07-16); deferred: ntfy push, watcher-quietness
+- [x] Mobile cold-start black-screen fix + LAN gateway auto-discovery + stuck-offline recovery — v1.22.0 (2026-07-16 → 20)
+- [x] Budget top-up sync-cursor backfill (schema v10) — v1.22.0+110 (2026-07-20)
+- [ ] Sync integrity layer (self-healing digest + conformance harness) — IN FLIGHT: design + 11-task plan committed, Tasks 1–2 shipped (`serverWinsByTime` instant compares, v1.22.1+111 `fc9fea7`); Tasks 3–11 remaining (2026-07-20/21)
+- [ ] MCP 2026-07-28 spec conformance — NEW, see next section
+
+## MCP 2026-07-28 Spec Conformance (added 2026-07-21)
+The MCP spec revision finalizes 2026-07-28 (RC locked 2026-05-21): protocol goes stateless (`initialize`/`initialized` handshake + `Mcp-Session-Id` header REMOVED), Roots/Sampling/Logging deprecated (≥12-month grace), OAuth hardened (RFC 9207 `iss` validation + OIDC `application_type` in Dynamic Client Registration), MCP Apps + formalized extensions framework. Tier-1 SDKs ship support within a 10-week validation window. Source: blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/.
+- [x] Pin `mcp` SDK below the breaking bump (`mcp>=1.0.0,<2`) in main + bundled MCP server pyprojects (2026-07-21)
+- [ ] Server: replace deprecated SSE transport (`lazyclaw/mcp/server.py:create_sse_app`) with streamable HTTP
+- [ ] Client: adapt `lazyclaw/mcp/client.py` connect lifecycle to the stateless protocol (no handshake, no session header) once python-sdk ships it
+- [ ] OAuth: RFC 9207 `iss` validation + `application_type` declaration in `lazyclaw/mcp/oauth.py`
+- [ ] Audit our use of deprecated Roots/Sampling/Logging (client + server + bridge)
+- [ ] Conformance pass against the final spec, then bump the `mcp` pin deliberately
+
 ## Mobile App (Flutter) ✅ v1.7.0 (2026-06-06)
 Native Android/iOS client in `mobile/`, donor-harvested from `taskbot_flutter`. See DOCS.md → "Mobile App" and `docs/superpowers/specs/2026-06-0{4,6}-*`.
 - [x] Milestone A — scaffold + login + WebSocket chat + self-served APK (Download/QR in web Settings)
@@ -38,7 +63,7 @@ Shift from a 277-tool generalist brain toward a thin-router + declarative specia
 - [x] **Phase 3 — Operating modes**: `runtime/agent_mode.py` (Chat/Ask/Plan/Auto) enforced in `PermissionChecker.check_effective` (default `ask` = no-op). Settable via Telegram `/act`, web/mobile mode switch; stored at `general.agent_mode`.
 - [x] **Phase 4 — Research-first fan-out**: `runtime/research_fanout.py` + code/web research specialists, wired into the plan gate behind `LAZYCLAW_RESEARCH_FANOUT=1` (default off — runs full agent loops).
 - [x] **Phase 6 — Auto-improving specialists**: `runtime/specialist_lessons.py` — per-specialist lesson recall into context + confidence-gated promotion (ADR-0002 loop).
-- [ ] **Phase 5 — Thin-router brain** (deferred behind `SPECIALIST_FIRST_BRAIN`): migrate F1/grounding defenses into channel specialists FIRST, then shrink brain to meta-tools and DELETE dedup/AUTO-PROMOTE/keyword-gating. **Do not start until 5a (grounding migration) is done + F1 suite green.**
+- [ ] **Phase 5 — Thin-router brain** — LARGELY SHIPPED, see "Thin-Router Brain (2026-06-08)" subsection below: Phases 1–4b on main, `LAZYCLAW_THIN_ROUTER=1` soaking in prod since 2026-06-08; grounding migrated via `runtime/f1_gate.py` (Phase 4a). Remaining: Phase 4c brain teardown after soak (KEEP-LIST applies — the original "DELETE dedup/keyword-gating" idea was dropped).
 - [x] **Follow-ups (DONE 2026-06-10, branch `fix/dispatch-audit-hardening`)**: `include_scraper` persisted for custom specialists (schema column + migration + save/load; also fixed the latent upsert bug where the encrypted-name comparison never matched → every save duplicated the row); startup self-check `startup_specialist_self_check(registry)` wired into both cli startup paths (native + bare-MCP-suffix aware); ModeSwitch reconciliation OBSOLETE (`PlanModeToggle` no longer exists anywhere in web/).
 - [ ] **Deploy**: `make rebuild` from a branch containing `fix/dispatch-audit-hardening`.
 - **Verification (2026-06-07)**: 157 backend tests green (loader 18 · agent_mode 41 · research_fanout 12 · specialist_lessons 17 · specialists_routes 23 + existing specialist suite); all 15 builtins load, every tool resolves against the registry (zero unknowns), no duplicate domains. Web `tsc -b`+`vite build` clean (verified — `SkillsHub`/`Specialists` chunks produced); `flutter analyze` clean. Committed across `7a1c185`/`cf3ea24`/`a6ff1ed`; in the 2026-06-10 00:02 container build.
@@ -816,7 +841,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - LazyBrain force layout (collision-aware): ✅ COMPLETE — `32c8adc`. d3-style alpha decay (1.0 → 0 over ~120 ticks). Per-node mass = `1 + sqrt(deg) * 0.4` (hubs push hubs ~30× harder than leaf-leaf). Per-edge spring strength = `1/min(deg(a), deg(b))`. Hard 2-iteration collision pass that physically pushes overlapping circles apart by half the overlap. `↻ Re-flow` button bumps alpha to 1.0; auto-unfreezes if Locked. Pinned nodes stay put. Matches Obsidian / Logseq / d3-force — node circles can no longer visually intersect. CSS animation keyframes (sun-core pulse, corona breath, edge-flow) live entirely on the GPU compositor.
 - LazyBrain owner tags + shape icons: ✅ COMPLETE — `32c8adc`. `journal.py` + `cli_migrate_lazybrain.py` stamp `owner/user` on journals + personal facts (kind=fact); `owner/agent` on learned_preference / context / layers / daily_logs. Daily journals now show under the "You" tab instead of Unknown. 4 missing shape badges (`shape`, `shape-pending`, `shape-failed`, `shape-known-bad`) added to `BADGE_MAP` + `CATEGORY_ICONS` (Wrench / Hourglass / AlertTriangle / Ban). `survival` badge bumped to "Sv" to avoid collision with the new `S`. FilterBar chips and MemoCard now render real icons instead of generic FileText.
 - LazyBrain daily timeline sidebar: ✅ COMPLETE (uncommitted, in this session). `PageListSidebar.tsx` — new "Past days" section groups every reachable note (recent + journal + tasks + pinned) by created-at day for the last 14 days, attaches watcher fires (price drops, slot openings) on the same day, and extracts each day's journal + rollup into distinct rows above the long note list. Today/Yesterday labels for the obvious cases, weekday labels for the current week. Open-day set persisted in `lazybrain-sidebar-days-open`; default = only today is open. Watcher trigger count rendered as ⚡ badge in section header.
-- HARD_TESTS.md launch test plan: ✅ COMPLETE (uncommitted, in this session). 14 prioritized hard-tests across P0 (E2E encryption round-trip / MCP respawn / MiniMax fallback / permissions flow), P1 (gig pipeline / RAG / hybrid memory / brain-as-dispatcher / bg auto-promote), P2 (Docker headless / Claude CLI persistence / browser canvas / channel unification), P3 (Ollama-down graceful degradation / worker fallback chain). Each test names the why, repro steps, source files, acceptance criteria, and target test path under `tests/hard/`.
+- HARD_TESTS.md launch test plan: ✅ COMPLETE (file retired 2026-07-21 — snapshot table had gone stale; the hard-test ideas live on in `tests/`). 14 prioritized hard-tests across P0 (E2E encryption round-trip / MCP respawn / MiniMax fallback / permissions flow), P1 (gig pipeline / RAG / hybrid memory / brain-as-dispatcher / bg auto-promote), P2 (Docker headless / Claude CLI persistence / browser canvas / channel unification), P3 (Ollama-down graceful degradation / worker fallback chain). Each test names the why, repro steps, source files, acceptance criteria, and target test path under `tests/hard/`.
 
 ## Session 2026-05-08 → 2026-05-09 — Bounty hunting toolkit
 

@@ -1,7 +1,7 @@
 # P1 — Unified Code Session per Project
 
 **Status**: ✅ **IMPLEMENTED 2026-05-19** (initial draft 2026-05-18). See acceptance criteria at bottom.
-**Parent plan**: `docs/plans/next-session-handoff-2026-05-18.md` → Open item #1.
+**Parent plan**: next-session handoff 2026-05-18, Open item #1 (handoff completed and removed 2026-07-21).
 **Branch**: `feat/claude-agent-sdk` (current).
 **Est. effort**: ~1.5 h (actual: roughly on plan).
 **TODO.md anchor**: Phase 22.

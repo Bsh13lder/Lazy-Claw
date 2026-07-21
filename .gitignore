@@ -50,3 +50,7 @@ web/dist/
 web/node_modules/
 node_modules/
 logos/
+
+# Tailscale cert/key dumps (funnel uses the daemon cert; never commit keys)
+*.ts.net.crt
+*.ts.net.key

@@ -7,6 +7,7 @@ import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../repositories/budgets_repository.dart';
+import 'sync_time.dart';
 
 /// Raised when a push stops early because the network/server is unreachable, or
 /// because a retryable server error (5xx) should keep the queue intact. The
@@ -677,7 +678,7 @@ class BudgetsSync {
       }
 
       final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
-      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+      final serverWins = serverWinsByTime(serverUpdatedAt, localUpdatedAt);
 
       if (serverWins) {
         final logged = await _logProjectFieldConflicts(
@@ -784,7 +785,7 @@ class BudgetsSync {
       }
 
       final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
-      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+      final serverWins = serverWinsByTime(serverUpdatedAt, localUpdatedAt);
 
       if (serverWins) {
         final logged = await _logExpenseFieldConflicts(
@@ -878,7 +879,7 @@ class BudgetsSync {
       }
 
       final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
-      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+      final serverWins = serverWinsByTime(serverUpdatedAt, localUpdatedAt);
 
       if (serverWins) {
         final logged = await _logBudgetEntryFieldConflicts(
@@ -1092,16 +1093,6 @@ class BudgetsSync {
     if (v is double) return v;
     if (v is int) return v.toDouble();
     return double.tryParse(v.toString());
-  }
-
-  /// True when [a] >= [b] as ISO-8601 strings (lexicographic == chronological
-  /// for zero-padded ISO timestamps). Empty server time loses to any local time.
-  static bool _gte(String? a, String? b) {
-    final av = a ?? '';
-    final bv = b ?? '';
-    if (av.isEmpty) return false;
-    if (bv.isEmpty) return true;
-    return av.compareTo(bv) >= 0;
   }
 
   /// Unwrap an [ApiError] from either a bare throw or a [DioException] whose

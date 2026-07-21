@@ -5,6 +5,7 @@ import '../core/api/api_exceptions.dart';
 import '../local/note_dao.dart';
 import '../models/note.dart';
 import '../repositories/notes_repository.dart';
+import 'sync_time.dart';
 
 /// Raised when a push stops early because the network/server is unreachable, or
 /// because a retryable server error (5xx) should keep the queue intact. The
@@ -489,7 +490,7 @@ class NoteSync {
 
       // Local is dirty — a genuine concurrent edit. Compare timestamps.
       final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
-      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+      final serverWins = serverWinsByTime(serverUpdatedAt, localUpdatedAt);
 
       if (serverWins) {
         // Server wins; log the local edit we are about to overwrite. Only real
@@ -622,16 +623,6 @@ class NoteSync {
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
-
-  /// True when [a] >= [b] as ISO-8601 strings (lexicographic == chronological
-  /// for zero-padded ISO timestamps). Empty server time loses to any local time.
-  static bool _gte(String? a, String? b) {
-    final av = a ?? '';
-    final bv = b ?? '';
-    if (av.isEmpty) return false;
-    if (bv.isEmpty) return true;
-    return av.compareTo(bv) >= 0;
-  }
 
   /// Coerce a payload `tags` value into a `List<String>?`.
   static List<String>? _tagsFrom(dynamic v) {

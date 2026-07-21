@@ -1393,6 +1393,33 @@ void main() {
       expect((await dao.getProject('p1'))!.budget, 0);
     });
   });
+
+  test(
+      'REGRESSION: same-second server(+00:00) beats dirty local(Z) — server wins',
+      () async {
+    // Dirty local row minted with a Z-suffixed millisecond timestamp.
+    final dao = await _freshDao(now: () => '2026-06-05T11:00:00.000Z');
+    await dao.applyLocalProjectCreate('Local name', id: 'ts1');
+
+    // Server change at the SAME instant, stamped +00:00 with microseconds.
+    final transport = _FakeTransport(changesResponse: {
+      'projects': [
+        _serverProjectJson(
+            id: 'ts1',
+            name: 'Server name',
+            updatedAt: '2026-06-05T11:00:00.000000+00:00')
+      ],
+      'expenses': [],
+      'deleted_projects': [],
+      'deleted_expenses': [],
+      'now': '2026-06-05T12:00:00Z',
+    });
+
+    await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+    // With the old lexical _gte this stayed 'Local name' (server stranded).
+    expect((await dao.getProject('ts1'))!.name, 'Server name');
+  });
 }
 
 // ── test helpers ─────────────────────────────────────────────────────────────

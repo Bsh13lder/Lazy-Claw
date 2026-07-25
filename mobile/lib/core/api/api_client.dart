@@ -67,11 +67,14 @@ class ApiClient {
   Future<void> _bootstrapSessionToken() async {
     try {
       if (await ApiClient.sessionStore.load() != null) return;
+      // Look under the current host PLUS every address this one server is
+      // reachable as ([kServerAliases]) — including the retired DuckDNS front
+      // door ([kLegacyDuckdnsBaseUrl]). A user whose last session was created on
+      // cellular (the old DuckDNS host) would otherwise have it stranded when
+      // the app switches to the Funnel URL, forcing a needless re-login.
       final candidates = <String>{
         baseUrl,
-        kDefaultBaseUrl,
-        kLanFallbackBaseUrl,
-        kLanFallbackIpBaseUrl,
+        ...kServerAliases,
       };
       for (final url in candidates) {
         try {

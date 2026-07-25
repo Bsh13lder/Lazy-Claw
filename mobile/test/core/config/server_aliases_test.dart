@@ -81,5 +81,15 @@ void main() {
           decodeAuthCachePayload(raw, baseUrl: 'http://box.lan:9000'),
           isNotNull);
     });
+
+    test('kServerAliases covers the legacy DuckDNS host (session migration)', () {
+      // ApiClient._bootstrapSessionToken migrates an existing session from any
+      // host in kServerAliases into the host-agnostic store. If the retired
+      // DuckDNS front door were dropped from the list, a session created on
+      // cellular under it would strand on the switch to the Funnel URL — a
+      // forced re-login. This locks that coverage in.
+      expect(kServerAliases, contains(kLegacyDuckdnsBaseUrl));
+      expect(kServerAliases, contains(kDefaultBaseUrl));
+    });
   });
 }

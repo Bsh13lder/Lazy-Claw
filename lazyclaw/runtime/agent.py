@@ -7586,7 +7586,24 @@ class Agent:
                 self.registry.unregister("delegate")
             if _dispatch_registered and self.registry:
                 self.registry.unregister("dispatch_subagents")
-            return "Operation cancelled."
+            # Re-raise after cleanup — never swallow cancellation.
+            #
+            # 2026-07-26: this used to `return "Operation cancelled."`.
+            # task_runner wraps us in `async with asyncio.timeout(...)`,
+            # which only converts a blown deadline into a TimeoutError if
+            # the CancelledError it injected actually propagates. Because
+            # we returned a plain string instead, BOTH of task_runner's
+            # `except asyncio.TimeoutError` (mark failed, "Timed out
+            # after 300s") and `except asyncio.CancelledError` (mark
+            # cancelled) were skipped, and an 11-minute run that blew its
+            # deadline was recorded as `completed / success=True` with a
+            # 20-char body. The user was told the task succeeded.
+            #
+            # Callers are all prepared for this: chat_ws sends a
+            # {"type": "cancelled"} frame, telegram/cli_chat have their
+            # own handlers, and on the plain HTTP path the only cancel
+            # source is a client disconnect, where propagating is right.
+            raise
 
         # ── TAOR Phase 3: VERIFY ──────────────────────────────────────
         # After the execute phase, verify the final response with lightweight

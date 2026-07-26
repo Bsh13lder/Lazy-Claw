@@ -167,15 +167,45 @@ _LOOKUP_TOOLS_BYPASS_SIMILARITY: frozenset[str] = frozenset({
 # The same-result detector still catches true stuck loops.
 # `lazybrain_` belongs here too: search_notes → get_note(id_a) → get_note(id_b)
 # is the normal read pattern, and each call has different args + different results.
-_BATCH_OP_PREFIXES = ("email_", "whatsapp_", "instagram_", "lazybrain_")
+_BATCH_OP_PREFIXES = (
+    "email_", "whatsapp_", "instagram_", "lazybrain_", "upwork_",
+)
+
+# Bridged MCP tools are registered as ``mcp_<server_uuid>_<tool>``
+# (lazyclaw/mcp/bridge.py builds the name from the server's DB id, not
+# its display name). 2026-07-26: that meant NO entry in
+# DEFAULT_LOOP_LIMITS and NO prefix above could ever match a bridged
+# tool — every one silently fell through to ``"default": 3`` under a
+# name no rule could address. Anchored on the 8-4-4-4-12 hex UUID shape
+# because a naive ``split("_")`` mangles both the hyphenated UUID and
+# the underscore-bearing tool name.
+_MCP_UUID_PREFIX_RE = re.compile(
+    r"^mcp_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_",
+)
+
+
+def strip_mcp_prefix(tool_name: str) -> str:
+    """``mcp_<uuid>_upwork_get_messages`` → ``upwork_get_messages``.
+
+    Returns the name unchanged when it doesn't match the bridged shape —
+    never mangle a name we don't recognise.
+    """
+    return _MCP_UUID_PREFIX_RE.sub("", tool_name, count=1)
+
 
 def _effective_limit(tool_name: str, limits: dict[str, int]) -> int:
     """Get loop limit for a tool, with higher defaults for batch-op tools."""
     if tool_name in limits:
         return limits[tool_name]
+    # Bridged MCP tools resolve under their BARE name so the table and
+    # the batch-op prefixes below can actually see them.
+    bare = strip_mcp_prefix(tool_name)
+    if bare != tool_name and bare in limits:
+        return limits[bare]
     # MCP batch tools get 10 consecutive calls before stuck
     for prefix in _BATCH_OP_PREFIXES:
-        if tool_name.startswith(prefix):
+        if bare.startswith(prefix):
             return 10
     return limits.get("default", 3)
 
@@ -584,6 +614,83 @@ def detect_hallucinated_element(
 
 # ── Convenience: run all detectors ───────────────────────────────────
 
+_CYCLE_WINDOW = 6
+
+
+def detect_cycle(
+    history: list[str],
+    results: list[str],
+) -> StuckSignal | None:
+    """Detect an A→B→C→A→B→C rotation that makes no progress.
+
+    2026-07-26: a specialist rotated ``upwork_get_messages`` →
+    ``upwork_last_conversation`` → ``browser`` for ELEVEN MINUTES. Both
+    existing detectors were structurally blind to it —
+    ``detect_tool_loop`` needs the same NAME N times consecutively
+    (``len(set(last_n)) != 1`` bails), and ``detect_same_result``
+    compares CONSECUTIVE results, which differed by two orders of
+    magnitude (257 / 92 / ~13000 chars). Only a 300s timeout stopped it.
+
+    Deliberately conservative — a cycle detector that fires on a correct
+    read path is a NEW failure mode, strictly worse than the bug. Three
+    independent conditions must all hold:
+
+      1. the window is an EXACT repetition of a 2- or 3-tool pattern
+         (so a single new tool name anywhere breaks it — that's progress);
+      2. the pattern has ≥2 distinct tools (single-name repetition is
+         ``detect_tool_loop``'s job, and it has a better message);
+      3. at least one position in the cycle returns a BYTE-IDENTICAL
+         result on every repetition.
+
+    (3) uses exact equality rather than the 0.85 similarity floor used
+    elsewhere: legitimate batch reads (``search_notes`` → ``get_note``)
+    produce structurally similar but non-identical results, and a
+    threshold loose enough to catch them would be loose enough to kill
+    them. In the incident every ``get_messages`` returned the same 257
+    bytes and every ``last_conversation`` the same 92, so exact equality
+    is sufficient to catch it and cheap to reason about.
+    """
+    if len(history) < _CYCLE_WINDOW or len(results) < _CYCLE_WINDOW:
+        return None
+
+    window = history[-_CYCLE_WINDOW:]
+    window_results = results[-_CYCLE_WINDOW:]
+
+    for period in (2, 3):
+        if _CYCLE_WINDOW % period:
+            continue
+        pattern = window[:period]
+        if len(set(pattern)) < 2:
+            continue  # single-tool repetition — detect_tool_loop owns it
+        reps = _CYCLE_WINDOW // period
+        if any(window[i] != pattern[i % period] for i in range(_CYCLE_WINDOW)):
+            continue  # not a clean repetition — a new tool broke it
+
+        for pos in range(period):
+            seen = [window_results[pos + r * period] for r in range(reps)]
+            if len(set(seen)) != 1:
+                continue
+            tool = pattern[pos]
+            logger.debug(
+                "[stuck] cycle trip pattern=%s period=%d reps=%d "
+                "frozen_tool=%s outcome=blocked",
+                "→".join(pattern), period, reps, tool,
+            )
+            return StuckSignal(
+                reason="cycle",
+                tool_name=tool,
+                context=(
+                    f"Cycling through {' → '.join(pattern)} without "
+                    f"progress — {tool} returned the exact same result "
+                    f"{reps} times. Repeating this rotation won't change "
+                    "the answer; either use what you already have or try "
+                    "a genuinely different approach."
+                ),
+                needs_browser=False,
+            )
+    return None
+
+
 def detect_stuck(
     tool_history: list[str],
     tool_results: list[str],
@@ -644,6 +751,15 @@ def detect_stuck(
     signal = detect_tool_loop(tool_history, results=tool_results)
     if signal:
         logger.debug("[stuck] detect_stuck resolved via=tool_loop")
+        return signal
+
+    # Cycle — A→B→C→A→B→C rotations that every detector above misses
+    # because no single tool NAME repeats consecutively and no two
+    # CONSECUTIVE results resemble each other. Runs last: the detectors
+    # above are more specific and carry better remediation text.
+    signal = detect_cycle(tool_history, tool_results)
+    if signal:
+        logger.debug("[stuck] detect_stuck resolved via=cycle")
         return signal
 
     return None

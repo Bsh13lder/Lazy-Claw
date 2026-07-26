@@ -425,13 +425,47 @@ def _blocked_diagnosis(raw) -> dict | None:
             return None
     if isinstance(raw, dict) and isinstance(raw.get("result"), dict):
         raw = raw["result"]
-    if isinstance(raw, dict) and raw.get("status") == "empty_or_blocked":
+    if not isinstance(raw, dict):
+        return None
+    status = raw.get("status")
+    if status == "empty_or_blocked":
+        return raw
+    # ``sidebar_unavailable`` (2026-07-26) is a ROUTING hint, not a dead
+    # end: the rooms sidebar didn't render, but the row still carries
+    # the room mined from the open conversation URL. This function runs
+    # BEFORE _normalize_inbox, so claiming it here would return an error
+    # string and skip the read entirely — exactly the bug being fixed.
+    # Only degrade to "blocked" when there is nothing readable at all.
+    if status == "sidebar_unavailable":
+        if raw.get("room_id") or raw.get("room_url"):
+            return None  # readable — let it flow to the normal path
         return raw
     return None
 
 
 def _normalize_inbox(raw) -> list[dict]:
-    """Coerce upwork_get_messages output into list[dict]."""
+    """Coerce upwork_get_messages output into list[dict].
+
+    A BARE single row (no envelope) must survive as a one-element list.
+    2026-07-26: ``get_messages`` is typed ``-> list[dict] | dict`` and
+    FastMCP emits one TextContent block per list item, so a ONE-item
+    list arrives as ONE block — and ``MCPClient._call_tool_once`` only
+    rebuilds a JSON array when ``len(parts) >= 2``. The sidebar-fallback
+    row therefore reached this function as a bare object, hit
+    ``raw.get("result") or raw.get("messages") or []`` → ``[]``, and the
+    skill reported "No Upwork conversations found" while the thread was
+    sitting right there (a direct ``upwork_get_conversation`` on the same
+    room returned 20 real bubbles). That false negative reads as data
+    rather than an error, and it drove an 11-minute retry loop.
+
+    Fixed here at the CONSUMER rather than in ``mcp/client.py``:
+    relaxing that ``>= 2`` guard would wrap every legitimate
+    single-object MCP return in a spurious array and break other tools.
+
+    Note ``contact_name`` is compared with ``is not None`` — the
+    incident row had ``contact_name == ""``, which is falsy but REAL.
+    A truthiness test here silently reintroduces the bug.
+    """
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -439,7 +473,15 @@ def _normalize_inbox(raw) -> list[dict]:
             logger.debug("inbox response unparseable: %r", raw[:200])
             return []
     if isinstance(raw, dict):
-        raw = raw.get("result") or raw.get("messages") or []
+        inner = raw.get("result") or raw.get("messages")
+        if inner is not None:
+            raw = inner
+        elif "result" in raw or "messages" in raw:
+            raw = []  # envelope present but empty — genuinely no rows
+        elif raw.get("room_id") or raw.get("contact_name") is not None:
+            raw = [raw]  # bare single row (sidebar fallback)
+        else:
+            raw = []
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]

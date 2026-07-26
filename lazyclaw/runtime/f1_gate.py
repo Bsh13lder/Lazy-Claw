@@ -178,7 +178,47 @@ def evaluate_grounding(
                 "[f1] evaluate_grounding: phase2_block=%s", phase2_block,
             )
 
-        if not (verdict.is_confabulation or phase2_block):
+        # Step 2c — quote PRESENCE. Neither check above requires the
+        # reply to actually carry a quote block: `detect_confabulation`
+        # and `phase2_enforcement_verdict` both verify the ACCURACY of
+        # quotes that exist, and phase-2 short-circuits on
+        # `if not quotes: return False, ""`. So a reply with ONE slightly
+        # wrong quote was blocked while a reply with NO quotes shipped —
+        # backwards, since zero quotes is the worse failure.
+        #
+        # 2026-07-26: a freelance_specialist turn read the thread and
+        # emitted 2411 chars of prose with `parse_quote_lines: found=0`,
+        # and the gate said `verdict=clean`.
+        #
+        # Reuse the brain's `_check_f1_violation` rather than writing a
+        # second detector — it already carries the carve-outs earned by
+        # the 2026-06-24 failed-read loop (errored reads exempt via
+        # `_tool_result_has_quotable_content`, short acks exempt via the
+        # length threshold, empty drafts exempt). A parallel
+        # implementation would drift out of sync with those.
+        missing_quotes_reason: str | None = None
+        try:
+            from lazyclaw.runtime.agent import _check_f1_violation
+
+            missing_quotes_reason = _check_f1_violation(
+                reply or "", list(tool_results or []),
+            )
+        except Exception as exc:
+            # Non-fatal: keep gating on the detectors above.
+            logger.warning(
+                "[f1] _check_f1_violation unavailable — skipping quote-"
+                "presence check error_type=%s: %s",
+                type(exc).__name__, exc, exc_info=True,
+            )
+        if missing_quotes_reason:
+            logger.debug(
+                "[f1] evaluate_grounding: quote-presence violation (%s)",
+                missing_quotes_reason,
+            )
+
+        if not (
+            verdict.is_confabulation or phase2_block or missing_quotes_reason
+        ):
             return _OK_VERDICT
 
         # Step 2c — a violation fired. Build the corrective injection that
@@ -197,10 +237,15 @@ def evaluate_grounding(
                 f"unverified_quotes={verdict.unverified_quote_count}"
             )
             inj_reason = "confabulation"
-        else:
+        elif phase2_block:
             # phase-2-only block — synthesize the wording via the
             # made-up-quote reason (raw data is still injected).
             reason = f"phase2 unverified quote: {phase2_reason}"
+            inj_reason = "confabulation"
+        else:
+            # Quote-presence-only block. Same corrective shape: re-inject
+            # the raw read payload so the retry can quote it verbatim.
+            reason = f"missing quote block: {missing_quotes_reason}"
             inj_reason = "confabulation"
 
         corrective = build_raw_data_injection(

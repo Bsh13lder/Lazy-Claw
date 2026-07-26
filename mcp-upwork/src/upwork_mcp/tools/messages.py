@@ -300,6 +300,45 @@ class EditMessageParams(BaseModel):
     )
 
 
+def build_url_fallback_row(
+    room_id: str, room_url: str, contact_name: str,
+) -> dict:
+    """Build the URL-mined stand-in row for a non-rendering sidebar.
+
+    When the user's tab is parked on a *conversation* view, Upwork's SPA
+    never renders the rooms-list sidebar, so extraction matches zero room
+    elements and we mine the open URL instead. The result LOOKS like an
+    inbox listing but carries no listing content.
+
+    2026-07-26: that ambiguity cost an 11-minute retry loop. The row had
+    no ``status``, so it reached ``empty_or_blocked_result`` never, and
+    the consuming skill could not distinguish "here is the one room I
+    could infer" from "here is your inbox". It reported "No Upwork
+    conversations found" while the thread sat one
+    ``get_conversation_messages`` call away.
+
+    The explicit ``status`` mirrors the ``empty_or_blocked`` contract
+    (page_state.py, 2026-06-10) so consumers branch on one vocabulary.
+    Kept a pure function so it is testable without a live ``page``.
+    """
+    return {
+        "room_id": room_id,
+        "room_url": room_url,
+        "contact_name": contact_name,
+        # Tag so the brain (and post-mortems) can tell this
+        # row didn't come from the rooms-list sidebar.
+        "source": "page_url_fallback",
+        "status": "sidebar_unavailable",
+        "hint": (
+            "The rooms sidebar did not render, so this row was mined "
+            "from the open conversation URL. It is NOT an inbox "
+            "listing — do not report it as the full set of "
+            "conversations. Read this thread with "
+            "upwork_get_conversation(room_id=...)."
+        ),
+    }
+
+
 async def get_messages(params: MessagesParams) -> list[dict] | dict:
     """Get messages from Upwork inbox.
 
@@ -518,14 +557,9 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
                 and title.lower() not in {"messages", "upwork", "messages | upwork"}
                 else ""
             )
-            synthetic = {
-                "room_id": room_id,
-                "room_url": cur_url,
-                "contact_name": contact_name,
-                # Tag so the brain (and post-mortems) can tell this
-                # row didn't come from the rooms-list sidebar.
-                "source": "page_url_fallback",
-            }
+            synthetic = build_url_fallback_row(
+                room_id, cur_url, contact_name,
+            )
             logger.info(
                 "get_messages: returning URL-derived synthetic conv "
                 "room_id=%s contact_name=%r (sidebar empty, "

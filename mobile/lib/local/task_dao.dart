@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../models/subtask.dart';
 import '../models/task.dart';
 import 'app_db.dart';
 
@@ -364,22 +365,55 @@ class TaskDao {
   }
 
   /// Mark a task complete locally (status=done) + enqueue a `complete`.
+  ///
+  /// Also cascades the checklist — every sub-task is ticked — mirroring the
+  /// server's `complete_task` (`lazyclaw/tasks/store.py`). Without the local
+  /// cascade the Tasks list painted the parent struck-through next to a stale
+  /// `0/3` badge until a full server round-trip landed, and FOREVER while
+  /// offline, which is precisely when the cache is the only truth on screen.
   Future<Task?> applyLocalComplete(String id) async {
     final existing = await getById(id);
     if (existing == null) return null;
 
     final now = _now();
+    // Immutable rebuild via the canonical [{id,title,done}] codec — ids/titles
+    // are preserved, only `done` flips. Null when there is nothing to do (no
+    // checklist, or already fully ticked) so we never write a literal "[]" and
+    // never churn an unchanged column.
+    final steps = existing.subtasks;
+    final cascadedSteps = steps.any((s) => !s.done)
+        ? serializeSubtasks([for (final s in steps) s.copyWith(done: true)])
+        : null;
+
     await _db.transaction((txn) async {
       await txn.update(
         'task_cache',
-        {'status': 'done', 'completed_at': now, 'updated_at': now, 'dirty': 1},
+        {
+          'status': 'done',
+          'completed_at': now,
+          'updated_at': now,
+          'dirty': 1,
+          // `?` drops the key entirely when null, so an empty / already-ticked
+          // checklist leaves the column untouched (no literal "[]" ever written).
+          'steps': ?cascadedSteps,
+        },
         where: 'id = ?',
         whereArgs: [id],
       );
+      // Deliberately NO extra `update` op for the cascaded steps: the server runs
+      // its own cascade when it applies this `complete`, so a second op would
+      // race it — and for a RECURRING task the complete also respawns the next
+      // occurrence with a freshly-reset checklist, which a trailing steps patch
+      // would re-tick. The local write is a prediction of the server's own
+      // result, not an independent edit, so only `complete` is queued.
       await _enqueueTxn(txn, OutboxOp.complete, id, {'id': id}, now);
     });
 
-    return existing.copyWith(status: 'done', completedAt: now);
+    return existing.copyWith(
+      status: 'done',
+      completedAt: now,
+      steps: cascadedSteps,
+    );
   }
 
   /// Tombstone a task locally (deleted=1) + enqueue a `delete`. The row stays

@@ -39,7 +39,18 @@ DEFAULT_GENERAL = {
     # (priority high/urgent OR appointment-class title). Each entry is a
     # negative relative offset like "-2h", "-30m", "-1d" — applied to the
     # task's reminder_at to derive pre_reminders entries. Override per-user.
-    "reminder_offsets": ["-2h", "-1h"],
+    #
+    # "0m" ("At time") leads the list and is what the PHONE reads to schedule a
+    # local alarm at the reminder instant itself. Without it the default was
+    # advance-only, so a fresh install buzzed at 06:00 and 07:00 for an 08:00
+    # task and then went SILENT at 08:00 — the only at-time nudge was the
+    # server's Telegram nag, which app-only users never receive.
+    # Server-side it is inert by design: `pre_reminders._OFFSET_RE` requires a
+    # leading "-" and rejects zero, so "0m" never becomes a pre_reminder — the
+    # at-time fire is already owned by `reminder_at` itself.
+    # MUST stay in sync with mobile `core/reminder_offset.dart`
+    # kDefaultReminderOffsets.
+    "reminder_offsets": ["0m", "-2h", "-1h"],
     # Auto-save successful multi-step browser flows as templates (upsert by
     # primary host). Off → user must manually save via canvas/chat skill.
     "auto_save_browser_templates": True,

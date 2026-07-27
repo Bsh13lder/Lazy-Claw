@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../core/notifications/task_reminder_service.dart';
 import '../local/app_db.dart';
 import '../local/task_dao.dart';
 
@@ -34,6 +35,67 @@ String? taskIdFromPayload(String? payload) {
 /// `actionId`.
 bool isTaskDoneAction(NotificationResponse response) =>
     response.actionId == kTaskDoneActionId;
+
+/// Called (on whatever isolate handled the tap) right after a task was completed
+/// from the notification shade, with the completed task's id.
+///
+/// WHY it exists: the shade "Done" path writes straight to SQLite, bypassing the
+/// tasks notifier — so an OPEN Tasks list kept showing the task as pending until
+/// the next manual refresh. The app shell assigns this hook so it can invalidate
+/// / refresh the list. Null (and therefore a no-op) in the background isolate,
+/// where there is no UI and no Riverpod scope to notify.
+void Function(String taskId)? onTaskCompletedFromNotification;
+
+/// Cancel EVERY local alarm reserved for [taskId].
+///
+/// The shade "Done" button has `cancelNotification: true`, which dismisses only
+/// the notification that was TAPPED. A task schedules one alarm per configured
+/// offset (`-2h`, `-1h`, at-time…), so completing from the -2h reminder used to
+/// leave the later siblings armed and the user got reminded again about a task
+/// they had already finished. Sweeping [reservedReminderIds] is the same range
+/// [TaskReminderService.cancelForTask] clears.
+///
+/// [sink] is injectable for tests; production wires the shared plugin (its
+/// unnamed constructor returns the process-wide singleton, i.e. the very same
+/// instance `LocalNotifications.plugin` exposes). Best-effort — never throws.
+Future<void> cancelTaskReminderAlarms(String taskId, {ReminderSink? sink}) async {
+  try {
+    final target =
+        sink ?? FlutterLocalNotificationsSink(FlutterLocalNotificationsPlugin());
+    for (final id in reservedReminderIds(taskId)) {
+      await target.cancel(id);
+    }
+  } catch (_) {
+    // A cancel failure must never break the completion itself.
+  }
+}
+
+/// Complete the task referenced by [payload] (`task:<id>`) against an ALREADY-OPEN
+/// [dao], cancel the task's whole reminder alarm set, and notify
+/// [onTaskCompletedFromNotification]. Returns true iff a row was completed.
+///
+/// Split out of [completeTaskFromPayload] so the behaviour is unit-testable
+/// against a real in-memory SQLite engine — the public entry point below can't
+/// be, because it opens the encrypted on-device DB through platform channels.
+Future<bool> completeTaskInDao(
+  TaskDao dao,
+  String? payload, {
+  ReminderSink? sink,
+}) async {
+  final taskId = taskIdFromPayload(payload);
+  if (taskId == null) return false;
+  final result = await dao.applyLocalComplete(taskId);
+  if (result == null) return false;
+  // Order matters only for clarity: the row is already done, so a failure in
+  // either best-effort step below still leaves a correctly completed task.
+  await cancelTaskReminderAlarms(taskId, sink: sink);
+  try {
+    onTaskCompletedFromNotification?.call(taskId);
+  } catch (_) {
+    // A listener error must never fail the completion.
+  }
+  return true;
+}
 
 /// Complete the task referenced by [payload] (`task:<id>`) directly against the
 /// encrypted on-device database, WITHOUT any Riverpod scope or running app.
@@ -75,9 +137,9 @@ Future<bool> completeTaskFromPayload(String? payload) async {
   AppDbResult? opened;
   try {
     opened = await openAppDbWithFallback(singleInstance: false);
-    final db = opened.db;
-    final result = await TaskDao(db).applyLocalComplete(taskId);
-    return result != null;
+    // Completing ALSO cancels the task's sibling offset alarms and pings the
+    // refresh hook — see [completeTaskInDao].
+    return await completeTaskInDao(TaskDao(opened.db), payload);
   } catch (_) {
     // Never let a completion failure crash the notification isolate.
     return false;

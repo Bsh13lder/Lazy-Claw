@@ -42,6 +42,37 @@ class _NoopSync extends TaskSync {
   Future<SyncResult> sync({bool retryRejected = false}) async => const SyncResult();
 }
 
+/// Sync that simulates a server PULL landing a task the client never created —
+/// exactly what happens when the backend respawns the next occurrence of a
+/// recurring task on completion (new row, brand-new server-minted id).
+class _PullingSync extends TaskSync {
+  _PullingSync(this._dao, TasksRepository repo) : super(_dao, repo);
+
+  final TaskDao _dao;
+  static const pulledId = 'server-spawned-next-occurrence';
+
+  @override
+  Future<SyncResult> sync({bool retryRejected = false}) async {
+    await _dao.upsertFromServer(
+      const Task(
+        id: pulledId,
+        userId: 'u1',
+        title: 'Water the plants',
+        priority: 'medium',
+        status: 'pending',
+        owner: 'user',
+        dueDate: '2099-09-09',
+        reminderAt: '2099-09-09T08:00:00',
+        recurring: '0 8 * * *',
+        nagCount: 0,
+        createdAt: '2026-07-26T00:00:00Z',
+      ),
+      serverUpdatedAt: '2026-07-26T00:00:00Z',
+    );
+    return const SyncResult();
+  }
+}
+
 class _FakeReminders implements TaskReminderScheduler {
   final List<Task> scheduled = [];
   final List<String> cancelled = [];
@@ -186,6 +217,46 @@ void main() {
       await _settle();
 
       expect(fake.scheduled.last.reminderAt, '2099-02-02T09:00:00');
+    });
+
+    // Regression (2026-07-26): completing a RECURRING task cancelled the local
+    // notification for the completed occurrence but nothing ever scheduled one
+    // for the NEXT occurrence. The next occurrence is minted SERVER-side (new
+    // id) and arrives via the /changes pull inside _syncThenRefresh, and only
+    // load() reconciled the reminder set — so the respawned task stayed
+    // notification-less until the next cold start. Every server-originated task
+    // (recurring respawn, a task added on web/Telegram, a reminder edited
+    // elsewhere) hit the same hole.
+    test('a pull that lands a server-spawned task reconciles the reminder set',
+        () async {
+      final dao = await _freshDao();
+      final fake = _FakeReminders();
+      final n = TasksNotifier(
+        dao,
+        _PullingSync(dao, TasksRepository(_OfflineTransport())),
+        fake,
+      );
+
+      final created = await dao.applyLocalCreate(
+        'Water the plants',
+        dueDate: '2099-09-08T08:00:00',
+      );
+      await n.completeTask(created.id);
+      await _settle();
+
+      // The pulled next occurrence really did land in the cache.
+      expect(
+        n.state.tasks.map((t) => t.id),
+        contains(_PullingSync.pulledId),
+        reason: 'the simulated pull should have landed the next occurrence',
+      );
+      // …and the scheduler was reconciled against it, so it can fire.
+      expect(
+        fake.syncAllCalls,
+        greaterThanOrEqualTo(1),
+        reason: 'a sync that pulls new server rows must reconcile reminders, '
+            'or the respawned recurring occurrence never notifies',
+      );
     });
 
     test('a null scheduler is a no-op (legacy 2-arg construction still works)',

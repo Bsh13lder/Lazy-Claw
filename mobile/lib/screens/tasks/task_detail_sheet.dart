@@ -79,6 +79,23 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   /// applies once a due time is present.
   ReminderLead? _explicitLead;
 
+  /// The task's `reminderAt` on open (null / '' = none). A reminder is modelled
+  /// as `due − lead`, so for a DATE-ONLY due date the lead — and therefore the
+  /// composed reminder — is not derivable at all; this absolute value is the only
+  /// record of it. Kept so Save can tell "untouched" (preserve) from "cleared"
+  /// (send the `''` sentinel), and so the sheet can still SHOW it.
+  String? _originalReminderAt;
+
+  /// Set once the user touches the REMIND control — a lead chip, or the ✕ on the
+  /// read-only reminder row. Only then may Save send the clear sentinel.
+  bool _reminderTouched = false;
+
+  /// Set once the user changes the due day or the due time. Gates re-anchoring a
+  /// date-only task's reminder onto the new day (and clearing it outright when
+  /// the due date is removed), so an edit that never went near the date chips
+  /// can't move or destroy the reminder.
+  bool _dueTouched = false;
+
   /// Working copy of the task's sub-tasks. Edited in-sheet and committed as part
   /// of Save (one atomic [TasksNotifier.updateTask] call). [_originalSteps]
   /// snapshots the on-open serialization so Save only writes `steps` when the
@@ -118,8 +135,15 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _dueTime = parts == null
         ? null
         : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    _originalReminderAt = t.reminderAt;
     final hasReminder = t.reminderAt != null && t.reminderAt!.isNotEmpty;
-    _explicitLead = hasReminder ? leadFromReminderAt(raw, t.reminderAt) : null;
+    // Only seed the picker when the lead is actually DERIVABLE (the stored due
+    // carries a time-of-day). For a date-only due, leadFromReminderAt can only
+    // answer "None" — seeding that both hid the real reminder AND suppressed the
+    // global default if the user later added a due time.
+    _explicitLead = (hasReminder && dueDateHasTime(raw))
+        ? leadFromReminderAt(raw, t.reminderAt)
+        : null;
     _subtasks = List.of(t.subtasks);
     _originalSteps = serializeSubtasks(_subtasks);
     _category = (t.category == null || t.category!.isEmpty) ? null : t.category;
@@ -136,6 +160,53 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     explicitLead: _explicitLead,
     defaultLead: widget.defaultLead,
   );
+
+  /// The reminder instant that SURVIVES this edit when the due date has no
+  /// time-of-day, or null when nothing survives. This is the only path that can
+  /// see a date-only task's reminder, since `due − lead` degenerates for it.
+  ///
+  /// * user touched the REMIND control → null (an explicit clear)
+  /// * no reminder to begin with → null
+  /// * due date removed entirely → null (a reminder with nothing to remind
+  ///   about is an orphan that would still nag)
+  /// * due day untouched → the stored instant, verbatim
+  /// * due day moved → the SAME clock time re-anchored onto the new day (the
+  ///   Smart-Reschedule shape, cf. [cardDueTimeLabel]) rather than a reminder
+  ///   stranded on the old date
+  String? get _survivingReminderAt {
+    if (_reminderTouched) return null;
+    final original = _originalReminderAt;
+    if (original == null || original.isEmpty) return null;
+    final due = _composedDue;
+    if (due == null) return null;
+    if (!_dueTouched) return original;
+    final parts = dueTimeParts(original);
+    final day = DateTime.tryParse(due);
+    if (parts == null || day == null) return original;
+    return composeDueDate(day, hour: parts.hour, minute: parts.minute);
+  }
+
+  /// The `reminderAt` argument for [TasksNotifier.updateTask]: `null` leaves the
+  /// column untouched, `''` force-clears it, anything else sets it.
+  ///
+  /// WHY this is not simply [_composedReminderAt]: `resolveReminderAt` can only
+  /// answer `''` for a due date with no time-of-day, and EVERY backend-respawned
+  /// recurring occurrence (plus every Smart-Rescheduled task) has exactly that
+  /// shape — a date-only due plus a real timed `reminder_at`. Sending the composed
+  /// value unconditionally meant opening a repeating task to fix a typo and
+  /// hitting Save permanently deleted its reminder, its server reminder job and
+  /// its advance nags.
+  String? get _reminderArg {
+    // A timed due makes the reminder fully derivable, and the lead picker IS the
+    // user-visible control for it — so it stays authoritative (status quo).
+    if (dueDateHasTime(_composedDue)) return _composedReminderAt;
+    final surviving = _survivingReminderAt;
+    if (surviving == null) return '';
+    // Unchanged → leave the column absent from the patch, matching how this sheet
+    // already avoids churning category / recurring / tags / steps.
+    if (surviving == _originalReminderAt) return null;
+    return surviving;
+  }
 
   /// Combine the day + time into the persisted `dueDate` string: a datetime when
   /// a time is set, a date-only string when only a day is set, today+time when
@@ -260,7 +331,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           // is read as "field untouched" and would silently no-op the clear.
           dueDate: _composedDue ?? '',
           steps: stepsArg,
-          reminderAt: _composedReminderAt,
+          // Untouched reminders ride as null (absent) — see [_reminderArg].
+          reminderAt: _reminderArg,
           recurring: recurringArg,
           tags: tagsArg,
           allocatedBudget: budgetArg,
@@ -453,6 +525,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 selected: _dueDay == _isoToday(),
                 color: AppColors.warn,
                 onTap: () => setState(() {
+                  _dueTouched = true;
                   _dueDay = _dueDay == _isoToday() ? null : _isoToday();
                 }),
               ),
@@ -463,6 +536,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 selected: _dueDay == _isoTomorrow(),
                 color: AppColors.accent,
                 onTap: () => setState(() {
+                  _dueTouched = true;
                   _dueDay = _dueDay == _isoTomorrow() ? null : _isoTomorrow();
                 }),
               ),
@@ -496,7 +570,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               if (_dueTime != null) ...[
                 const SizedBox(width: AppSpacing.sm),
                 GestureDetector(
-                  onTap: () => setState(() => _dueTime = null),
+                  onTap: () => setState(() {
+                    _dueTouched = true;
+                    _dueTime = null;
+                  }),
                   child: Icon(
                     Icons.close,
                     size: 16,
@@ -525,7 +602,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 ),
                 const Spacer(),
                 GestureDetector(
+                  key: const Key('task-detail-due-clear'),
                   onTap: () => setState(() {
+                    _dueTouched = true;
                     _dueDay = null;
                     _dueTime = null;
                   }),
@@ -546,7 +625,46 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             const SizedBox(height: AppSpacing.sm),
             ReminderLeadPicker(
               value: _effectiveLead,
-              onChanged: (lead) => setState(() => _explicitLead = lead),
+              onChanged: (lead) => setState(() {
+                _reminderTouched = true;
+                _explicitLead = lead;
+              }),
+            ),
+          ]
+          // A DATE-ONLY due can't express a lead (`due − lead` degenerates), but
+          // the task may still carry a real timed reminder — every respawned
+          // recurring occurrence does. Show it read-only with a ✕, so the user
+          // can SEE the reminder instead of the sheet silently implying "None".
+          else if (_survivingReminderAt != null) ...[
+            const SizedBox(height: AppSpacing.xl),
+            _SectionLabel('REMIND'),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                Icon(
+                  Icons.notifications_active_outlined,
+                  size: 14,
+                  color: AppColors.textMuted,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  dueDateDisplay(_survivingReminderAt!),
+                  key: const Key('task-detail-reminder'),
+                  style: AppText.caption.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  key: const Key('task-detail-reminder-clear'),
+                  onTap: () => setState(() => _reminderTouched = true),
+                  child: Icon(
+                    Icons.close,
+                    size: 14,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
             ),
           ],
 
@@ -645,7 +763,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       ),
     );
     if (picked != null) {
-      setState(() => _dueDay = _isoFor(picked));
+      setState(() {
+        _dueTouched = true;
+        _dueDay = _isoFor(picked);
+      });
     }
   }
 
@@ -663,7 +784,12 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
         child: child!,
       ),
     );
-    if (picked != null) setState(() => _dueTime = picked);
+    if (picked != null) {
+      setState(() {
+        _dueTouched = true;
+        _dueTime = picked;
+      });
+    }
   }
 
   String _isoFor(DateTime d) =>

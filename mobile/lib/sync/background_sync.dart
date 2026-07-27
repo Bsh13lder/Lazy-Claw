@@ -4,6 +4,8 @@ import 'package:workmanager/workmanager.dart';
 import '../core/api/api_client.dart';
 import '../core/config/server_config.dart';
 import '../core/home_widget_tasks.dart';
+import '../core/notifications/task_reminder_service.dart';
+import '../core/reminder_offset.dart';
 import '../local/app_db.dart';
 import '../local/budgets_dao.dart';
 import '../local/document_cache_dao.dart';
@@ -15,6 +17,7 @@ import '../repositories/budgets_repository.dart';
 import '../repositories/documents_repository.dart';
 import '../repositories/notes_repository.dart';
 import '../repositories/tasks_repository.dart';
+import '../screens/settings/settings_prefs.dart';
 import 'budgets_sync.dart';
 import 'document_sync.dart';
 import 'note_sync.dart';
@@ -149,10 +152,86 @@ Future<void> runHeadlessSync() async {
       // Notification catch-up is non-fatal.
       debugPrint('runHeadlessSync: notification catch-up failed (non-fatal): $e');
     }
+
+    // Re-arm the on-device reminder alarms for whatever the pull just brought
+    // in. WITHOUT this, a phone that is never cold-started got NO reminders for
+    // any task it learned about in the background — most visibly every RECURRING
+    // respawn (the backend completes occurrence N and writes N+1 server-side, so
+    // the new occurrence only ever reaches us through a sync). Reconcile (not
+    // "schedule the new ones") so alarms for tasks completed/retimed elsewhere
+    // are swept in the same pass. Internally guarded — never throws.
+    //
+    // Runs LAST deliberately: syncAll issues kMaxOffsetReminders cancel
+    // round-trips PER TASK over the platform channel plus one zonedSchedule per
+    // planned fire, so on a large cache it is by far the most expensive step.
+    // Ahead of the other domains it could eat the WorkManager budget and starve
+    // Notes/Budgets/Documents/the notification feed; at the end, a slow reconcile
+    // only ever costs itself. It also means it reconciles against the FULLY
+    // synced cache rather than a half-updated one.
+    await reconcileRemindersHeadless(TaskDao(db));
   } finally {
     await db.close();
     debugPrint('runHeadlessSync: headless sync pass complete');
   }
+}
+
+/// Reconcile the LOCAL reminder alarms against the task cache in [dao], from a
+/// headless isolate (no Riverpod scope, so [taskReminderServiceProvider] is
+/// unavailable).
+///
+/// Reads the whole cache and hands it to [TaskReminderScheduler.syncAll], which
+/// cancels stale alarms and (re)schedules the live ones — so a respawned
+/// recurring occurrence pulled while the app was closed gets its alarms armed,
+/// and a task completed on another device gets its alarms dropped.
+///
+/// [scheduler] is injectable for tests; production builds one via
+/// [buildHeadlessReminderScheduler]. BEST-EFFORT: every failure (plugin absent
+/// in this isolate, denied permission, unreadable prefs) is swallowed and logged
+/// so it can never abort the surrounding sync pass.
+Future<void> reconcileRemindersHeadless(
+  TaskDao dao, {
+  TaskReminderScheduler? scheduler,
+}) async {
+  try {
+    final tasks = await dao.list();
+    final target = scheduler ?? await buildHeadlessReminderScheduler();
+    await target.syncAll(tasks);
+  } catch (e) {
+    debugPrint(
+      'reconcileRemindersHeadless: could not re-arm reminders (non-fatal): $e',
+    );
+  }
+}
+
+/// Build a [TaskReminderService] usable inside a background isolate.
+///
+/// Two things the foreground provider gets for free must be done by hand here:
+///   * the notification plugin + IANA timezone db are per-isolate, so
+///     [LocalNotifications.init] must run before `zonedSchedule` can be called
+///     (idempotent — the later notification-feed catch-up reuses it);
+///   * the user's reminder prefs come from secure storage directly rather than
+///     `settingsPrefsProvider`. An unreadable keystore falls back to the same
+///     defaults the provider uses, so we still schedule *something* sane.
+Future<TaskReminderScheduler> buildHeadlessReminderScheduler() async {
+  await LocalNotifications.init();
+  var minutes = kDefaultReminderMinutes;
+  var offsets = List<String>.of(kDefaultReminderOffsets);
+  try {
+    minutes = await SettingsPrefs.loadDefaultReminderMinutes();
+    offsets = await SettingsPrefs.loadReminderOffsets();
+  } catch (e) {
+    // Prefs unreadable in this isolate — schedule with the shipped defaults
+    // rather than not scheduling at all.
+    debugPrint(
+      'buildHeadlessReminderScheduler: reminder prefs unreadable, using '
+      'defaults (non-fatal): $e',
+    );
+  }
+  return TaskReminderService(
+    FlutterLocalNotificationsSink(LocalNotifications.plugin),
+    defaultReminderMinutes: minutes,
+    offsets: offsets,
+  );
 }
 
 /// Kept for backward compatibility — delegates to [runHeadlessSync].

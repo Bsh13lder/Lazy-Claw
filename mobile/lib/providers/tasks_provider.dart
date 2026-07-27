@@ -395,7 +395,20 @@ class TasksNotifier extends StateNotifier<TasksState> {
     } catch (e) {
       // A cache-read throw here must not escape as an unhandled async error.
       state = state.copyWith(error: e.toString());
+      return;
     }
+    // Reconcile the whole scheduled reminder set against what the pull just
+    // landed. A sync is the ONLY way a task the client never created enters the
+    // cache — the backend-minted next occurrence of a recurring task (a brand
+    // new id, spawned by complete_task), a task added on web/Telegram, or a
+    // reminder edited on another device. Those rows never pass through
+    // add/update/complete, so the per-task scheduleForTask hooks miss them
+    // entirely and only load() reconciled the set — leaving a respawned
+    // recurring task with NO local notification until the next cold start.
+    //
+    // syncAll is idempotent reconciliation (cancels stale, (re)schedules live)
+    // and runs only after a network sync, not on every local mutation.
+    unawaited(_reminders?.syncAll(state.tasks) ?? Future<void>.value());
   }
 }
 

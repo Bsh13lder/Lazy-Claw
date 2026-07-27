@@ -23,7 +23,12 @@ String dueDateDayPart(String due) =>
 /// or unparseable. Hour is 0-23.
 ({int hour, int minute})? dueTimeParts(String? due) {
   if (!dueDateHasTime(due)) return null;
-  final dt = DateTime.tryParse(due!);
+  // Convert to the device's local zone before reading the clock. A
+  // server-normalised `reminderAt` (and any agent-created reminder) is stored
+  // UTC-aware, so noon Madrid is `10:00Z` — reading `.hour` on the raw parse
+  // showed 10:00. `.toLocal()` is a no-op on a naive (already-local) value, so
+  // date-only / naive `dueDate` is unaffected; it only corrects UTC-aware input.
+  final dt = DateTime.tryParse(due!)?.toLocal();
   if (dt == null) return null;
   return (hour: dt.hour, minute: dt.minute);
 }

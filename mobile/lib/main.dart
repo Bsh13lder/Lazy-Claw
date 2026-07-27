@@ -16,6 +16,8 @@ import 'core/router/app_router.dart';
 import 'core/self_update.dart';
 import 'local/app_db.dart';
 import 'notifications/local_notifications.dart';
+import 'notifications/notification_actions.dart'
+    show onTaskCompletedFromNotification;
 import 'notifications/notifications_service.dart';
 import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
@@ -204,6 +206,17 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp>
             payload.isNotEmpty ? payload : '/notifications';
       }
     });
+
+    // Refresh an OPEN Tasks list after a shade "Done". That path writes
+    // straight to SQLite (no Riverpod scope in the notification isolate), so
+    // without this the list kept rendering the task as pending until the user
+    // navigated away and back. This is the app-shell half of the hook declared
+    // in notifications/notification_actions.dart — it stays null in the
+    // background isolate, where there is no UI to refresh.
+    onTaskCompletedFromNotification = (_) {
+      if (!mounted) return;
+      unawaited(ref.read(tasksProvider.notifier).load());
+    };
 
     // Keep offline-first data fresh while the app is in the foreground: every
     // ~30 min (and on each resume) push/pull all three offline-first domains.

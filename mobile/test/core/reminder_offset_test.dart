@@ -141,13 +141,32 @@ void main() {
       }
     });
 
-    test('default matches the server default (settings.general → -2h, -1h)', () {
+    test('default matches the server default (settings.general → 0m, -2h, -1h)',
+        () {
       // Source of truth: lazyclaw/settings/general.py DEFAULT_GENERAL
-      // "reminder_offsets": ["-2h", "-1h"]. Mobile's fallback (used when the
-      // backend hasn't sent reminder_offsets yet) MUST match so an
+      // "reminder_offsets": ["0m", "-2h", "-1h"]. Mobile's fallback (used when
+      // the backend hasn't sent reminder_offsets yet) MUST match so an
       // un-customised task fires the same advance reminders on the phone as
       // the backend/Telegram side.
-      expect(kDefaultReminderOffsets, ['-2h', '-1h']);
+      //
+      // "0m" leads the list: without it the default was advance-only, so a
+      // fresh install buzzed at 06:00 and 07:00 for an 08:00 task and then went
+      // SILENT at 08:00. It is inert server-side by design (pre_reminders'
+      // offset regex rejects zero — the at-time fire is reminder_at itself),
+      // so it is the PHONE that acts on it.
+      expect(kDefaultReminderOffsets, ['0m', '-2h', '-1h']);
+    });
+
+    test('the at-time offset is a real, user-toggleable option', () {
+      // Regression: TaskReminderService used to force-append the at-time offset
+      // regardless of the user's selection, which made this Settings chip a
+      // no-op. The default carries it; the service must not override a
+      // deliberate deselection.
+      expect(
+        kReminderOffsetOptions.map((o) => o.value),
+        contains(kAtTimeReminderOffset),
+      );
+      expect(kDefaultReminderOffsets, contains(kAtTimeReminderOffset));
     });
   });
 

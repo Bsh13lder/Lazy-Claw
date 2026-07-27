@@ -1770,11 +1770,23 @@ class HeartbeatDaemon:
                 interval_min = intervals[min(nag_count, len(intervals) - 1)]
 
                 if nag_count > 0:
+                    # Escalate from the LAST NAG, tracked in ``nag_fired_at``.
+                    # This used to measure off ``reminder_at`` and keep it
+                    # current by overwriting it with now() in the claim below —
+                    # which destroyed the user's actual reminder time. The
+                    # recurring respawn reads ``reminder_at`` to carry the
+                    # original time-of-day forward, so a daily 08:00 task the
+                    # user let nag drifted to 10:30, then to midnight, cycle
+                    # after cycle. ``nag_fired_at`` is the right cursor: the
+                    # same atomic claim already stamps it, and ``update_task``
+                    # resets it to NULL on any reminder edit, so a NULL here
+                    # correctly means "no nag yet → measure off the reminder".
+                    escalation_base = nag_fired_at or reminder_at
                     try:
-                        remind_dt = datetime.fromisoformat(reminder_at)
-                        if remind_dt.tzinfo is None:
-                            remind_dt = remind_dt.replace(tzinfo=timezone.utc)
-                        nag_due = remind_dt + timedelta(minutes=interval_min)
+                        base_dt = datetime.fromisoformat(escalation_base)
+                        if base_dt.tzinfo is None:
+                            base_dt = base_dt.replace(tzinfo=timezone.utc)
+                        nag_due = base_dt + timedelta(minutes=interval_min)
                         if now < nag_due:
                             continue  # Not time for this nag yet
                     except (ValueError, TypeError):
@@ -1782,24 +1794,26 @@ class HeartbeatDaemon:
                         continue
 
                 # ── Atomic claim ──────────────────────────────────────────
-                # Bump nag_count + stamp nag_fired_at + push reminder_at
-                # forward (so the next escalation interval is computed
-                # from "now") in a single UPDATE. The WHERE clause
-                # anchors on the exact ``nag_count`` we read; a concurrent
-                # tick that already fired the same nag finds rowcount=0
-                # and we skip the push. Stale claims (>5min) get
-                # re-claimed automatically so a crash can't permanently
-                # block a task.
+                # Bump nag_count + stamp nag_fired_at in a single UPDATE. The
+                # WHERE clause anchors on the exact ``nag_count`` we read; a
+                # concurrent tick that already fired the same nag finds
+                # rowcount=0 and we skip the push. Stale claims (>5min) get
+                # re-claimed automatically so a crash can't permanently block
+                # a task.
+                #
+                # ``reminder_at`` is deliberately NOT touched here. It is the
+                # user's own "fire at 08:00" value and the recurring respawn
+                # reads it to preserve the time-of-day; the escalation cursor
+                # is ``nag_fired_at`` (read back above).
                 async with db_session(self._config) as db:
                     claim_result = await db.execute(
-                        "UPDATE tasks SET nag_count = ?, reminder_at = ?, "
-                        "nag_fired_at = ? "
+                        "UPDATE tasks SET nag_count = ?, nag_fired_at = ? "
                         "WHERE id = ? AND user_id = ? "
                         "AND status IN ('todo', 'in_progress') "
                         "AND nag_count = ? "
                         "AND (nag_fired_at IS NULL OR nag_fired_at <= ?)",
                         (
-                            nag_count + 1, now_iso, now_iso,
+                            nag_count + 1, now_iso,
                             task_id, user_id,
                             nag_count, stale_threshold,
                         ),

@@ -28,20 +28,13 @@ async def _create_pulse_job(
 ) -> str:
     """Create the agent_jobs cron row that drives pulse firing.
 
-    Instruction shape ``[PULSE:<task_id>:<template_id>]`` — the
-    daemon's ``_check_due_jobs`` detects this prefix and routes to
-    ``_fire_task_pulse`` instead of enqueuing to the brain.
+    Thin alias kept for readability at the call site; the wire format and the
+    job shape live in ``lazyclaw.tasks.pulse`` — the single home shared with
+    ``tasks/store.py`` (which re-arms the pulse on a recurring respawn).
     """
-    from lazyclaw.heartbeat.orchestrator import create_job
-    job_id = await create_job(
-        config, user_id,
-        name=f"Pulse: {task_id[:8]}",
-        instruction=f"[PULSE:{task_id}:{template_id}]",
-        cron_expression=every,
-        job_type="cron",
-        context=template_id,
-    )
-    return job_id
+    from lazyclaw.tasks.pulse import create_pulse_job
+
+    return await create_pulse_job(config, user_id, task_id, template_id, every)
 
 
 # ── Skills ─────────────────────────────────────────────────────────────
@@ -256,16 +249,12 @@ class ApplyProgressTemplateSkill(BaseSkill):
         existing_template_id = match.get("progress_template_id")
         if existing_template_id:
             try:
-                from lazyclaw.heartbeat.orchestrator import (
-                    delete_job, list_jobs,
+                from lazyclaw.heartbeat.orchestrator import delete_job
+                from lazyclaw.tasks.pulse import find_pulse_jobs
+
+                stale_pulses = await find_pulse_jobs(
+                    self._config, user_id, match["id"]
                 )
-                jobs = await list_jobs(self._config, user_id)
-                stale_pulses = [
-                    j for j in jobs
-                    if (j.get("instruction") or "").startswith(
-                        f"[PULSE:{match['id']}:"
-                    )
-                ]
                 for j in stale_pulses:
                     await delete_job(self._config, user_id, j["id"])
             except Exception:
@@ -329,7 +318,7 @@ class PauseProgressPulseSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.heartbeat.orchestrator import list_jobs, pause_job
+        from lazyclaw.heartbeat.orchestrator import pause_job
         from lazyclaw.skills.builtin.task_manager import _fuzzy_match_task
         from lazyclaw.tasks.store import list_tasks
 
@@ -342,16 +331,15 @@ class PauseProgressPulseSkill(BaseSkill):
         if not match:
             return f"No task matching '{task_name}'."
 
-        jobs = await list_jobs(self._config, user_id)
-        prefix = f"[PULSE:{match['id']}:"
+        from lazyclaw.tasks.pulse import find_pulse_jobs
+
         paused = 0
-        for j in jobs:
-            if (j.get("instruction") or "").startswith(prefix):
-                try:
-                    await pause_job(self._config, user_id, j["id"])
-                    paused += 1
-                except Exception:
-                    logger.debug("pause_job failed", exc_info=True)
+        for j in await find_pulse_jobs(self._config, user_id, match["id"]):
+            try:
+                await pause_job(self._config, user_id, j["id"])
+                paused += 1
+            except Exception:
+                logger.debug("pause_job failed", exc_info=True)
         if paused == 0:
             return f"No active pulse on '{match['title']}'."
         return f"⏸️ Paused {paused} pulse(s) on '{match['title']}'."
@@ -388,7 +376,7 @@ class ResumeProgressPulseSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.heartbeat.orchestrator import list_jobs, resume_job
+        from lazyclaw.heartbeat.orchestrator import resume_job
         from lazyclaw.skills.builtin.task_manager import _fuzzy_match_task
         from lazyclaw.tasks.store import list_tasks
 
@@ -401,16 +389,15 @@ class ResumeProgressPulseSkill(BaseSkill):
         if not match:
             return f"No task matching '{task_name}'."
 
-        jobs = await list_jobs(self._config, user_id)
-        prefix = f"[PULSE:{match['id']}:"
+        from lazyclaw.tasks.pulse import find_pulse_jobs
+
         resumed = 0
-        for j in jobs:
-            if (j.get("instruction") or "").startswith(prefix):
-                try:
-                    await resume_job(self._config, user_id, j["id"])
-                    resumed += 1
-                except Exception:
-                    logger.debug("resume_job failed", exc_info=True)
+        for j in await find_pulse_jobs(self._config, user_id, match["id"]):
+            try:
+                await resume_job(self._config, user_id, j["id"])
+                resumed += 1
+            except Exception:
+                logger.debug("resume_job failed", exc_info=True)
         if resumed == 0:
             return f"No paused pulse on '{match['title']}'."
         return f"▶️ Resumed {resumed} pulse(s) on '{match['title']}'."

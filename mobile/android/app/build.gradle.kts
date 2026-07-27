@@ -88,6 +88,32 @@ android {
             )
         }
     }
+
+    // Drop every non-arm64 native library at PACKAGING time.
+    //
+    // `defaultConfig.ndk.abiFilters` above says arm64-v8a only, and it does not
+    // work: it governs libraries AGP itself builds/merges, but Flutter's
+    // native-assets pipeline (llamadart's llama.cpp/ggml, plus the Vosk AAR)
+    // contributes prebuilt .so through a path that filter never sees. The
+    // shipped 1.22.6 APK proved it — 205 MB carrying THREE ABIs:
+    //
+    //     x86_64        99.1 MB   ← emulator-only, cannot run on any phone
+    //     arm64-v8a     55.3 MB   ← the only one this app targets
+    //     armeabi-v7a   33.6 MB   ← 32-bit, below our minSdk reality
+    //
+    // Worst single offender: lib/x86_64/libggml-vulkan.so at 48.6 MB. The
+    // `llamadart_native_backends` block in pubspec.yaml pins CPU-only, but it
+    // is keyed per-platform and only lists `android-arm64` — so x86_64 fell
+    // through to the default (all backends) and dragged Vulkan in.
+    //
+    // Excluding at packaging is the robust lever: it applies to the final APK
+    // assembly no matter which upstream produced the .so, so it cannot be
+    // bypassed the way abiFilters was.
+    packaging {
+        jniLibs {
+            excludes += setOf("lib/x86_64/**", "lib/armeabi-v7a/**", "lib/x86/**")
+        }
+    }
 }
 
 flutter {

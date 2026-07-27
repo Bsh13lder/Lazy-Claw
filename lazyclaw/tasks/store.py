@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -1669,6 +1669,69 @@ async def delete_task(
 # ---------------------------------------------------------------------------
 # Reminder job helpers
 # ---------------------------------------------------------------------------
+
+# How long a reminder job is protected from the orphan sweep. ``_create_reminder_job``
+# runs BEFORE the task row that references it exists, so a sweep firing inside
+# that gap would delete a perfectly good job.
+_ORPHAN_REMINDER_GRACE = timedelta(minutes=10)
+
+
+async def reap_orphan_reminder_jobs(config: Config, user_id: str) -> int:
+    """Delete past-due reminder jobs that no live, open task references.
+
+    Returns the number reaped.
+
+    A task-linked reminder job exists only as a HANDLE for ``complete_task`` /
+    ``update_task`` to cancel the reminder — the firing itself comes off the
+    tasks table in ``daemon._check_task_nagging``. The daemon's
+    ``_check_due_reminders`` therefore skips these rows with a bare ``continue``
+    that neither deletes them nor advances ``next_run``, so once one is stranded
+    it stays ``active`` with a past ``next_run`` FOREVER: every heartbeat tick
+    re-selects it (``next_run <= now``) and pays a decrypt to re-discover it
+    should be skipped. Nothing else can ever clean it up, because the only
+    deleters key off ``tasks.reminder_job_id``.
+
+    Stranding is easy: any path that marked a task done without going through
+    ``complete_task`` (the PATCH ``status='done'`` bypass did exactly that) left
+    its job behind. The live DB had one two days stale.
+
+    ``tasks.reminder_job_id`` is plaintext, so the orphan set is a plain
+    anti-join — no decryption, and it stays cheap as the table grows.
+    Deliberately conservative: only PAST-DUE jobs older than
+    ``_ORPHAN_REMINDER_GRACE`` are candidates.
+    """
+    cutoff = (datetime.now(timezone.utc) - _ORPHAN_REMINDER_GRACE).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "DELETE FROM agent_jobs "
+            "WHERE user_id = ? AND job_type = 'reminder' AND status = 'active' "
+            # datetime() on BOTH sides: compare instants, never strings.
+            # ``agent_jobs.created_at`` defaults to SQLite's own
+            # ``datetime('now')`` → "2026-07-27 14:16:01" (space, no zone),
+            # while our cutoff is ISO-8601 "…T…+00:00". Lexically the space
+            # (0x20) sorts before "T" (0x54), so EVERY freshly created job
+            # compared as older than any same-day cutoff and the grace window
+            # silently did nothing — the sweep would have raced task creation
+            # and deleted valid jobs.
+            "AND next_run IS NOT NULL AND datetime(next_run) <= datetime(?) "
+            "AND datetime(created_at) <= datetime(?) "
+            "AND id NOT IN ("
+            "  SELECT reminder_job_id FROM tasks "
+            "  WHERE user_id = ? AND reminder_job_id IS NOT NULL "
+            "    AND deleted_at IS NULL AND status != 'done'"
+            ")",
+            (user_id, now, cutoff, user_id),
+        )
+        await db.commit()
+    reaped = cur.rowcount or 0
+    if reaped:
+        logger.info(
+            "[tasks] reaped %d orphaned reminder job(s) for user %s",
+            reaped, user_id,
+        )
+    return reaped
+
 
 async def _create_reminder_job(
     config: Config,

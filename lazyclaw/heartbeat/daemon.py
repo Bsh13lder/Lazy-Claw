@@ -944,7 +944,14 @@ class HeartbeatDaemon:
                 )
 
                 # Skip task-linked reminders — handled by _check_task_nagging
-                # with inline buttons (Done/Snooze/Tomorrow)
+                # with inline buttons (Done/Snooze/Tomorrow).
+                #
+                # NOTE this `continue` neither deletes the row nor advances
+                # next_run, so a task-linked job stays active with a past
+                # next_run and is re-selected + re-decrypted on EVERY tick,
+                # forever. That is intentional while the owning task is alive
+                # (the row is the handle complete_task deletes by), but it
+                # means a stranded job is immortal — hence the sweep below.
                 if message and "[TASK_REMINDER:" in message:
                     continue
 
@@ -986,6 +993,22 @@ class HeartbeatDaemon:
             logger.debug(
                 "[heartbeat] reminders user=%s due=%d fired=%d failed=%d",
                 user_id, len(reminders), reminders_fired, reminders_failed,
+            )
+
+        # Sweep task-linked reminder jobs no live open task references any more.
+        # Nothing else can: the only deleters key off `tasks.reminder_job_id`,
+        # so a task completed through any path that skipped `complete_task`
+        # stranded its job as an immortal active row with a past next_run,
+        # re-decrypted on every tick. Best-effort — a failed sweep must never
+        # abort the reminder pass.
+        try:
+            from lazyclaw.tasks.store import reap_orphan_reminder_jobs
+
+            await reap_orphan_reminder_jobs(self._config, user_id)
+        except Exception:
+            logger.debug(
+                "[heartbeat] orphan reminder-job sweep failed (user=%s)",
+                user_id, exc_info=True,
             )
 
     def _get_primary_cdp(self, user_id: str):

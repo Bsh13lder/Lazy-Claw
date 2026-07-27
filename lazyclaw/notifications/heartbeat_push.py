@@ -25,6 +25,7 @@ only (the mobile feed has no action buttons yet).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -37,6 +38,25 @@ from lazyclaw.notifications.feed_store import record_notification
 from lazyclaw.notifications.push import _derive_push_title
 
 logger = logging.getLogger(__name__)
+
+
+def _dedup_key(kind: str, text: str) -> str:
+    """Collapse-key for one heartbeat push, derived from its rendered text.
+
+    `record_notification` merges a recent unread row carrying the same key and
+    bumps `repeat_count` instead of appending — but until now NO caller passed
+    a key, so all 418 rows in the live feed had `dedup_key IS NULL` and nothing
+    could ever collapse. A single day showed six pairs of identical heartbeat
+    rows written 3-6 ms apart.
+
+    Content is the right granularity here: this funnel receives only the
+    rendered message, so two pushes with identical text within the dedup window
+    ARE the same event, while two different tasks firing in one tick render
+    different text and must stay separate rows. Hashed rather than stored raw
+    because `dedup_key` is a PLAINTEXT column and the text is user content.
+    """
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    return f"{kind}:{digest[:32]}"
 
 
 async def deliver_heartbeat_push(
@@ -75,6 +95,7 @@ async def deliver_heartbeat_push(
         try:
             await record_notification(
                 config, admin_uid, kind, _derive_push_title(text), text,
+                dedup_key=_dedup_key(kind, text),
             )
         except Exception:
             logger.warning("heartbeat push feed record failed", exc_info=True)

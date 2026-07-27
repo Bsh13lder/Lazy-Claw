@@ -103,18 +103,55 @@ def _format_time(iso_str: str) -> str:
         return iso_str[:16]
 
 
+# A completed occurrence is an archived record, not a live task. Recurring
+# tasks make the distinction load-bearing: after one completion TWO rows share
+# the title (the done one + the freshly-spawned next occurrence).
+_ARCHIVED_STATUSES = frozenset({"done"})
+
+
+def _live_first(candidates: list[dict]) -> dict:
+    """Pick the best row out of same-title candidates: LIVE before archived,
+    then soonest due.
+
+    ``_fuzzy_match_task`` used to return the first title hit in list order, so
+    "delete water the plants" / "snooze water the plants" landed on the DEAD
+    occurrence of a recurring task while the live one stayed on the list — the
+    user re-issued the command and it "did nothing". ``list_tasks`` orders by
+    priority, so the archived row wins that race roughly half the time.
+
+    Sort is stable, so rows that tie on both keys keep the caller's ordering
+    (priority → due → created DESC from ``list_tasks``).
+    """
+    def _rank(t: dict) -> tuple[int, int, str]:
+        archived = 1 if (t.get("status") or "").lower() in _ARCHIVED_STATUSES else 0
+        due = t.get("due_date") or ""
+        # Undated rows sort after dated ones rather than before ("" < any date).
+        return (archived, 1 if not due else 0, due)
+
+    return sorted(candidates, key=_rank)[0]
+
+
 def _fuzzy_match_task(tasks: list[dict], name: str) -> dict | None:
-    """Find a task by fuzzy name matching."""
+    """Find a task by fuzzy name matching.
+
+    Tier order is unchanged (exact title beats a contains hit); WITHIN a tier
+    the live occurrence wins. Archived rows are still matchable when nothing
+    live shares the title — ``/progress <task>`` and the LazyBrain lookups
+    deliberately read completed tasks.
+    """
     name_lower = name.lower().strip()
     # Exact match first
-    for t in tasks:
-        if (t.get("title") or "").lower() == name_lower:
-            return t
+    exact = [t for t in tasks if (t.get("title") or "").lower() == name_lower]
+    if exact:
+        return _live_first(exact)
     # Contains match
-    for t in tasks:
-        title = (t.get("title") or "").lower()
-        if name_lower in title or title in name_lower:
-            return t
+    contains = [
+        t for t in tasks
+        if name_lower in (t.get("title") or "").lower()
+        or (t.get("title") or "").lower() in name_lower
+    ]
+    if contains:
+        return _live_first(contains)
     return None
 
 
@@ -660,7 +697,9 @@ class UpdateTaskSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Update a task's title, priority, due date, reminder, or status. "
-            "Matches by name (partial match)."
+            "Matches by name (partial match). Passing status='done' runs the "
+            "full completion pipeline (same as complete_task): recurring tasks "
+            "spawn their next occurrence and sub-tasks are checked off."
         )
 
     @property
@@ -693,7 +732,7 @@ class UpdateTaskSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.tasks.store import list_tasks, update_task
+        from lazyclaw.tasks.store import complete_task, list_tasks, update_task
 
         task_name = params.pop("task_name", "").strip()
         if not task_name:
@@ -709,10 +748,36 @@ class UpdateTaskSkill(BaseSkill):
         if not updates:
             return "No fields to update."
 
-        ok = await update_task(self._config, user_id, match["id"], **updates)
-        if ok:
-            return f"Updated: {match['title']}"
-        return "Failed to update task."
+        # ── status='done' MUST go through complete_task ──────────────────────
+        # "mark the weekly review done" is a coin flip on which tool the brain
+        # picks. Written through update_task it only flips the column — the
+        # recurring respawn, sub-task cascade, reminder-job teardown and pulse
+        # pause all live in store.complete_task — so the series died on its
+        # first completion. Routing beats rejecting: a "use complete_task
+        # instead" error message is something the brain can ignore.
+        # Non-status fields land FIRST so the respawn is built from the edited
+        # row; the reverse transition clears the completion stamp.
+        new_status = updates.pop("status", None)
+        completing = new_status == "done"
+        if new_status is not None and not completing:
+            updates["status"] = new_status      # re-open / cancel: write it…
+            updates["completed_at"] = None      # …and drop the stale stamp
+
+        if updates:
+            ok = await update_task(self._config, user_id, match["id"], **updates)
+            if not ok:
+                return "Failed to update task."
+
+        if completing:
+            done = await complete_task(self._config, user_id, match["id"])
+            if not done:
+                return "Failed to complete task."
+            msg = f"Completed: {match['title']}"
+            if match.get("recurring"):
+                msg += " (next occurrence created)"
+            return msg
+
+        return f"Updated: {match['title']}"
 
 
 class DeleteTaskSkill(BaseSkill):

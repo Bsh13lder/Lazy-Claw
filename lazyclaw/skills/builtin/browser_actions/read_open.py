@@ -27,6 +27,77 @@ from .backends import get_backend, get_cdp_backend, query_to_url, raise_browser_
 logger = logging.getLogger(__name__)
 
 
+# Null-safe liveness probe. MUST tolerate a null document: after a
+# failed navigation `document.documentElement` is null, so
+# `document.body` is null too and any `document.body.innerText` probe
+# THROWS. The previous inline check did exactly that and its handler
+# was `except Exception: break`, which left the retry loop WITHOUT
+# reloading — the one state that needed recovery was the one state
+# that skipped it (2026-07-26 Upwork incident; the tab sat at 0
+# elements while the tool reported `status=ok nav=full`).
+_PAGE_ALIVE_JS = """(() => {
+  try {
+    if (!document.documentElement) return false;
+    if (!document.body) return false;
+    if ((document.body.innerText || '').trim().length > 0) return true;
+    return document.querySelectorAll(
+      'input,button,a,[role="button"]'
+    ).length > 0;
+  } catch (e) { return false; }
+})()"""
+
+# Hydration backoff before concluding a page is really blank. A slow SPA
+# is not a failure — only reload once these are exhausted.
+_BLANK_POLL_WAITS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
+
+
+async def probe_page_alive(backend) -> bool:
+    """True iff the page has a real body or interactive content.
+
+    A raising probe means BLANK, not "unknown" — a null document is
+    precisely what makes the expression throw.
+    """
+    try:
+        return bool(await backend.evaluate(_PAGE_ALIVE_JS))
+    except Exception as exc:  # noqa: BLE001 — throwing == blank
+        logger.debug(
+            "[browser] liveness probe raised (treating as blank): %s", exc,
+        )
+        return False
+
+
+async def ensure_page_not_blank(backend) -> bool:
+    """Poll for liveness; if still blank, reload ONCE. Returns liveness.
+
+    Verified live 2026-07-28: a tab with `documentElement === null` sat
+    at 0 elements indefinitely, and a single reload recovered it to 2830
+    elements in ~3s. Recovery is cheap and effective — it just never ran.
+
+    Reloads at most once: a page that is still blank afterwards is a real
+    failure (login wall, bot block) and must be REPORTED, not retried
+    forever. Never raises.
+    """
+    for _wait in _BLANK_POLL_WAITS:
+        if await probe_page_alive(backend):
+            return True
+        await asyncio.sleep(_wait)
+
+    logger.info("[browser] page looks blank — attempting one reload")
+    try:
+        await backend.evaluate("location.reload()")
+    except Exception as exc:  # noqa: BLE001 — degraded, not fatal
+        logger.debug("[browser] blank-page reload failed: %s", exc)
+        return False
+
+    await asyncio.sleep(3)
+    for _wait in _BLANK_POLL_WAITS:
+        if await probe_page_alive(backend):
+            logger.info("[browser] page recovered after reload")
+            return True
+        await asyncio.sleep(_wait)
+    return False
+
+
 async def action_read(
     user_id: str, params: dict, tab_context, config, snapshot_mgr,
 ) -> str:
@@ -163,24 +234,14 @@ async def action_open(
         await asyncio.sleep(3)
         await backend.goto(nav_url)
 
-    # Blank page detection
-    for _wait in (0.5, 1.0, 2.0, 3.0):
-        try:
-            _check = await backend.evaluate(
-                "(document.body.innerText || '').trim().length > 0 || "
-                "document.querySelectorAll('input,button,a,[role=\"button\"]').length > 0"
-            )
-            if _check:
-                break
-        except Exception:
-            break
-        await asyncio.sleep(_wait)
-    else:
-        try:
-            await backend.evaluate("location.reload()")
-            await asyncio.sleep(3)
-        except Exception as exc:
-            logger.debug("Page reload on blank detection failed: %s", exc)
+    # Blank page detection + one-shot reload recovery.
+    _page_alive = await ensure_page_not_blank(backend)
+    if not _page_alive:
+        logger.warning(
+            "[browser] page still blank after reload recovery url=%s — "
+            "downstream extraction will find nothing",
+            nav_url,
+        )
 
     # Page survey
     try:

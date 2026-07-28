@@ -390,7 +390,8 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     try:
         await page.wait_for_selector(
             '[data-test="rooms-panel"], [data-test="empty-state"], '
-            '.rooms-panel-body, [data-test="room-item"]',
+            '.rooms-panel-body, [data-test="room-list-item"], '
+            '[data-test="room-item"]',
             timeout=_ROOMS_PANEL_WAIT_MS,
         )
     except Exception as exc:
@@ -408,7 +409,16 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     # it matches Upwork's whole-page chrome wrapper, not individual rows.
     # This is the upstream-original (fork commit 3009e69) chain that worked
     # reliably on MiniMax before the regression introduced in 12d3593.
-    _room_selector = '[data-test="room-item"], .room-item, .conversation-item'
+    # `[data-test="room-list-item"]` FIRST — verified live 2026-07-28 as
+    # the hook Upwork actually renders. The legacy `room-item` matched
+    # ZERO rows on a fully-mounted panel (2830 DOM elements), which is
+    # why every call fell through to the URL-mining fallback and shipped
+    # a contentless synthetic row. The old names are kept behind it so a
+    # rollback or an A/B'd layout still resolves.
+    _room_selector = (
+        '[data-test="room-list-item"], a[href*="/rooms/room_"], '
+        '[data-test="room-item"], .room-item, .conversation-item'
+    )
 
     # Selector-resilience widening (2026-07-03) — UNVERIFIED against
     # Upwork's live current DOM, needs live-capture confirmation. Same
@@ -589,7 +599,11 @@ async def _extract_conversation(el) -> dict | None:
     # last-message preview, and timestamp. Specific selectors first,
     # then defensive row-text parsing so we never silently drop a real
     # conversation just because Upwork moved the name tag.
+    # `room-name` FIRST — verified live 2026-07-28 as the current hook
+    # ("James Blue, James Blue"); `contact-name` / `user-name` resolved
+    # to nothing on the real row. Legacy hooks kept behind it.
     name_el = await el.query_selector(
+        '[data-test="room-name"], '
         '[data-test="contact-name"], [data-test="user-name"], '
         '[data-test="room-contact-name"], '
         '[class*="contact-name"], [class*="contactName"], '
@@ -677,7 +691,23 @@ async def _extract_conversation(el) -> dict | None:
     # trailing segment, alphanumeric /nx/messages/<slug>, bare inbox URL
     # — is rejected. Partial conv is safer than seeding downstream
     # with a non-room URL.
-    candidates = await el.query_selector_all('a[href*="/messages/"]')
+    candidates = list(await el.query_selector_all('a[href*="/messages/"]'))
+
+    # The 2026 rooms list renders each row AS the anchor:
+    #   <a data-test="room-list-item" href="/ab/messages/rooms/room_…">
+    # `query_selector_all` searches DESCENDANTS ONLY, so on such a row it
+    # returns [] and every pass below fails on a row that plainly carries
+    # the href — the row is then dropped for "no resolvable room_id".
+    # Verified live 2026-07-28 (row tag=A, zero child anchors).
+    # Prepended so the row's OWN href wins Pass 1 over any attachment
+    # link nested inside it.
+    try:
+        _self_href = await el.get_attribute("href")
+    except Exception:  # noqa: BLE001 — non-anchor rows simply have none
+        _self_href = None
+    if _self_href and "/messages/" in _self_href:
+        candidates = [el, *candidates]
+
     chosen_href: str | None = None
     chosen_room_id: str | None = None
 

@@ -1932,13 +1932,28 @@ class HeartbeatDaemon:
                         ),
                     ]])
 
-                    await self._telegram_push(msg_text, reply_markup=keyboard)
+                    # ONE feed row per task occurrence. A single dose fires a
+                    # T-1h heads-up, a T-30m heads-up, the at-time nag, then
+                    # escalations #2..#5 — up to seven rows for one task, times
+                    # every daily medicine. The text differs every time (each
+                    # carries its own lead or nag counter) so the content hash
+                    # cannot merge them; only this call site knows they are the
+                    # same occurrence. record_notification refreshes the row in
+                    # place and bumps repeat_count, so the user sees the LATEST
+                    # state once instead of a scrolling ladder.
+                    #
+                    # Feed-only: Telegram/local pushes still fire per step, so
+                    # the escalation keeps working as designed.
+                    await self._telegram_push(
+                        msg_text, reply_markup=keyboard,
+                        dedup_key=f"task:{task_id}",
+                    )
                 except TypeError:
                     logger.debug("Telegram keyboard not supported, sending plain text", exc_info=True)
-                    await self._telegram_push(msg_text)
+                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
                 except ImportError:
                     logger.debug("Telegram library not available for keyboard, sending plain text")
-                    await self._telegram_push(msg_text)
+                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
 
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
@@ -2012,7 +2027,9 @@ class HeartbeatDaemon:
                     f"<i>{_html.escape(lead)}</i>"
                 )
                 try:
-                    await self._telegram_push(msg)
+                    # Same feed row as this task's other reminders — see the
+                    # nag site below for why they all share one key.
+                    await self._telegram_push(msg, dedup_key=f"task:{task_id}")
                     pre_fired += 1
                 except Exception as exc:
                     pre_failed += 1

@@ -1682,7 +1682,9 @@ class LazyClawApp(App):
             if self._telegram_connected and telegram:
                 _tg = telegram  # capture reference
 
-                async def _telegram_push_fn(text: str, reply_markup=None) -> None:
+                async def _telegram_push_fn(
+                text: str, reply_markup=None, dedup_key: str | None = None,
+            ) -> None:
                     # Telegram delivery closure — only awaited when the user's
                     # channel toggle includes Telegram. The chat-id guard
                     # lives INSIDE so app-only mode still records to the feed
@@ -1710,6 +1712,7 @@ class LazyClawApp(App):
                         )
                         await deliver_heartbeat_push(
                             self._config, text, telegram_send=_send_telegram,
+                            dedup_key=dedup_key,
                         )
                     except Exception as exc:
                         logger.warning("Telegram push failed: %s", exc)

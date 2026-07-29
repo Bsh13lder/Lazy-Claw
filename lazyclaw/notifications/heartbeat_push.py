@@ -65,6 +65,7 @@ async def deliver_heartbeat_push(
     *,
     telegram_send: Callable[[], Awaitable[None]],
     kind: str = "heartbeat",
+    dedup_key: str | None = None,
 ) -> None:
     """Route one heartbeat push through the user's notification channel.
 
@@ -72,6 +73,14 @@ async def deliver_heartbeat_push(
     the bot handle, retry logic and any inline keyboard). It is awaited only
     when the resolved channel includes Telegram; its errors propagate so the
     caller can log them with context.
+
+    ``dedup_key`` lets a caller declare "these pushes are the same EVENT" when
+    the text alone cannot say so. The task-reminder ladder is the motivating
+    case: a single dose fires a T-1h heads-up, a T-30m heads-up, the at-time
+    nag, then escalations #2 and #3 — five rows whose text legitimately differs
+    every time (each carries its own lead or nag counter), so the content hash
+    can never merge them. Only the daemon knows they are one task occurrence.
+    Omit it and the content hash still guards verbatim repeats.
     """
     admin_uid: str | None = None
     channel = "telegram"  # fail-open default: legacy Telegram-only
@@ -95,7 +104,7 @@ async def deliver_heartbeat_push(
         try:
             await record_notification(
                 config, admin_uid, kind, _derive_push_title(text), text,
-                dedup_key=_dedup_key(kind, text),
+                dedup_key=dedup_key or _dedup_key(kind, text),
             )
         except Exception:
             logger.warning("heartbeat push feed record failed", exc_info=True)

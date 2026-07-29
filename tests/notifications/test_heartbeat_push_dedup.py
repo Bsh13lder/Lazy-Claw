@@ -106,6 +106,74 @@ async def test_different_pushes_stay_separate(cfg) -> None:
     assert rows[0][2] != rows[1][2], "distinct messages must derive distinct keys"
 
 
+async def test_caller_supplied_key_collapses_a_whole_task_occurrence(cfg) -> None:
+    """One task must produce ONE feed row, not one per nag step.
+
+    Measured on the live feed for a single "Medicine" task in one morning:
+
+        05:00  ⏰ Medicine · in 1h            ← pre-reminder
+        06:02  ⏰ Medicine · in 30m           ← pre-reminder
+        06:02  ⏰ Reminder · Medicine 08:02   ← nag #1
+        06:18  ⏰ Reminder · Medicine 08:18 · reminder #2
+        06:54  ⏰ Reminder · Medicine 08:54 · reminder #3
+
+    Five rows for one dose — times three daily medicine tasks. The content hash
+    cannot merge them because every line legitimately differs (each carries its
+    own lead time / nag counter), so the key has to come from the CALLER, which
+    knows they are all the same task occurrence.
+    """
+    texts = [
+        "⏰ <b>Medicine</b>\n<i>in 1h</i>",
+        "⏰ <b>Medicine</b>\n<i>in 30m</i>",
+        "⏰ Reminder · Medicine\nMedicine · ⏰ 08:02",
+        "⏰ Reminder · Medicine\nMedicine · ⏰ 08:18 · reminder #2",
+        "⏰ Reminder · Medicine\nMedicine · ⏰ 08:54 · reminder #3",
+    ]
+    for text in texts:
+        await hb.deliver_heartbeat_push(
+            cfg, text, telegram_send=_noop, dedup_key="task:med-1",
+        )
+
+    rows = await _rows(cfg)
+    assert len(rows) == 1, (
+        f"one task occurrence produced {len(rows)} feed rows — the escalation "
+        "ladder spams the Notification Center"
+    )
+
+
+async def test_caller_key_keeps_different_tasks_apart(cfg) -> None:
+    """Collapsing is per-task, never across tasks."""
+    await hb.deliver_heartbeat_push(
+        cfg, "⏰ Medicine in 1h", telegram_send=_noop, dedup_key="task:med-1",
+    )
+    await hb.deliver_heartbeat_push(
+        cfg, "⏰ Antibiotics in 1h", telegram_send=_noop, dedup_key="task:abx-2",
+    )
+
+    assert len(await _rows(cfg)) == 2
+
+
+async def test_latest_message_wins_on_collapse(cfg) -> None:
+    """The surviving row must show the MOST RECENT state, not the first.
+
+    A row frozen on "in 1h" while the task is already overdue would be worse
+    than the spam it replaces.
+    """
+    from lazyclaw.notifications.feed_store import get_notifications_since
+
+    await hb.deliver_heartbeat_push(
+        cfg, "⏰ Medicine · in 1h", telegram_send=_noop, dedup_key="task:med-1",
+    )
+    await hb.deliver_heartbeat_push(
+        cfg, "⏰ Medicine · reminder #3", telegram_send=_noop, dedup_key="task:med-1",
+    )
+
+    items = (await get_notifications_since(cfg, "u1"))["notifications"]
+    assert len(items) == 1
+    assert "reminder #3" in items[0]["body"]
+    assert (items[0].get("meta") or {}).get("repeat_count") == 2
+
+
 async def test_collapsed_row_records_how_many_times_it_repeated(cfg) -> None:
     """Collapsing must not hide the repeat — the row carries ``repeat_count``
     so the UI can render "×3" instead of silently dropping two events."""

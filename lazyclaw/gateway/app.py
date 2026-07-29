@@ -45,6 +45,7 @@ from lazyclaw.gateway.routes.sheets import router as sheets_router
 from lazyclaw.gateway.routes.docs import router as docs_router
 from lazyclaw.gateway.routes.pdf import router as pdf_router
 from lazyclaw.gateway.routes.awake import router as awake_router
+from lazyclaw.gateway.routes.claude_auth import router as claude_auth_router
 from lazyclaw.gateway.routes.contacts import router as internal_contacts_router
 from lazyclaw.gateway.routes.mobile import router as mobile_apk_router
 from lazyclaw.gateway.routes.mobile_settings import router as mobile_settings_router
@@ -141,6 +142,16 @@ async def lifespan(application: FastAPI):
     ready, msg = check_claude_cli_auth()
     if not ready:
         logger.warning("[claude-cli] %s", msg)
+
+    # The SDK transport is the DEFAULT for MODE_CLAUDE, yet its readiness
+    # check was never called from anywhere — only the legacy CLI one was
+    # wired up here. That gap is why the 2026-07-25 outage was silent:
+    # the OAuth token had been expired for 37 days and nothing said so at
+    # boot. Logged at ERROR because every LLM call fails when it trips.
+    from lazyclaw.llm.providers.claude_sdk_provider import check_claude_sdk_auth
+    sdk_ready, sdk_msg = check_claude_sdk_auth()
+    if not sdk_ready:
+        logger.error("[claude-sdk] %s", sdk_msg)
 
     # Typed-memory backfill — classify any pre-migration notes whose
     # ``memory_type`` column is still NULL. Idempotent; subsequent
@@ -248,6 +259,7 @@ app.include_router(sheets_router)
 app.include_router(docs_router)
 app.include_router(pdf_router)
 app.include_router(awake_router)
+app.include_router(claude_auth_router)
 app.include_router(internal_contacts_router)
 from lazyclaw.gateway.routes.goals import router as goals_router  # noqa: E402
 app.include_router(goals_router)

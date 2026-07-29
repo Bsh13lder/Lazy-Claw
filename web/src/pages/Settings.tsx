@@ -246,14 +246,19 @@ const ROLE_INFO: Record<string, { label: string; description: string }> = {
 // official claude-agent-sdk and "cli" via raw `claude -p`) share the same
 // 3-role model dropdowns — they consume the same subscription, only the
 // wire protocol differs. Writes to claude_transport + claude_*_model.
+// Claude 5 generation (2026-07). The 4.x entries were removed — Opus 5
+// supersedes 4.6/4.7/4.8 at the same $5/$25 per MTok, and Sonnet 5
+// supersedes Sonnet 4.6. All three 5-series models carry a 1M context
+// window as their DEFAULT and maximum, so they need no "[1m]" suffix
+// (4.x did — 1M was an opt-in variant there).
 const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
-  { value: "claude-sonnet-4-6", label: "Sonnet 4.6 — 200K context" },
-  { value: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 — 1M context (beta)" },
-  { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
-  { value: "claude-opus-4-7[1m]", label: "Opus 4.7 — 1M context" },
-  { value: "claude-opus-4-8[1m]", label: "Opus 4.8 — 1M context (latest)" },
-  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 — fastest" },
+  { value: "claude-opus-5", label: "Opus 5 — 1M context (recommended)" },
+  { value: "claude-sonnet-5", label: "Sonnet 5 — 1M context, faster" },
+  { value: "claude-fable-5", label: "Fable 5 — 1M context, most capable" },
+  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 — 200K, fastest" },
 ];
+
+const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 
 const CLAUDE_TRANSPORTS: readonly {
   value: "sdk" | "cli";
@@ -287,6 +292,67 @@ function ClaudeModePanel({
 }) {
   const toast = useToast();
   const transport = eco.claude_transport ?? "sdk";
+
+  // ── Subscription re-authentication ──
+  // The OAuth token expires and can arrive with no refresh token, in
+  // which case every LLM call 401s until someone re-authorises. Without
+  // this panel that required shell access to the container.
+  const [authStatus, setAuthStatus] = useState<api.ClaudeAuthStatus | null>(null);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [authSession, setAuthSession] = useState<string | null>(null);
+  const [authCode, setAuthCode] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+
+  const refreshAuthStatus = useCallback(() => {
+    api
+      .getClaudeAuthStatus()
+      .then(setAuthStatus)
+      .catch(() => setAuthStatus(null));
+  }, []);
+
+  useEffect(refreshAuthStatus, [refreshAuthStatus]);
+
+  const handleAuthStart = async () => {
+    setAuthBusy(true);
+    try {
+      const { session_id, url } = await api.startClaudeAuth();
+      setAuthSession(session_id);
+      setAuthUrl(url);
+      window.open(url, "_blank", "noopener");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not start sign-in");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleAuthSubmit = async () => {
+    if (!authSession || !authCode.trim()) return;
+    setAuthBusy(true);
+    try {
+      const res = await api.submitClaudeAuthCode(authSession, authCode.trim());
+      toast.success(res.detail || "Signed in");
+      setAuthUrl(null);
+      setAuthSession(null);
+      setAuthCode("");
+      refreshAuthStatus();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Sign-in failed");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleAuthCancel = async () => {
+    try {
+      await api.cancelClaudeAuth();
+    } catch {
+      /* the slot frees itself on TTL — nothing useful to tell the user */
+    }
+    setAuthUrl(null);
+    setAuthSession(null);
+    setAuthCode("");
+  };
 
   const handleTransport = async (value: "sdk" | "cli") => {
     if (value === transport) return;
@@ -362,10 +428,97 @@ function ClaudeModePanel({
         </div>
       </div>
 
+      {/* Subscription auth — status + re-login wizard */}
+      <div className="mb-4 p-3 rounded-lg border border-border bg-bg-tertiary">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-text-primary">Subscription sign-in</p>
+            <p
+              className={`text-[11px] leading-snug ${
+                authStatus?.logged_in ? "text-text-muted" : "text-red-400"
+              }`}
+            >
+              {authStatus
+                ? authStatus.logged_in
+                  ? `Active${
+                      authStatus.expires_at
+                        ? ` — expires ${new Date(authStatus.expires_at).toLocaleDateString()}`
+                        : ""
+                    }${authStatus.subscription ? ` (${authStatus.subscription})` : ""}`
+                  : authStatus.detail
+                : "Checking…"}
+            </p>
+          </div>
+          {!authUrl && (
+            <button
+              type="button"
+              onClick={handleAuthStart}
+              disabled={authBusy}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-accent text-white text-xs font-semibold disabled:opacity-50 hover:opacity-90"
+            >
+              {authBusy ? "Starting…" : authStatus?.logged_in ? "Re-authenticate" : "Sign in"}
+            </button>
+          )}
+        </div>
+
+        {authUrl && (
+          <div className="mt-3 space-y-2 border-t border-border pt-3">
+            <p className="text-[11px] text-text-muted">
+              1. Approve in the tab that opened (or{" "}
+              <a
+                href={authUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline break-all"
+              >
+                open it here
+              </a>
+              ). 2. Paste the code it gives you below.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={authCode}
+                onChange={(e) => setAuthCode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAuthSubmit();
+                }}
+                placeholder="Paste code here"
+                autoComplete="off"
+                spellCheck={false}
+                className="flex-1 px-3 py-2 rounded-lg bg-bg-secondary border border-border text-sm text-text-primary focus:outline-none focus:border-accent"
+              />
+              <button
+                type="button"
+                onClick={handleAuthSubmit}
+                disabled={authBusy || !authCode.trim()}
+                className="px-3 py-2 rounded-lg bg-accent text-white text-xs font-semibold disabled:opacity-50 hover:opacity-90"
+              >
+                {authBusy ? "Verifying…" : "Submit"}
+              </button>
+              <button
+                type="button"
+                onClick={handleAuthCancel}
+                disabled={authBusy}
+                className="px-3 py-2 rounded-lg border border-border text-xs text-text-muted disabled:opacity-50 hover:border-border-light"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* 3-role model dropdowns */}
       <div className="space-y-3">
         {CLAUDE_ROLES.map((role) => {
-          const current = (eco[role.key] as string | null | undefined) ?? "claude-sonnet-4-6";
+          const current =
+            (eco[role.key] as string | null | undefined) ?? DEFAULT_CLAUDE_MODEL;
+          // A value saved before the Claude 5 refresh (e.g. "claude-opus-4-8[1m]")
+          // is no longer in the list. Surface it as its own option instead of
+          // letting the <select> silently render the first entry — otherwise the
+          // UI would claim a model the backend isn't actually using.
+          const isLegacy = !CLAUDE_CLI_MODELS.some((m) => m.value === current);
           return (
             <div key={role.key} className="flex items-center gap-4">
               <div className="w-24 shrink-0">
@@ -377,6 +530,9 @@ function ClaudeModePanel({
                 onChange={(e) => handleModel(role.key, e.target.value)}
                 className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer"
               >
+                {isLegacy && (
+                  <option value={current}>{current} — retired, pick a new model</option>
+                )}
                 {CLAUDE_CLI_MODELS.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}

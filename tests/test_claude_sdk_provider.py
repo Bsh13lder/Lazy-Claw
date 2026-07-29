@@ -21,6 +21,7 @@ from lazyclaw.llm.providers.claude_sdk_provider import (
     _DISALLOWED_BUILT_INS,
     _serialize_messages,
     _shorten_tool_name,
+    _classify_oauth_credentials,
     _split_leading_system,
     _success_tail_action,
 )
@@ -635,3 +636,113 @@ class TestSuccessTailAction:
         assert _success_tail_action(
             "Claude Code returned an error result: success", False, True
         ) == "raise"
+
+    def test_real_upstream_error_raises_without_retry(self) -> None:
+        """A reported upstream error is NOT the quirk — never retry it.
+
+        2026-07-25 outage: the OAuth token expired, so the CLI emitted
+        is_error=True with errors=[] and subtype="success". The SDK
+        collapsed that to the literal text "...error result: success",
+        which matched the quirk branch and burned a pointless full
+        retry on every single call before failing with a message that
+        named no cause. When the ResultMessage carried a real reason
+        (api_error), the answer is always "raise" — immediately.
+        """
+        assert _success_tail_action(
+            "Claude Code returned an error result: success",
+            False,
+            False,
+            upstream_error=(
+                "Failed to authenticate. API Error: 401 OAuth access "
+                "token has expired. Re-authenticate to continue."
+            ),
+        ) == "raise"
+
+    def test_upstream_error_beats_usable_response(self) -> None:
+        """Never swallow a turn the CLI itself flagged as failed."""
+        assert _success_tail_action(
+            "Claude Code returned an error result: success",
+            True,
+            False,
+            upstream_error="Credit balance is too low",
+        ) == "raise"
+
+    def test_no_upstream_error_keeps_quirk_handling(self) -> None:
+        """Explicit None must behave exactly like the old 3-arg call."""
+        assert _success_tail_action(
+            "Claude Code returned an error result: success",
+            True,
+            False,
+            upstream_error=None,
+        ) == "swallow"
+
+
+class TestClassifyOAuthCredentials:
+    """Boot-time validation of ~/.claude/.credentials.json.
+
+    2026-07-25: the check only asserted the file existed and was
+    non-empty, so the gateway booted "ready" while the token had been
+    dead for 37 days — every LLM call 401'd with no startup warning.
+    """
+
+    _NOW_MS = 1_753_400_000_000  # 2026-07-25T00:53:20Z
+
+    def _cred(self, **over) -> dict:
+        oauth = {
+            "accessToken": "sk-ant-oat01-xxx",
+            "refreshToken": "sk-ant-ort01-yyy",
+            "expiresAt": self._NOW_MS + 86_400_000,  # +1 day
+            "subscriptionType": "max",
+        }
+        oauth.update(over)
+        return {"claudeAiOauth": oauth}
+
+    def test_valid_unexpired_token_ok(self) -> None:
+        ok, msg = _classify_oauth_credentials(self._cred(), self._NOW_MS)
+        assert ok is True
+        assert msg == ""
+
+    def test_expired_without_refresh_token_fails(self) -> None:
+        """The exact 2026-07-25 shape: expired + refreshToken "" ."""
+        ok, msg = _classify_oauth_credentials(
+            self._cred(expiresAt=self._NOW_MS - 1, refreshToken=""),
+            self._NOW_MS,
+        )
+        assert ok is False
+        assert "expired" in msg.lower()
+        assert "login" in msg.lower()
+
+    def test_expired_with_refresh_token_ok(self) -> None:
+        """A refresh token present → the CLI renews silently, not our call."""
+        ok, msg = _classify_oauth_credentials(
+            self._cred(expiresAt=self._NOW_MS - 1),
+            self._NOW_MS,
+        )
+        assert ok is True
+        assert msg == ""
+
+    def test_missing_expiry_is_trusted(self) -> None:
+        """Unknown schema (e.g. API-key-only creds) must not false-alarm."""
+        ok, msg = _classify_oauth_credentials(
+            {"claudeAiOauth": {"accessToken": "x"}}, self._NOW_MS
+        )
+        assert ok is True
+        assert msg == ""
+
+    def test_flat_schema_without_wrapper(self) -> None:
+        """Tolerate creds stored without the claudeAiOauth wrapper."""
+        ok, msg = _classify_oauth_credentials(
+            {
+                "accessToken": "x",
+                "refreshToken": "",
+                "expiresAt": self._NOW_MS - 1,
+            },
+            self._NOW_MS,
+        )
+        assert ok is False
+        assert "expired" in msg.lower()
+
+    def test_non_dict_payload_is_trusted(self) -> None:
+        ok, msg = _classify_oauth_credentials([], self._NOW_MS)
+        assert ok is True
+        assert msg == ""

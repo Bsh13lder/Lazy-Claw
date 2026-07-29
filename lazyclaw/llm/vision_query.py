@@ -89,7 +89,7 @@ async def ask_claude_vision(
         logger.debug("vision_query: transport=%s != sdk, skipping", transport)
         return ""
 
-    model = settings.claude_brain_model or "claude-sonnet-4-6"
+    model = settings.claude_brain_model or "claude-sonnet-5"
 
     logger.debug(
         "[provider:claude_vision] dispatch model=%s png_bytes=%d timeout=%.1fs",

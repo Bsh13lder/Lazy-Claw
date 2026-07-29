@@ -444,6 +444,7 @@ def _success_tail_action(
     err_str: str,
     have_usable_response: bool,
     already_retried: bool,
+    upstream_error: str | None = None,
 ) -> str:
     """Classify an SDK iterator exception → "swallow" | "retry" | "raise".
 
@@ -454,7 +455,21 @@ def _success_tail_action(
     On an EMPTY turn the quirk wasted the whole call → retry ONCE
     (2026-06-09 09:33: a user-visible "Chat failed" on this exact shape).
     Anything else is a genuine iterator error → raise.
+
+    `upstream_error` is the reason the CLI itself reported on the
+    ResultMessage (``errors`` or ``result``). When it is set this is NOT
+    the quirk — it is a real upstream failure wearing the quirk's text,
+    because the CLI collapses ANY is_error result whose ``errors`` list
+    is empty down to its bare subtype ("success"). Retrying cannot help
+    and swallowing would hide it, so it always raises. 2026-07-25: an
+    expired OAuth token made every call in the process take this path;
+    each one burned a full pointless retry and then failed with a
+    message that named no cause ("...error result: success"), while the
+    actionable reason the CLI *did* report — "401 OAuth access token has
+    expired. Re-authenticate to continue." — was discarded.
     """
+    if upstream_error:
+        return "raise"
     if "returned an error result: success" not in err_str:
         return "raise"
     if have_usable_response:
@@ -462,6 +477,53 @@ def _success_tail_action(
     if not already_retried:
         return "retry"
     return "raise"
+
+
+def _classify_oauth_credentials(
+    cred: Any,
+    now_ms: int,
+) -> tuple[bool, str]:
+    """Validate parsed `~/.claude/.credentials.json` → (ok, message).
+
+    Existence of the file says nothing about whether the token still
+    works. On 2026-07-25 the gateway booted "ready" with a token that
+    had expired 37 days earlier AND carried an empty `refreshToken`, so
+    the CLI could not renew it silently — every LLM call 401'd with no
+    startup warning anywhere.
+
+    Only that unrecoverable shape is reported. An expired token WITH a
+    refresh token is fine (the CLI renews on next use), and an
+    unrecognised schema is trusted rather than false-alarmed — this
+    check must never block a boot it doesn't understand.
+    """
+    if not isinstance(cred, dict):
+        return True, ""
+
+    oauth = cred.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        oauth = cred
+
+    expires_at = oauth.get("expiresAt")
+    if not isinstance(expires_at, (int, float, str)):
+        return True, ""  # Absent expiry — not ours to judge.
+    try:
+        expires_ms = int(expires_at)
+    except ValueError:
+        return True, ""  # Unparseable expiry — trust rather than block.
+
+    if expires_ms > now_ms:
+        return True, ""
+
+    if str(oauth.get("refreshToken") or "").strip():
+        return True, ""  # Expired but renewable — the CLI handles it.
+
+    return False, (
+        "Claude OAuth token EXPIRED and has no refresh token — every "
+        "LLM call will fail with HTTP 401. Note `claude auth status` "
+        "still reports loggedIn:true here, so it cannot be used to "
+        "confirm. Re-authenticate: "
+        "`docker exec -it lazyclaw claude auth login`."
+    )
 
 
 def _find_claude_binary() -> str | None:
@@ -723,6 +785,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     (text_parts or tool_calls) and not api_error
                 ),
                 already_retried=bool(kwargs.get("_success_tail_retried")),
+                upstream_error=api_error,
             )
             if action == "swallow":
                 logger.warning(
@@ -741,6 +804,13 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     messages, model,
                     **{**kwargs, "_success_tail_retried": True},
                 )
+            elif api_error:
+                # The CLI told us WHY it failed; the trailing
+                # ProcessError text ("...error result: success") did
+                # not. Surface the reason, not the placeholder.
+                raise RuntimeError(
+                    f"Claude SDK upstream error: {api_error}"
+                ) from exc
             else:
                 raise RuntimeError(
                     f"Claude SDK iterator error: {exc}"
@@ -1197,8 +1267,26 @@ def check_claude_sdk_auth() -> tuple[bool, str]:
         return False, (
             "Claude CLI is installed but not logged in (SDK transport "
             "won't work either). Run `docker exec -it lazyclaw claude "
-            "/login` or `claude /login` on the host."
+            "auth login` or `claude auth login` on the host."
         )
+
+    # File present != token usable. An expired token with no refresh
+    # token 401s every call, so check it here rather than letting the
+    # whole process discover it one failed request at a time.
+    try:
+        with open(cred_path, encoding="utf-8") as fh:
+            cred = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "[provider:claude_sdk] auth check: credentials file unreadable "
+            "(%s) — trusting it rather than blocking boot", exc,
+        )
+        return True, ""
+
+    ok, problem = _classify_oauth_credentials(cred, int(time.time() * 1000))
+    if not ok:
+        logger.error("[provider:claude_sdk] auth check: %s", problem)
+        return False, problem
 
     logger.debug("[provider:claude_sdk] auth check: ready")
     return True, ""

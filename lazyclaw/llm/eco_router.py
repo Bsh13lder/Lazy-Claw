@@ -92,8 +92,15 @@ VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE, MODE_MINIMAX})
 # `claude-cli` is the INTERNAL registry alias (model_registry.py) and is
 # not a valid --model value — it slipped into stored settings via the
 # old ModelAssignment dropdown that listed every registry profile.
-_CLI_MODEL_ALIASES = frozenset({"sonnet", "opus", "haiku"})
-_CLI_MODEL_FAMILIES = ("sonnet", "opus", "haiku")
+# "fable" joined the family list with the Claude 5 generation — `claude
+# --help` on CLI 2.1.197 documents it as a first-class alias alongside
+# opus/sonnet. It is load-bearing here: a model whose family is missing
+# from this tuple fails _is_valid_cli_model and is silently swapped for
+# DEFAULT below, so a user who picks Fable 5 in Settings would quietly
+# run Sonnet instead (same class of bug as the specialist-allowlist
+# incident, 2026-06-10).
+_CLI_MODEL_ALIASES = frozenset({"sonnet", "opus", "haiku", "fable"})
+_CLI_MODEL_FAMILIES = ("sonnet", "opus", "haiku", "fable")
 
 
 def _is_valid_cli_model(name: str) -> bool:
@@ -109,7 +116,7 @@ def _is_valid_cli_model(name: str) -> bool:
 
 def _resolve_claude_cli_model(settings: object | None, role: str) -> str:
     """Pick the right CLI model for a given role + settings, with strict
-    fallback to claude-sonnet-4-6 when the stored value is junk.
+    fallback to claude-sonnet-5 when the stored value is junk.
 
     Role mapping:
       - ROLE_BRAIN (default) → claude_brain_model
@@ -121,7 +128,7 @@ def _resolve_claude_cli_model(settings: object | None, role: str) -> str:
     fall back to the safe default. Same pattern as the brain validator
     in commit 0ee38f3.
     """
-    DEFAULT = "claude-sonnet-4-6"
+    DEFAULT = "claude-sonnet-5"
     if settings is None:
         return DEFAULT
 

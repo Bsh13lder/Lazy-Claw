@@ -117,7 +117,7 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
     # arguments. The old ModelAssignment dropdown stored registry profile
     # names like "claude-cli" / "haiku-cli" verbatim, which now spam the
     # eco_router fallback warning every tick. Coerce to None so the router
-    # picks its safe default (claude-sonnet-4-6) without complaining.
+    # picks its safe default (claude-sonnet-5) without complaining.
     from lazyclaw.llm.eco_router import _is_valid_cli_model
     for cli_field in ("claude_brain_model", "claude_worker_model", "claude_fallback_model"):
         val = merged.get(cli_field)

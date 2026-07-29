@@ -31,11 +31,17 @@ const FALLBACK_REASON_LABELS: Record<string, string> = {
 function friendlyModel(raw?: string): string | undefined {
   if (!raw) return undefined;
   const m = raw.toLowerCase();
+  // Claude 5 first — these are matched before the 4.x rules so an
+  // "opus-5" badge never degrades to the generic "Opus" catch-all.
+  if (m.includes("opus-5")) return "Opus 5";
+  if (m.includes("sonnet-5")) return "Sonnet 5";
+  if (m.includes("fable-5")) return "Fable 5";
   if (m.includes("sonnet-4-6") || m.includes("sonnet-4.6")) return "Sonnet 4.6";
   if (m.includes("haiku-4-5") || m.includes("haiku-4.5")) return "Haiku 4.5";
   if (m.includes("opus")) return "Opus";
   if (m.includes("sonnet")) return "Sonnet";
   if (m.includes("haiku")) return "Haiku";
+  if (m.includes("fable")) return "Fable";
   if (m.includes("gemma") || m.includes("e2b")) return "Gemma E2B";
   if (m === "claude-cli") return "Claude CLI";
   if (m === "unknown" || m === "error") return undefined;

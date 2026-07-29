@@ -107,6 +107,20 @@ class NotificationsCenterNotifier
     _ref.invalidate(unreadCountProvider);
   }
 
+  /// Mark a chosen subset read (multi-select) — optimistic, then reconcile.
+  /// Reuses the same bulk-by-ids endpoint as [markRead]; [_applyRead] is
+  /// already set-based so any number of ids apply in one pass.
+  Future<void> markReadMany(Set<String> ids) async {
+    if (ids.isEmpty) return;
+    _applyRead(ids);
+    try {
+      await _repo.markRead(ids.toList());
+    } catch (_) {
+      // best-effort; a later refresh reconciles
+    }
+    _ref.invalidate(unreadCountProvider);
+  }
+
   /// Mark everything read — optimistic, then reconcile.
   Future<void> markAllRead() async {
     _applyRead(state.items.map((n) => n.id).toSet());

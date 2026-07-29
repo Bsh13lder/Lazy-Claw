@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/actions/pending_deep_link.dart';
@@ -20,6 +21,11 @@ class NotificationsCenterScreen extends ConsumerStatefulWidget {
 
 class _NotificationsCenterScreenState
     extends ConsumerState<NotificationsCenterScreen> {
+  /// Multi-select mode: long-press a row to enter, then tap rows to (de)select
+  /// and "Mark N read" to clear just those. Empty selection exits the mode.
+  bool _selectionMode = false;
+  final Set<String> _selected = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -41,22 +47,76 @@ class _NotificationsCenterScreenState
     }
   }
 
+  /// Row tap: toggle selection while selecting, else the normal read+deep-link.
+  void _onRowTap(ServerNotification n) {
+    if (_selectionMode) {
+      _toggleSelect(n.id);
+    } else {
+      _onTap(n);
+    }
+  }
+
+  void _enterSelection(ServerNotification n) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _selectionMode = true;
+      _selected.add(n.id);
+    });
+  }
+
+  void _toggleSelect(String id) {
+    setState(() {
+      if (!_selected.remove(id)) _selected.add(id);
+      if (_selected.isEmpty) _selectionMode = false;
+    });
+  }
+
+  void _exitSelection() {
+    setState(() {
+      _selectionMode = false;
+      _selected.clear();
+    });
+  }
+
+  void _markSelectedRead() {
+    final ids = Set<String>.from(_selected);
+    ref.read(notificationsCenterProvider.notifier).markReadMany(ids);
+    _exitSelection();
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(notificationsCenterProvider);
     return LzScaffold(
-      appBar: LzAppBar(
-        title: 'Notifications',
-        actions: [
-          if (state.unread > 0)
-            LzIconButton(
-              icon: Icons.done_all,
-              tooltip: 'Mark all read',
-              onPressed: () =>
-                  ref.read(notificationsCenterProvider.notifier).markAllRead(),
+      appBar: _selectionMode
+          ? LzAppBar(
+              title: '${_selected.length} selected',
+              leading: LzIconButton(
+                icon: Icons.close,
+                tooltip: 'Cancel',
+                onPressed: _exitSelection,
+              ),
+              actions: [
+                LzIconButton(
+                  icon: Icons.done_all,
+                  tooltip: 'Mark selected read',
+                  onPressed: _markSelectedRead,
+                ),
+              ],
+            )
+          : LzAppBar(
+              title: 'Notifications',
+              actions: [
+                if (state.unread > 0)
+                  LzIconButton(
+                    icon: Icons.done_all,
+                    tooltip: 'Mark all read',
+                    onPressed: () => ref
+                        .read(notificationsCenterProvider.notifier)
+                        .markAllRead(),
+                  ),
+              ],
             ),
-        ],
-      ),
       body: LzRefresh(onRefresh: _onRefresh, child: _body(state)),
     );
   }
@@ -96,13 +156,19 @@ class _NotificationsCenterScreenState
         vertical: AppSpacing.md,
       ),
       itemCount: state.items.length,
-      itemBuilder: (_, i) => Padding(
-        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-        child: _NotificationTile(
-          n: state.items[i],
-          onTap: () => _onTap(state.items[i]),
-        ),
-      ),
+      itemBuilder: (_, i) {
+        final n = state.items[i];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          child: _NotificationTile(
+            n: n,
+            selectionMode: _selectionMode,
+            selected: _selected.contains(n.id),
+            onTap: () => _onRowTap(n),
+            onLongPress: () => _enterSelection(n),
+          ),
+        );
+      },
     );
   }
 }
@@ -110,21 +176,41 @@ class _NotificationsCenterScreenState
 // ── Row ──────────────────────────────────────────────────────────────────────
 
 class _NotificationTile extends StatelessWidget {
-  const _NotificationTile({required this.n, required this.onTap});
+  const _NotificationTile({
+    required this.n,
+    required this.onTap,
+    this.onLongPress,
+    this.selectionMode = false,
+    this.selected = false,
+  });
 
   final ServerNotification n;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final bool selectionMode;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final accent = _severityColor(n.severity);
     final unread = n.isUnread;
-    return LzCard(
+    final card = LzCard(
       onTap: onTap,
-      color: unread ? AppColors.bgSurfaceElevated : AppColors.bgSurface,
+      borderColor: selected ? AppColors.accent : null,
+      color: selected
+          ? AppColors.accent.withValues(alpha: 0.12)
+          : (unread ? AppColors.bgSurfaceElevated : AppColors.bgSurface),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (selectionMode) ...[
+            Icon(
+              selected ? Icons.check_circle : Icons.radio_button_unchecked,
+              size: 22,
+              color: selected ? AppColors.accent : AppColors.textMuted,
+            ),
+            const SizedBox(width: AppSpacing.md),
+          ],
           Container(
             width: 34,
             height: 34,
@@ -191,6 +277,15 @@ class _NotificationTile extends StatelessWidget {
           ),
         ],
       ),
+    );
+
+    if (onLongPress == null) return card;
+    // Long-press enters multi-select. GestureDetector's long-press recognizer
+    // coexists with the card's InkWell tap (distinguished by press duration).
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: onLongPress,
+      child: card,
     );
   }
 }

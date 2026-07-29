@@ -1722,6 +1722,32 @@ class HeartbeatDaemon:
                 service, found.get("thread_id"),
             )
 
+    async def _nag_intervals(self, user_id: str) -> list[int]:
+        """The user's task-nag ladder in minutes, or the shipped default.
+
+        Never raises and never returns empty: a settings read that fails must
+        degrade to the historical behaviour, and a zero-length ladder would
+        mean the reminder itself never fires.
+        """
+        from lazyclaw.settings.general import DEFAULT_GENERAL
+
+        fallback = list(DEFAULT_GENERAL["nag_intervals"])
+        try:
+            from lazyclaw.settings.general import get_general_settings
+
+            gen = await get_general_settings(self._config, user_id)
+            vals = gen.get("nag_intervals")
+        except Exception:
+            logger.debug(
+                "[heartbeat] nag_intervals read failed (user=%s); using default",
+                user_id, exc_info=True,
+            )
+            return fallback
+        if not isinstance(vals, list) or not vals:
+            return fallback
+        clean = [v for v in vals if isinstance(v, int) and not isinstance(v, bool)]
+        return clean or fallback
+
     async def _check_task_nagging(self) -> None:
         """Due App-style nagging + advance pre-reminders for important tasks.
 
@@ -1774,6 +1800,13 @@ class HeartbeatDaemon:
         for user_id in user_ids:
             key = await get_user_dek(self._config, user_id)
 
+            # Per-user escalation ladder. Entry 0 is the at-time reminder; each
+            # later entry is minutes since the previous nag. The LIST LENGTH is
+            # the cap, so the ladder and the "stop nagging" guard can no longer
+            # disagree — they used to be a hard-coded [0,15,30,60,60] and a
+            # separate `nag_count < 5` literal maintained by hand.
+            intervals = await self._nag_intervals(user_id)
+
             async with db_session(self._config) as db:
                 cursor = await db.execute(
                     "SELECT id, title, reminder_at, nag_count, nag_fired_at "
@@ -1781,15 +1814,13 @@ class HeartbeatDaemon:
                     "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
                     "AND deleted_at IS NULL "
                     "AND reminder_at IS NOT NULL AND reminder_at <= ? "
-                    "AND nag_count < 5",
-                    (user_id, now_iso),
+                    "AND nag_count < ?",
+                    (user_id, now_iso, len(intervals)),
                 )
                 rows = await cursor.fetchall()
 
             for task_id, enc_title, reminder_at, nag_count, nag_fired_at in rows:
-                # Calculate if this nag is due based on escalation
-                # Intervals: 0=immediate, 1=+15min, 2=+30min, 3+=+1hr
-                intervals = [0, 15, 30, 60, 60]
+                # Minutes to wait before THIS step (see _nag_intervals).
                 interval_min = intervals[min(nag_count, len(intervals) - 1)]
 
                 if nag_count > 0:

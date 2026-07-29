@@ -44,6 +44,15 @@ def _keyboard_version_path() -> Path:
     return _APK_DIR / "keyboard-version.json"
 
 
+# A version manifest is the one response that must NEVER come from a cache: a
+# stale copy makes a freshly published build invisible and the client concludes
+# "up to date" forever. These endpoints previously returned a bare JSONResponse
+# with no freshness info at all, which HTTP lets intermediaries and browsers
+# cache heuristically — reported as "there is no new APK" while the server was
+# serving the new build correctly on every path.
+_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+
 @router.get("/version")
 async def mobile_version() -> JSONResponse:
     vp = _version_path()
@@ -53,7 +62,7 @@ async def mobile_version() -> JSONResponse:
             _APK_DIR,
         )
         raise HTTPException(status_code=404, detail="No mobile build published")
-    return JSONResponse(json.loads(vp.read_text()))
+    return JSONResponse(json.loads(vp.read_text()), headers=_NO_STORE)
 
 
 @router.get("/apk")
@@ -80,7 +89,7 @@ async def keyboard_version() -> JSONResponse:
             _APK_DIR,
         )
         raise HTTPException(status_code=404, detail="No keyboard build published")
-    return JSONResponse(json.loads(vp.read_text()))
+    return JSONResponse(json.loads(vp.read_text()), headers=_NO_STORE)
 
 
 @router.get("/keyboard-apk")

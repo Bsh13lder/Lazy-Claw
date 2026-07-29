@@ -96,6 +96,37 @@ class ParseBody(BaseModel):
     mode: Literal["fast", "ai"] = "fast"
 
 
+def _validate_recurring(value: str | None) -> None:
+    """Reject a ``recurring`` value the cron engine can't schedule.
+
+    Both write endpoints used to persist ANY string here. A human phrase like
+    "daily" or "every Monday" saved happily and rendered a "Repeats" chip — then
+    at completion time ``complete_task``'s respawn calls ``get_next_run``, which
+    raises, gets swallowed by that block's broad ``except`` (it only logs a
+    warning), and the series dies with no next occurrence and no user-visible
+    error. Fail LOUDLY at the write boundary instead of silently weeks later.
+
+    ``None`` and the empty string are deliberately allowed: an empty string
+    CLEARS the recurrence (see the ``UpdateTaskBody.recurring`` comment above) —
+    it is falsy, so the respawn path reads it as "does not repeat".
+    """
+    if value is None or not str(value).strip():
+        return
+
+    from lazyclaw.heartbeat.cron import is_valid as cron_is_valid
+
+    if not cron_is_valid(str(value)):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{value!r} is not a valid recurring schedule. Use a 5-field "
+                "cron expression — e.g. '0 9 * * 1' (every Monday at 09:00), "
+                "'0 8 * * *' (daily at 08:00), '0 9 1 * *' (1st of the month). "
+                "Send an empty string to clear the recurrence."
+            ),
+        )
+
+
 class SetStepsBody(BaseModel):
     steps: list[StepDraft]
 
@@ -134,6 +165,7 @@ async def create_task_route(
         user.id, list(body.model_dump(exclude_unset=True).keys()),
         bool(body.id),
     )
+    _validate_recurring(body.recurring)
     steps_payload = (
         [s.model_dump() for s in body.steps] if body.steps else None
     )
@@ -180,6 +212,20 @@ async def update_task_route(
     silently 400'd. The store already writes NULL for a None value (and tears
     down the reminder job when reminder_at is cleared). Mobile only ever sends
     the fields it changed (never an explicit null), so it is unaffected.
+
+    ``status='done'`` is NOT written through ``update_task``. The whole
+    completion pipeline — recurring respawn, sub-task cascade, reminder-job
+    teardown, pulse pause, progress-log ``done`` entry, LazyBrain ✅ mirror —
+    lives in ``store.complete_task``; ``update_task`` only flips the column.
+    Ticking a task off from the web/mobile detail sheet therefore killed the
+    recurring series on its first completion (no next occurrence), left the
+    checklist unchecked and kept the reminder job nagging a finished task.
+    Any other fields in the same PATCH are applied FIRST, so the respawn is
+    built from the post-edit row.
+
+    The reverse transition clears ``completed_at``: re-opening a done task used
+    to leave the stamp set, so the row still read as completed to every
+    consumer of that column.
     """
     updates = body.model_dump(exclude_unset=True)
     logger.debug(
@@ -195,13 +241,40 @@ async def update_task_route(
             task_id, user.id,
         )
         raise HTTPException(status_code=400, detail="No fields to update")
-    updated = await update_task(_config, user.id, task_id, **updates)
+    if "recurring" in updates:
+        _validate_recurring(updates["recurring"])
+
+    # Split the done transition out of the plain-field update.
+    new_status = updates.pop("status", None)
+    completing = new_status == "done"
+    if new_status is not None and not completing:
+        updates["status"] = new_status          # re-open: write it normally…
+        updates["completed_at"] = None          # …and drop the stale stamp
+
+    if updates:
+        updated = await update_task(_config, user.id, task_id, **updates)
+    else:
+        # ``{"status": "done"}`` on its own leaves nothing for update_task —
+        # existence still has to be proven so the 404 contract holds.
+        updated = await get_task(_config, user.id, task_id) is not None
     if not updated:
         logger.warning(
             "[route:tasks] PATCH id=%s user=%s -> 404 task not found",
             task_id, user.id,
         )
         raise HTTPException(status_code=404, detail="Task not found")
+
+    if completing:
+        # Idempotent in the store (already-done → no-op True), so a replayed
+        # mobile sync op can't spawn a duplicate next occurrence.
+        ok = await complete_task(_config, user.id, task_id)
+        if not ok:
+            logger.warning(
+                "[route:tasks] PATCH id=%s user=%s -> 404 task not found (complete)",
+                task_id, user.id,
+            )
+            raise HTTPException(status_code=404, detail="Task not found")
+
     task = await get_task(_config, user.id, task_id)
     return {"task": task}
 

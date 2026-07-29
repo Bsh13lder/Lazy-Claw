@@ -66,6 +66,9 @@ const List<String> kServerAliases = <String>[
 /// version is read at runtime from `package_info_plus` inside the self-update
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
-/// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.21.22';
-const int kAppBuild = 81;
+/// `version:` field in `pubspec.yaml` — enforced by
+/// `test/core/app_version_constants_test.dart`, because these had silently
+/// drifted 34 builds behind (1.21.22+81 vs pubspec 1.22.5+115) and the
+/// self-update check would then compare against the wrong build number.
+const String kAppVersion = '1.22.7';
+const int kAppBuild = 117;

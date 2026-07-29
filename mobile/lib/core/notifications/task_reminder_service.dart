@@ -60,12 +60,17 @@ DateTime? reminderFireTime(
 
 DateTime? _parseReminderAt(String? reminderAt) {
   if (reminderAt == null || reminderAt.isEmpty) return null;
-  return DateTime.tryParse(reminderAt);
+  // `.toLocal()` so a UTC-aware reminder (server-normalised, or agent-created)
+  // schedules at the user's wall-clock, not UTC. The scheduler below builds a
+  // TZDateTime from the fire time's LOCAL components, so a raw `10:00Z` (noon
+  // Madrid) would have fired the on-device alarm at 10:00. No-op on naive input.
+  return DateTime.tryParse(reminderAt)?.toLocal();
 }
 
 DateTime? _parseDueWithTime(String? due) {
   if (!dueDateHasTime(due)) return null;
-  return DateTime.tryParse(due!);
+  // Same local conversion (harmless no-op for the naive `dueDate` shape).
+  return DateTime.tryParse(due!)?.toLocal();
 }
 
 /// Parse a DATE-ONLY due (`yyyy-MM-dd`, no time-of-day) and pin it to [h]:[m]
@@ -86,12 +91,24 @@ DateTime? _parseDueDateOnlyAt(String? due, int h, int m) {
 /// The EVENT instant that the user's reminder OFFSETS are measured from, or null
 /// when there's nothing to anchor to.
 ///
-/// Precedence (DUE-first — an offset is a lead BEFORE the event, so the event is
-/// the due time, NOT the legacy single [Task.reminderAt] lead):
+/// Precedence (DUE-first *only when the due carries a real clock time* — an
+/// offset is a lead BEFORE the event, so a TIMED due is the event, not the
+/// legacy single [Task.reminderAt] lead):
 ///   1. A timed due (`…THH:mm:ss`) → that instant.
-///   2. A date-only due (`yyyy-MM-dd`) → that date at the default time-of-day.
-///   3. No due at all → the explicit [Task.reminderAt] instant (offsets then key
-///      off that, so a reminder-only task still fires).
+///   2. An explicit [Task.reminderAt] → that instant. This outranks the
+///      date-only default below because when the due has NO time-of-day the
+///      `reminderAt` is the ONLY real clock the user (or the server) chose — it
+///      is what `cardDueTimeLabel` renders on the card, so anchoring anywhere
+///      else makes the alarms disagree with the UI.
+///   3. A date-only due (`yyyy-MM-dd`) with no `reminderAt` → that date at the
+///      default time-of-day (so an ordinary "due tomorrow" task still fires).
+///
+/// WHY 2 must beat 3 (the user-visible bug): the backend writes every recurring
+/// RESPAWN as a date-only `due_date` PLUS a real `reminder_at`, and the mobile
+/// "Reschedule" flow does the same (`reschedule_dates.dart`). With the old
+/// due-first-at-all-costs order, a task set for 8:00 PM was anchored at the
+/// 09:00 default, so its `-2h/-1h` advance reminders buzzed at 07:00/08:00 while
+/// the card still read 8:00 PM — and nothing at all fired in the evening.
 ///
 /// Unlike [reminderFireTime], this does NOT past-filter — that's done at
 /// schedule time by [computeOffsetFireTimes]. Pure.
@@ -102,10 +119,10 @@ DateTime? reminderBaseTime(
 }) {
   final timed = _parseDueWithTime(task.dueDate);
   if (timed != null) return timed;
-  final dateOnly =
-      _parseDueDateOnlyAt(task.dueDate, defaultReminderHour, defaultReminderMinute);
-  if (dateOnly != null) return dateOnly;
-  return _parseReminderAt(task.reminderAt);
+  final explicit = _parseReminderAt(task.reminderAt);
+  if (explicit != null) return explicit;
+  return _parseDueDateOnlyAt(
+      task.dueDate, defaultReminderHour, defaultReminderMinute);
 }
 
 /// Derive a stable, positive 31-bit notification id from a task id.
@@ -136,6 +153,21 @@ const int kMaxOffsetReminders = 16;
 /// indices derive a distinct stable FNV id from a per-index key.
 int notificationIdForOffset(String taskId, int index) =>
     index == 0 ? notificationIdForTask(taskId) : notificationIdForTask('$taskId#$index');
+
+/// EVERY notification id the reminder scheduler could ever have used for
+/// [taskId] — the full reserved slot range. Sweeping the whole range (rather
+/// than the ids currently believed to be scheduled) is what guarantees no stale
+/// alarm survives an offset-set change, a due-time edit, or a completion.
+///
+/// Top-level + public so the notification-shade "Done" handler
+/// (`notifications/notification_actions.dart`) can cancel a task's SIBLING
+/// alarms without owning a [TaskReminderService] — completing from the -2h
+/// reminder must not leave the -1h and at-time alarms armed.
+Iterable<int> reservedReminderIds(String taskId) sync* {
+  for (var i = 0; i < kMaxOffsetReminders; i++) {
+    yield notificationIdForOffset(taskId, i);
+  }
+}
 
 /// The notification BODY text — it describes WHEN THE TASK IS DUE, never the
 /// instant the reminder pops. A reminder may fire ahead of the due time (an
@@ -397,6 +429,26 @@ class TaskReminderService implements TaskReminderScheduler {
 
   List<String> get offsets => List.unmodifiable(_offsets);
 
+  /// The offset set actually SCHEDULED: the user's [_offsets] plus the mandatory
+  /// [kAtTimeReminderOffset]. Without it the shipped default (`-2h`, `-1h`) fired
+  /// two advance nudges and then nothing at the event itself — app-only users
+  /// (no Telegram) got no reminder at the moment the task was actually due.
+  ///
+  /// [normalizeReminderOffsets] canonicalises + DE-DUPES, so a user who already
+  /// selected "At time" still gets exactly one at-time alarm, and the returned
+  /// list stays earliest-fire-first — which keeps the at-time entry LAST, so the
+  /// index→notification-id mapping of the pre-existing advance offsets doesn't
+  /// shift (ids must stay stable per (task, slot) or cancel/reschedule leaks
+  /// alarms). Returns a fresh list on every read — never mutated in place.
+  /// The user's selection, verbatim.
+  ///
+  /// This used to force-append [kAtTimeReminderOffset], which made Settings →
+  /// Notifications → "At time" (a real, toggleable chip) a NO-OP: deselecting
+  /// it changed nothing and the UI silently lied. The out-of-box "silent at the
+  /// due instant" problem belongs in [kDefaultReminderOffsets] — which now
+  /// carries `0m` — not in an override that outranks an explicit choice.
+  List<String> get _schedulingOffsets => normalizeReminderOffsets(_offsets);
+
   /// Keep the configured time-of-day inside a valid day (0..1439). An absurd
   /// value can't push the fallback onto another calendar day.
   static int _clampMinutes(int minutes) =>
@@ -430,7 +482,7 @@ class TaskReminderService implements TaskReminderScheduler {
         );
         fires = f == null ? const [] : <DateTime>[f];
       } else {
-        fires = computeOffsetFireTimes(base: base, offsets: _offsets);
+        fires = computeOffsetFireTimes(base: base, offsets: _schedulingOffsets);
       }
     }
     final planned = <({int id, DateTime fire})>[];
@@ -442,12 +494,10 @@ class TaskReminderService implements TaskReminderScheduler {
 
   /// Every notification id this service could ever have used for [taskId] — the
   /// full reserved slot range. Cancelling the whole range on (re)schedule /
-  /// cancel guarantees no stale alarm survives an offset-set change.
-  Iterable<int> _reservedIds(String taskId) sync* {
-    for (var i = 0; i < kMaxOffsetReminders; i++) {
-      yield notificationIdForOffset(taskId, i);
-    }
-  }
+  /// cancel guarantees no stale alarm survives an offset-set change. Delegates to
+  /// the top-level [reservedReminderIds] so the shade "Done" handler sweeps the
+  /// EXACT same range.
+  Iterable<int> _reservedIds(String taskId) => reservedReminderIds(taskId);
 
   @override
   Future<void> scheduleForTask(Task task) async {

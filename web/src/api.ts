@@ -1112,6 +1112,32 @@ export const updateAwakeSettings = (updates: {
     body: JSON.stringify(updates),
   }).then((r) => r.data);
 
+// ── Claude subscription re-authentication ──────────────────────────────────
+
+export interface ClaudeAuthStatus {
+  logged_in: boolean;
+  detail: string;
+  expires_at?: number | null;
+  subscription?: string | null;
+}
+
+export const getClaudeAuthStatus = () =>
+  request<ClaudeAuthStatus>("/api/claude-auth/status");
+
+export const startClaudeAuth = () =>
+  request<{ session_id: string; url: string }>("/api/claude-auth/start", {
+    method: "POST",
+  });
+
+export const submitClaudeAuthCode = (session_id: string, code: string) =>
+  request<{ ok: boolean; detail: string }>("/api/claude-auth/submit", {
+    method: "POST",
+    body: JSON.stringify({ session_id, code }),
+  });
+
+export const cancelClaudeAuth = () =>
+  request<{ ok: boolean }>("/api/claude-auth/cancel", { method: "POST" });
+
 // ── ECO ────────────────────────────────────────────────────────────────────
 
 export const getEcoSettings = () =>

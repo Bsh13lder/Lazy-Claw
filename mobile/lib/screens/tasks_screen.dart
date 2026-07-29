@@ -11,6 +11,7 @@ import '../models/subtask.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
+import 'expenses/add_expense_sheet.dart';
 import 'notes/notes_body.dart';
 import 'settings/settings_prefs.dart';
 import 'storage_banners.dart';
@@ -261,6 +262,22 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         );
   }
 
+  /// Open the "New Project" sheet. Reuses the same [AddProjectSheet] the Money
+  /// tab uses — projects are shared across Tasks and Money — so a project can be
+  /// created directly from the Tasks → Projects view instead of only from Money.
+  void _showAddProject() {
+    HapticFeedback.selectionClick();
+    LzBottomSheet.show<void>(
+      context,
+      title: 'New Project',
+      builder: (_) => AddProjectSheet(
+        onSubmit: (name, budget, color) => ref
+            .read(budgetsProvider.notifier)
+            .createProject(name, budget: budget, color: color),
+      ),
+    );
+  }
+
   // ── Tap-the-chip quick-edit commits (route through the provider) ───────────
 
   void _commitPriority(String id, String priority) =>
@@ -334,6 +351,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         large: true,
         gradientTitle: true,
         actions: [
+          // In the Projects view, expose a direct "New project" action so
+          // projects aren't only creatable from the Money tab.
+          if (!notesMode && _view == _TasksView.projects)
+            LzIconButton(
+              icon: Icons.create_new_folder_outlined,
+              tooltip: 'New project',
+              onPressed: _showAddProject,
+            ),
           LzIconButton(
             icon: Icons.add,
             tooltip: notesMode ? 'New note' : 'New task',
@@ -600,6 +625,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         onDueDateChanged: _commitDueDate,
         onCategoryChanged: _commitCategory,
         onSubtasksChanged: _commitSubtasks,
+        onAddProject: _showAddProject,
       ),
     );
   }

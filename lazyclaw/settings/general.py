@@ -39,7 +39,30 @@ DEFAULT_GENERAL = {
     # (priority high/urgent OR appointment-class title). Each entry is a
     # negative relative offset like "-2h", "-30m", "-1d" — applied to the
     # task's reminder_at to derive pre_reminders entries. Override per-user.
-    "reminder_offsets": ["-2h", "-1h"],
+    #
+    # "0m" ("At time") leads the list and is what the PHONE reads to schedule a
+    # local alarm at the reminder instant itself. Without it the default was
+    # advance-only, so a fresh install buzzed at 06:00 and 07:00 for an 08:00
+    # task and then went SILENT at 08:00 — the only at-time nudge was the
+    # server's Telegram nag, which app-only users never receive.
+    # Server-side it is inert by design: `pre_reminders._OFFSET_RE` requires a
+    # leading "-" and rejects zero, so "0m" never becomes a pre_reminder — the
+    # at-time fire is already owned by `reminder_at` itself.
+    # MUST stay in sync with mobile `core/reminder_offset.dart`
+    # kDefaultReminderOffsets.
+    "reminder_offsets": ["0m", "-2h", "-1h"],
+    # Task-nag escalation ladder, in minutes. Entry 0 is the AT-TIME reminder
+    # (offset 0 from reminder_at); every later entry is minutes since the
+    # PREVIOUS nag fired. The list length is also the cap — five entries means
+    # at most five pushes for one task occurrence.
+    #
+    # Was a hard-coded literal in daemon._check_task_nagging with a separate
+    # `nag_count < 5` SQL guard that could drift from it. One dose of a daily
+    # medicine could fire five server nags on top of its advance reminders.
+    # Set [0] for "remind me once, then leave me alone"; an empty list
+    # normalises to [0] (a reminder that never fires is a footgun, not a
+    # preference).
+    "nag_intervals": [0, 15, 30, 60, 60],
     # Auto-save successful multi-step browser flows as templates (upsert by
     # primary host). Off → user must manually save via canvas/chat skill.
     "auto_save_browser_templates": True,
@@ -172,6 +195,31 @@ async def update_general_settings(
                 )
             cleaned.append(s)
         clean["reminder_offsets"] = cleaned
+
+    if "nag_intervals" in updates and updates["nag_intervals"] is not None:
+        vals = updates["nag_intervals"]
+        if not isinstance(vals, list):
+            raise ValueError("nag_intervals must be a list of minute counts")
+        mins: list[int] = []
+        for v in vals:
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(
+                    f"Invalid nag interval {v!r}. Use whole minutes, e.g. [0, 15, 30]."
+                )
+            if v < 0:
+                raise ValueError(f"nag interval {v!r} must not be negative")
+            mins.append(v)
+        # Entry 0 IS the at-time reminder, so it has to be a zero offset —
+        # otherwise the first push would arrive late and every later step would
+        # inherit the skew.
+        if mins and mins[0] != 0:
+            raise ValueError(
+                "nag_intervals[0] is the at-time reminder and must be 0 "
+                f"(got {mins[0]!r})"
+            )
+        # An empty ladder would mean the reminder itself never fires. Treat it
+        # as "just the reminder, no escalation" rather than silent suppression.
+        clean["nag_intervals"] = mins or [0]
 
     if "awake" in updates and updates["awake"] is not None:
         au = updates["awake"]

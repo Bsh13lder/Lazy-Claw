@@ -37,6 +37,7 @@ class TasksProjectView extends StatefulWidget {
     this.onDueDateChanged,
     this.onCategoryChanged,
     this.onSubtasksChanged,
+    this.onAddProject,
   });
 
   final List<Task> tasks;
@@ -51,6 +52,10 @@ class TasksProjectView extends StatefulWidget {
   final void Function(String id, String dueDate)? onDueDateChanged;
   final void Function(String id, String category)? onCategoryChanged;
   final void Function(String id, List<Subtask> subtasks)? onSubtasksChanged;
+
+  /// Create a new project directly from this view (app-bar + empty-state +
+  /// section-header "+" all route here). Null hides those affordances.
+  final VoidCallback? onAddProject;
 
   @override
   State<TasksProjectView> createState() => _TasksProjectViewState();
@@ -78,7 +83,10 @@ class _TasksProjectViewState extends State<TasksProjectView> {
       return LzEmptyState(
         icon: Icons.folder_open_outlined,
         title: 'No projects yet',
-        hint: 'Add a project from the Money tab, or tag a task with one.',
+        hint: 'Create a project to group your tasks, or tag a task with one.',
+        actionLabel: widget.onAddProject != null ? 'Add project' : null,
+        actionIcon: Icons.create_new_folder_outlined,
+        onAction: widget.onAddProject,
       );
     }
 
@@ -94,6 +102,17 @@ class _TasksProjectViewState extends State<TasksProjectView> {
         if (split.hasRealProjects || widget.tasks.isNotEmpty)
           LzSection(
             title: 'Projects',
+            action: widget.onAddProject == null
+                ? null
+                : GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onAddProject,
+                    child: Icon(
+                      Icons.add_circle_outline,
+                      size: 20,
+                      color: AppColors.accent,
+                    ),
+                  ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [

@@ -944,7 +944,14 @@ class HeartbeatDaemon:
                 )
 
                 # Skip task-linked reminders — handled by _check_task_nagging
-                # with inline buttons (Done/Snooze/Tomorrow)
+                # with inline buttons (Done/Snooze/Tomorrow).
+                #
+                # NOTE this `continue` neither deletes the row nor advances
+                # next_run, so a task-linked job stays active with a past
+                # next_run and is re-selected + re-decrypted on EVERY tick,
+                # forever. That is intentional while the owning task is alive
+                # (the row is the handle complete_task deletes by), but it
+                # means a stranded job is immortal — hence the sweep below.
                 if message and "[TASK_REMINDER:" in message:
                     continue
 
@@ -986,6 +993,22 @@ class HeartbeatDaemon:
             logger.debug(
                 "[heartbeat] reminders user=%s due=%d fired=%d failed=%d",
                 user_id, len(reminders), reminders_fired, reminders_failed,
+            )
+
+        # Sweep task-linked reminder jobs no live open task references any more.
+        # Nothing else can: the only deleters key off `tasks.reminder_job_id`,
+        # so a task completed through any path that skipped `complete_task`
+        # stranded its job as an immortal active row with a past next_run,
+        # re-decrypted on every tick. Best-effort — a failed sweep must never
+        # abort the reminder pass.
+        try:
+            from lazyclaw.tasks.store import reap_orphan_reminder_jobs
+
+            await reap_orphan_reminder_jobs(self._config, user_id)
+        except Exception:
+            logger.debug(
+                "[heartbeat] orphan reminder-job sweep failed (user=%s)",
+                user_id, exc_info=True,
             )
 
     def _get_primary_cdp(self, user_id: str):
@@ -1699,6 +1722,32 @@ class HeartbeatDaemon:
                 service, found.get("thread_id"),
             )
 
+    async def _nag_intervals(self, user_id: str) -> list[int]:
+        """The user's task-nag ladder in minutes, or the shipped default.
+
+        Never raises and never returns empty: a settings read that fails must
+        degrade to the historical behaviour, and a zero-length ladder would
+        mean the reminder itself never fires.
+        """
+        from lazyclaw.settings.general import DEFAULT_GENERAL
+
+        fallback = list(DEFAULT_GENERAL["nag_intervals"])
+        try:
+            from lazyclaw.settings.general import get_general_settings
+
+            gen = await get_general_settings(self._config, user_id)
+            vals = gen.get("nag_intervals")
+        except Exception:
+            logger.debug(
+                "[heartbeat] nag_intervals read failed (user=%s); using default",
+                user_id, exc_info=True,
+            )
+            return fallback
+        if not isinstance(vals, list) or not vals:
+            return fallback
+        clean = [v for v in vals if isinstance(v, int) and not isinstance(v, bool)]
+        return clean or fallback
+
     async def _check_task_nagging(self) -> None:
         """Due App-style nagging + advance pre-reminders for important tasks.
 
@@ -1751,6 +1800,13 @@ class HeartbeatDaemon:
         for user_id in user_ids:
             key = await get_user_dek(self._config, user_id)
 
+            # Per-user escalation ladder. Entry 0 is the at-time reminder; each
+            # later entry is minutes since the previous nag. The LIST LENGTH is
+            # the cap, so the ladder and the "stop nagging" guard can no longer
+            # disagree — they used to be a hard-coded [0,15,30,60,60] and a
+            # separate `nag_count < 5` literal maintained by hand.
+            intervals = await self._nag_intervals(user_id)
+
             async with db_session(self._config) as db:
                 cursor = await db.execute(
                     "SELECT id, title, reminder_at, nag_count, nag_fired_at "
@@ -1758,23 +1814,33 @@ class HeartbeatDaemon:
                     "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
                     "AND deleted_at IS NULL "
                     "AND reminder_at IS NOT NULL AND reminder_at <= ? "
-                    "AND nag_count < 5",
-                    (user_id, now_iso),
+                    "AND nag_count < ?",
+                    (user_id, now_iso, len(intervals)),
                 )
                 rows = await cursor.fetchall()
 
             for task_id, enc_title, reminder_at, nag_count, nag_fired_at in rows:
-                # Calculate if this nag is due based on escalation
-                # Intervals: 0=immediate, 1=+15min, 2=+30min, 3+=+1hr
-                intervals = [0, 15, 30, 60, 60]
+                # Minutes to wait before THIS step (see _nag_intervals).
                 interval_min = intervals[min(nag_count, len(intervals) - 1)]
 
                 if nag_count > 0:
+                    # Escalate from the LAST NAG, tracked in ``nag_fired_at``.
+                    # This used to measure off ``reminder_at`` and keep it
+                    # current by overwriting it with now() in the claim below —
+                    # which destroyed the user's actual reminder time. The
+                    # recurring respawn reads ``reminder_at`` to carry the
+                    # original time-of-day forward, so a daily 08:00 task the
+                    # user let nag drifted to 10:30, then to midnight, cycle
+                    # after cycle. ``nag_fired_at`` is the right cursor: the
+                    # same atomic claim already stamps it, and ``update_task``
+                    # resets it to NULL on any reminder edit, so a NULL here
+                    # correctly means "no nag yet → measure off the reminder".
+                    escalation_base = nag_fired_at or reminder_at
                     try:
-                        remind_dt = datetime.fromisoformat(reminder_at)
-                        if remind_dt.tzinfo is None:
-                            remind_dt = remind_dt.replace(tzinfo=timezone.utc)
-                        nag_due = remind_dt + timedelta(minutes=interval_min)
+                        base_dt = datetime.fromisoformat(escalation_base)
+                        if base_dt.tzinfo is None:
+                            base_dt = base_dt.replace(tzinfo=timezone.utc)
+                        nag_due = base_dt + timedelta(minutes=interval_min)
                         if now < nag_due:
                             continue  # Not time for this nag yet
                     except (ValueError, TypeError):
@@ -1782,24 +1848,26 @@ class HeartbeatDaemon:
                         continue
 
                 # ── Atomic claim ──────────────────────────────────────────
-                # Bump nag_count + stamp nag_fired_at + push reminder_at
-                # forward (so the next escalation interval is computed
-                # from "now") in a single UPDATE. The WHERE clause
-                # anchors on the exact ``nag_count`` we read; a concurrent
-                # tick that already fired the same nag finds rowcount=0
-                # and we skip the push. Stale claims (>5min) get
-                # re-claimed automatically so a crash can't permanently
-                # block a task.
+                # Bump nag_count + stamp nag_fired_at in a single UPDATE. The
+                # WHERE clause anchors on the exact ``nag_count`` we read; a
+                # concurrent tick that already fired the same nag finds
+                # rowcount=0 and we skip the push. Stale claims (>5min) get
+                # re-claimed automatically so a crash can't permanently block
+                # a task.
+                #
+                # ``reminder_at`` is deliberately NOT touched here. It is the
+                # user's own "fire at 08:00" value and the recurring respawn
+                # reads it to preserve the time-of-day; the escalation cursor
+                # is ``nag_fired_at`` (read back above).
                 async with db_session(self._config) as db:
                     claim_result = await db.execute(
-                        "UPDATE tasks SET nag_count = ?, reminder_at = ?, "
-                        "nag_fired_at = ? "
+                        "UPDATE tasks SET nag_count = ?, nag_fired_at = ? "
                         "WHERE id = ? AND user_id = ? "
                         "AND status IN ('todo', 'in_progress') "
                         "AND nag_count = ? "
                         "AND (nag_fired_at IS NULL OR nag_fired_at <= ?)",
                         (
-                            nag_count + 1, now_iso, now_iso,
+                            nag_count + 1, now_iso,
                             task_id, user_id,
                             nag_count, stale_threshold,
                         ),
@@ -1895,13 +1963,28 @@ class HeartbeatDaemon:
                         ),
                     ]])
 
-                    await self._telegram_push(msg_text, reply_markup=keyboard)
+                    # ONE feed row per task occurrence. A single dose fires a
+                    # T-1h heads-up, a T-30m heads-up, the at-time nag, then
+                    # escalations #2..#5 — up to seven rows for one task, times
+                    # every daily medicine. The text differs every time (each
+                    # carries its own lead or nag counter) so the content hash
+                    # cannot merge them; only this call site knows they are the
+                    # same occurrence. record_notification refreshes the row in
+                    # place and bumps repeat_count, so the user sees the LATEST
+                    # state once instead of a scrolling ladder.
+                    #
+                    # Feed-only: Telegram/local pushes still fire per step, so
+                    # the escalation keeps working as designed.
+                    await self._telegram_push(
+                        msg_text, reply_markup=keyboard,
+                        dedup_key=f"task:{task_id}",
+                    )
                 except TypeError:
                     logger.debug("Telegram keyboard not supported, sending plain text", exc_info=True)
-                    await self._telegram_push(msg_text)
+                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
                 except ImportError:
                     logger.debug("Telegram library not available for keyboard, sending plain text")
-                    await self._telegram_push(msg_text)
+                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
 
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
@@ -1975,7 +2058,9 @@ class HeartbeatDaemon:
                     f"<i>{_html.escape(lead)}</i>"
                 )
                 try:
-                    await self._telegram_push(msg)
+                    # Same feed row as this task's other reminders — see the
+                    # nag site below for why they all share one key.
+                    await self._telegram_push(msg, dedup_key=f"task:{task_id}")
                     pre_fired += 1
                 except Exception as exc:
                     pre_failed += 1

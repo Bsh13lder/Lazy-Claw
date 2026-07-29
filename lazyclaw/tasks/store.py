@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -46,10 +46,18 @@ TASK_COLUMNS = [
     # Atomic nag claim (set on the conditional UPDATE in the heartbeat
     # daemon, cleared by stale-claim sweep after 5 minutes).
     "nag_fired_at",
-    # Recurring offset — minutes between due_date and reminder_at,
-    # stamped at create time. Recurring respawn uses this directly so
-    # the offset can't drift on parse failure (the original silent-drift
-    # bug). Null = "no offset", treat next reminder = next due.
+    # Minutes between due_date and reminder_at, stamped on write.
+    #
+    # VESTIGIAL — nothing in the backend reads it any more. The recurring
+    # respawn used to add it onto the cron fire, which was the original
+    # silent-drift bug: ``_compute_reminder_offset_minutes`` parses a DATE-ONLY
+    # due as ``T00:00:00``, so the "offset" encoded the whole time-of-day rather
+    # than a relative lead, and adding it back double-counted the hour. The
+    # respawn now carries the wall-clock time-of-day directly
+    # (``_next_occurrence_fields``) and never consults this column.
+    # Still written (create + update) and still shipped to clients, so it is
+    # kept for wire compatibility — do NOT reintroduce it as a scheduling input
+    # without fixing the date-only parse first.
     "reminder_offset_minutes",
     # Progress tracking — encrypted JSON timeline. Each entry is
     # {ts, kind, text, source}. Append-only via append_progress_entry.
@@ -121,6 +129,34 @@ def _validate_iso_dt(value: str | None, field_name: str) -> str | None:
     return trimmed
 
 
+def _normalize_reminder_to_utc(value: str | None, user_id: str | None) -> str | None:
+    """Coerce a reminder timestamp to a UTC-aware ISO string.
+
+    A NAIVE input (no offset) is the local wall-clock the user set — the mobile
+    app persists reminders this way (``mobile/.../reschedule_dates.dart`` writes
+    ``YYYY-MM-DDTHH:MM:SS`` with no zone). Interpret it in the user's timezone
+    and convert to UTC so every backend consumer reads ONE canonical format:
+    the heartbeat fires by comparing against ``datetime.now(timezone.utc)``, and
+    the agent / ``nl_time`` paths already emit UTC-aware via ``_to_utc_iso``. A
+    naive ``08:00`` left as-is sorts like 08:00 UTC and fired ~2h late in Madrid.
+
+    Already-aware values pass through unchanged, so this is idempotent (an edit
+    that re-sends the stored value won't double-shift). Unparseable input is
+    returned untouched — ``_validate_iso_dt`` is the gate-keeper for that.
+    """
+    if not value:
+        return value
+    try:
+        dt = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return value
+    if dt.tzinfo is not None:
+        return value
+    from lazyclaw.lazybrain.timezone_util import user_tz
+
+    return dt.replace(tzinfo=user_tz(user_id)).astimezone(timezone.utc).isoformat()
+
+
 def _compute_reminder_offset_minutes(
     due_date: str | None, reminder_at: str | None,
 ) -> int | None:
@@ -189,12 +225,250 @@ def _normalize_steps(steps: list[dict] | None) -> list[dict]:
         title = str(raw.get("title", "")).strip()
         if not title:
             continue
-        out.append({
+        step = {
             "id": str(raw.get("id") or f"s{i}-{uuid4().hex[:6]}"),
             "title": title,
             "done": bool(raw.get("done", False)),
-        })
+        }
+        # Preserve the parent-completion cascade marker. Every steps write is
+        # funnelled through this normaliser, so dropping the key here would
+        # evaporate the "which steps did the user actually finish" record on the
+        # next unrelated edit and make the tag decorative. Only carried when
+        # true, so an ordinary checklist keeps its lean {id,title,done} shape.
+        if raw.get("cascaded"):
+            step["cascaded"] = True
+        out.append(step)
     return out
+
+
+def decode_steps(raw: str | list | None) -> list[dict]:
+    """Decode a task's ``steps`` value into a list of step dicts.
+
+    ``steps`` is an ENCRYPTED field, so a row read back through
+    ``_row_to_dict`` hands us the decrypted JSON *string*. Callers used to
+    ``json.loads`` it inline and each one re-invented the failure handling; a
+    malformed blob must degrade to "no checklist", never raise and take the
+    whole completion down with it. Tolerates an already-parsed list so both
+    read paths can share this.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [s for s in raw if isinstance(s, dict)]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Could not parse steps JSON; treating as empty checklist")
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [s for s in parsed if isinstance(s, dict)]
+
+
+# Template-scoped columns the recurring respawn must carry onto the next
+# occurrence. These describe the REPEATING TASK itself (user-authored settings),
+# not per-occurrence state, so every occurrence has to inherit them.
+#
+# They live here rather than as ``create_task`` kwargs because ``create_task``
+# accepts none of them — the respawn copies them with a follow-up
+# ``update_task``. Guarded by ``test_respawn_carry_columns_are_real_columns`` so
+# a rename can't turn this into a silent no-op.
+_RESPAWN_CARRY_COLUMNS: tuple[str, ...] = (
+    "check_every",
+    "progress_template_id",
+    "allocated_budget",
+)
+
+# ── Respawn disposition for EVERY other task column ────────────────────────
+# The respawn used to enumerate nine fields by hand. Three separate fixes each
+# added one more without noticing the rest were still missing, because the
+# default for an unlisted column is "silently dropped, all tests green" — the
+# exact failure mode that lost the user's sub-task checklists. Classifying every
+# column, and failing a test when a new one is unclassified, is what retires the
+# bug class: adding a column now forces a deliberate decision.
+#
+# Columns passed as ``create_task`` kwargs are discovered by introspection, so
+# they are not repeated here. See
+# ``test_every_task_column_has_a_respawn_disposition``.
+
+# Recomputed for the new occurrence — never copied. These are absolute
+# timestamps or values derived from them; carrying one forward means the next
+# occurrence fires on last cycle's clock, which is precisely the drift class
+# this whole pass exists to close.
+_RESPAWN_DERIVED_COLUMNS: frozenset[str] = frozenset({
+    "reminder_job_id",           # a fresh job is minted by create_task
+    "reminder_offset_minutes",   # re-stamped from the new due/reminder pair
+})
+
+# Deliberately fresh or empty on the new row: identity, lifecycle state, and
+# the per-occurrence history/diagnostic trail. Copying any of these would make
+# the new occurrence claim the previous one's past.
+_RESPAWN_RESET_COLUMNS: frozenset[str] = frozenset({
+    "id",                    # new occurrence, new identity
+    "status",                # starts open
+    "completed_at",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    "nag_count",             # fresh escalation ladder
+    "nag_fired_at",
+    "nudge_sent_at",
+    "last_pulse_fired_at",
+    "last_error",            # last cycle's failure is not this cycle's
+    "attempt_count",
+    "last_attempted_at",
+    "progress_log",          # the timeline belongs to the occurrence
+    "lazybrain_note_id",     # create_task mirrors a new note
+})
+
+
+# How many cron occurrences the respawn may skip while hunting for one that is
+# still in the FUTURE (see ``_next_occurrence_fields``). One step always suffices
+# in practice — a year's worth of headroom exists only so a pathological cron /
+# stubbed backend can't spin the event loop forever.
+_RESPAWN_MAX_ADVANCES = 366
+
+
+def _parse_as_user_local(
+    value: str | None, tz: tzinfo,
+) -> tuple[datetime, bool] | None:
+    """Read a stored timestamp as an instant in the user's zone.
+
+    Returns ``(local_instant, was_tz_aware)``, or None when empty/unparseable.
+
+    A NAIVE value is the local wall-clock the mobile app both writes and renders
+    (``reschedule_dates.dart`` for reminders, ``composeDueDate`` for a timed
+    due), so it is *localised* — never read as UTC. An aware value is converted.
+    ``was_tz_aware`` lets the caller re-emit the respawn in the SAME shape it
+    read, so a naive-timed ``due_date`` doesn't silently flip format on the
+    phone (``due_date`` is not run through ``_normalize_reminder_to_utc``).
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz), False
+    return dt.astimezone(tz), True
+
+
+def _with_time_of_day(day_local: datetime, src_local: datetime) -> datetime:
+    """``day_local``'s calendar day at ``src_local``'s wall-clock time-of-day."""
+    return day_local.replace(
+        hour=src_local.hour,
+        minute=src_local.minute,
+        second=src_local.second,
+        microsecond=0,
+    )
+
+
+def _next_occurrence_fields(
+    recurring: str,
+    user_id: str | None,
+    *,
+    orig_due: str | None,
+    orig_reminder: str | None,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Compute ``(due_date, reminder_at)`` for a recurring task's next occurrence.
+
+    The cron expression fixes the calendar DAY; the completed occurrence fixes
+    the wall-clock TIME-OF-DAY (a user who set "18:30" means 18:30 every cycle,
+    whatever hour the cron grid nominally names). Two bugs are closed here:
+
+    * The respawn used to always emit a DATE-ONLY ``due_date``, dropping the
+      time-of-day the user set. That is not cosmetic: the phone's
+      ``reminderBaseTime`` anchors every advance-reminder offset on a timed due
+      when one exists and otherwise falls back to "09:00 on that date", so a
+      18:30 task respawned date-only slid every offset by 9.5 hours. A timed
+      original now respawns timed (same local wall-clock, new date) and a
+      date-only original stays date-only.
+
+    * ``get_next_run`` returns the next cron instant, but projecting the
+      original's time-of-day onto it can land in the PAST — complete a
+      "cron 09:00 / reminder 08:00" task at 08:50 and the respawn's reminder was
+      *today 08:00*, 50 minutes ago. The user saw a duplicate task that nagged on
+      the very next heartbeat tick. We therefore walk the cron forward until the
+      occurrence's anchor instant is strictly in the future.
+
+    The anchor is the reminder when there is one, else the timed due, else the
+    cron instant itself (which ``get_next_run`` already guarantees is future) —
+    so a task with no reminder is never pushed a cycle out for nothing.
+
+    ``now`` is injectable for tests; production always passes None. Raises
+    ``RuntimeError`` if the walk hits ``_RESPAWN_MAX_ADVANCES`` — the caller
+    records that as a visible respawn failure rather than persisting a wrong
+    occurrence.
+    """
+    from lazyclaw.heartbeat.cron import get_next_run
+    from lazyclaw.lazybrain.timezone_util import user_tz
+
+    tz = user_tz(user_id)
+    now = now or datetime.now(timezone.utc)
+
+    # Only a T-bearing due carries a time-of-day; a bare YYYY-MM-DD must stay
+    # date-only so the phone doesn't grow a spurious clock chip.
+    due_src = (
+        _parse_as_user_local(orig_due, tz)
+        if orig_due and "T" in orig_due else None
+    )
+    due_at, due_was_aware = due_src if due_src else (None, False)
+    rem_src = _parse_as_user_local(orig_reminder, tz)
+    if orig_reminder and rem_src is None:
+        logger.warning(
+            "Recurring respawn: could not parse original reminder_at=%r "
+            "— leaving the next occurrence's reminder unset", orig_reminder,
+        )
+    rem_at = rem_src[0] if rem_src else None
+
+    cursor: datetime | None = None
+    for _ in range(_RESPAWN_MAX_ADVANCES):
+        # First hit = "next fire from now"; afterwards = "next fire after the
+        # occurrence we just rejected". ``after`` is only passed on the advance
+        # path so a cron stub with the older 2-arg signature still works for the
+        # common (no-advance-needed) case.
+        next_due = (
+            get_next_run(recurring, user_id=user_id) if cursor is None
+            else get_next_run(recurring, after=cursor, user_id=user_id)
+        )
+        if next_due is None:
+            return None, None
+        next_local = next_due.astimezone(tz)
+
+        due_local = _with_time_of_day(next_local, due_at) if due_at else None
+        rem_local = _with_time_of_day(next_local, rem_at) if rem_at else None
+
+        anchor = rem_local if rem_local is not None else (due_local or next_local)
+        if anchor > now:
+            if due_local is None:
+                due_out = next_local.date().isoformat()
+            elif due_was_aware:
+                due_out = due_local.astimezone(timezone.utc).isoformat()
+            else:
+                # Format-preserving: a naive-timed due came from the phone as
+                # local wall-clock and is rendered as local; re-emit it naive.
+                due_out = due_local.replace(tzinfo=None).isoformat()
+            # The reminder is always emitted UTC-aware — that is the canonical
+            # backend shape ``create_task``'s ``_normalize_reminder_to_utc``
+            # would coerce it to anyway.
+            rem_out = (
+                rem_local.astimezone(timezone.utc).isoformat()
+                if rem_local is not None else None
+            )
+            return due_out, rem_out
+        cursor = next_due
+
+    logger.error(
+        "[tasks] recurring respawn hit the %d-advance cap for cron %r "
+        "(user=%s) — refusing to persist a past occurrence",
+        _RESPAWN_MAX_ADVANCES, recurring, user_id,
+    )
+    raise RuntimeError(
+        f"recurring respawn exhausted {_RESPAWN_MAX_ADVANCES} advance steps "
+        f"without finding a future occurrence for cron {recurring!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +505,9 @@ async def create_task(
     # the API surface returns a 400 with a real reason instead of the
     # row landing in the table and never being nagged.
     reminder_at = _validate_iso_dt(reminder_at, "reminder_at")
+    # Normalise a naive (mobile-shaped) reminder to UTC-aware so the heartbeat
+    # fires it on time — see _normalize_reminder_to_utc.
+    reminder_at = _normalize_reminder_to_utc(reminder_at, user_id)
     if pre_reminders:
         validated_pre: list[str] = []
         for entry in pre_reminders:
@@ -275,8 +552,8 @@ async def create_task(
         if not due_date:
             due_date = reminder_at[:10]
 
-    # Stamp the offset once at create so the recurring respawn path uses
-    # a deterministic value instead of re-parsing fields that may drift.
+    # Stamped for wire compatibility only — the recurring respawn no longer
+    # reads this column (see the TASK_COLUMNS note on reminder_offset_minutes).
     reminder_offset_minutes = _compute_reminder_offset_minutes(due_date, reminder_at)
 
     created_at = datetime.now(timezone.utc).isoformat()
@@ -672,6 +949,10 @@ async def update_task(
     # first invalid value — better than silent stop-firing later.
     if "reminder_at" in fields and fields["reminder_at"] is not None:
         fields["reminder_at"] = _validate_iso_dt(fields["reminder_at"], "reminder_at")
+        # Same naive→UTC normalisation as create_task (edits, snoozes, etc.).
+        fields["reminder_at"] = _normalize_reminder_to_utc(
+            fields["reminder_at"], user_id
+        )
     if "pre_reminders" in fields and fields["pre_reminders"] is not None:
         raw_list = fields["pre_reminders"]
         if isinstance(raw_list, str):
@@ -1034,12 +1315,11 @@ async def complete_task(
     # Pause any active pulse job so the daemon doesn't fire on a done
     # task before it gets the orchestrator-side pause from _fire_task_pulse.
     try:
-        from lazyclaw.heartbeat.orchestrator import list_jobs, pause_job
-        jobs = await list_jobs(config, user_id)
-        prefix = f"[PULSE:{task_id}:"
-        for j in jobs:
-            if (j.get("instruction") or "").startswith(prefix):
-                await pause_job(config, user_id, j["id"])
+        from lazyclaw.heartbeat.orchestrator import pause_job
+        from lazyclaw.tasks.pulse import find_pulse_jobs
+
+        for j in await find_pulse_jobs(config, user_id, task_id):
+            await pause_job(config, user_id, j["id"])
     except Exception:
         logger.debug("complete_task: could not pause pulses", exc_info=True)
 
@@ -1055,15 +1335,72 @@ async def complete_task(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # ── Sub-task cascade ────────────────────────────────────────────────────
+    # Completing a parent completes its checklist. Todoist, TickTick and
+    # Things all mark descendants done when the parent is completed; we left
+    # them unchecked, so the user had to tick every item by hand AND a finished
+    # task still rendered its progress label as "1/3" (``subtaskProgressLabel``
+    # counts done/total off this same JSON).
+    #
+    # Folded into the status UPDATE below so the parent and its children flip
+    # in ONE transaction — a crash between two writes must not leave a done
+    # task with a half-checked checklist. No-op when the checklist is absent or
+    # already fully checked, so an ordinary task never churns ``steps`` (which
+    # would push a pointless row into the mobile /changes delta).
+    # Each step WE tick is tagged ``cascaded`` so the cascade stays RECOVERABLE.
+    # Without it the cascade is destructive and one-way: there is no reopen/undo
+    # anywhere in either client (zero hits for undo/reopen across
+    # ``mobile/lib/screens/tasks/`` and ``web/src/pages/Tasks.tsx``), so a stray
+    # swipe permanently erased which items the user had ACTUALLY finished. The
+    # tag lets a reopen un-tick exactly the auto-ticked ones and lets the UI
+    # distinguish "auto-completed" from "you did this". Steps the user really
+    # completed are left untouched — never tagged — so restoring them is safe.
+    existing_steps = decode_steps(task.get("steps"))
+    cascade_steps_enc: str | None = None
+    if existing_steps and not all(s.get("done") for s in existing_steps):
+        key = await get_user_dek(config, user_id)
+        cascade_steps_enc = _encrypt_field(
+            json.dumps([
+                step if step.get("done")
+                else {**step, "done": True, "cascaded": True}
+                for step in existing_steps
+            ]),
+            key,
+        )
+
     async with db_session(config) as db:
-        await db.execute(
-            "UPDATE tasks SET status = 'done', completed_at = ?, "
-            "reminder_job_id = NULL, nag_count = 0, "
-            "nudge_sent_at = NULL, updated_at = ? "
-            "WHERE id = ? AND user_id = ?",
-            (now, now, task_id, user_id),
+        set_parts = [
+            "status = 'done'",
+            "completed_at = ?",
+            "reminder_job_id = NULL",
+            "nag_count = 0",
+            "nudge_sent_at = NULL",
+            "updated_at = ?",
+        ]
+        params: list = [now, now]
+        if cascade_steps_enc is not None:
+            set_parts.append("steps = ?")
+            params.append(cascade_steps_enc)
+        params.extend([task_id, user_id])
+        # ``AND status != 'done'`` makes the flip the ATOMIC claim on this
+        # completion. The read-then-write above is not a guard under
+        # concurrency: mobile's at-least-once retry racing a web click had both
+        # callers read ``todo`` and both fall through to the recurring respawn,
+        # so the user got TWO next occurrences. Whoever's UPDATE matches a row
+        # (rowcount == 1) owns the side effects; the loser exits quietly below.
+        result = await db.execute(
+            f"UPDATE tasks SET {', '.join(set_parts)} "
+            "WHERE id = ? AND user_id = ? AND status != 'done'",
+            tuple(params),
         )
         await db.commit()
+
+    if result.rowcount != 1:
+        # Someone else completed it between our read and our write. They are
+        # running the mirror/journal/respawn; doing it again is exactly the
+        # duplicate we're preventing. Same contract as the fast-path guard:
+        # completing an already-done task is a successful no-op.
+        return True
 
     # Keep LazyBrain mirror honest — stamp note with ✅ DONE.
     # Refresh in-memory task fields the mirror body builder reads on the
@@ -1089,36 +1426,32 @@ async def complete_task(
     except Exception:
         logger.debug("journal link for completed task failed", exc_info=True)
 
-    # Recurring: create the next occurrence using the stored offset.
-    # The original parse-and-fallback path silently dropped the offset on
-    # any parse error, so reminders drifted to bare next_due over time.
-    # We now use ``reminder_offset_minutes`` (stamped at create) directly.
+    # Recurring: create the next occurrence on the cron's calendar day but at
+    # the wall-clock time-of-day the user actually set. Three drift bugs were
+    # closed here, all of them "the respawn fires at the wrong moment":
+    #  1. The old path added ``reminder_offset_minutes`` onto the cron fire —
+    #     but that offset was derived against a *date-only* (midnight)
+    #     ``due_date``, so it encoded the entire time-of-day rather than a
+    #     relative lead. Adding it back double-counted the hour.
+    #  2. The next fix localised the reminder and always re-emitted UTC. Mobile
+    #     stores a naive reminder as *local* and renders it as local, so a naive
+    #     08:00 forced through UTC became ``08:00Z`` = 10:00 Madrid on the phone.
+    #  3. ``due_date`` was always flattened to date-only and the respawned
+    #     reminder was never checked against *now* — see
+    #     ``_next_occurrence_fields``, which owns both rules now.
+    #
+    # NOTE on shapes: the reminder comes back UTC-aware, which is also what
+    # ``create_task``'s ``_normalize_reminder_to_utc`` coerces any naive value to
+    # two calls below — there is no "stays naive in the DB" path, and the comment
+    # that used to claim one was describing a branch the normaliser undid. What
+    # IS preserved either way is the local wall-clock the phone renders.
     if task.get("recurring"):
         try:
-            from lazyclaw.heartbeat.cron import get_next_run
-            # get_next_run returns a tz-aware (UTC) datetime, not a string.
-            next_due = get_next_run(task["recurring"])
-            next_date = next_due.date().isoformat() if next_due else None
-
-            next_reminder = None
-            offset_min = task.get("reminder_offset_minutes")
-            if next_due is not None and offset_min is not None:
-                try:
-                    next_due_dt = next_due
-                    if next_due_dt.tzinfo is None:
-                        next_due_dt = next_due_dt.replace(tzinfo=timezone.utc)
-                    next_reminder = (
-                        next_due_dt + timedelta(minutes=int(offset_min))
-                    ).isoformat()
-                except (ValueError, TypeError):
-                    # Should never happen — get_next_run always emits ISO
-                    # — but if it does, surface loudly instead of silently
-                    # collapsing the reminder onto next_due.
-                    logger.warning(
-                        "Recurring respawn: could not apply offset_min=%s to "
-                        "next_due=%r for task %s — leaving next_reminder=None",
-                        offset_min, next_due, task_id,
-                    )
+            next_date, next_reminder = _next_occurrence_fields(
+                task["recurring"], user_id,
+                orig_due=task.get("due_date"),
+                orig_reminder=task.get("reminder_at"),
+            )
 
             tags = None
             if task.get("tags"):
@@ -1126,6 +1459,34 @@ async def complete_task(
                     tags = json.loads(task["tags"])
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Could not parse tags JSON for task %r; skipping tags", task.get("title"))
+
+            # Carry the checklist forward as the RECIPE for the next cycle:
+            # same items, every one reset to unchecked (Todoist's documented
+            # recurring behaviour). ``steps`` used to be dropped entirely, so a
+            # weekly "water the plants [kitchen, balcony]" came back empty and
+            # the user retyped the checklist every single cycle.
+            #
+            # Fresh step ids (no ``id`` passed → ``_normalize_steps`` mints them)
+            # keep each occurrence's per-step toggles independent.
+            next_steps = [
+                {"title": step["title"], "done": False}
+                for step in decode_steps(task.get("steps"))
+                if step.get("title")
+            ] or None
+
+            # Advance reminders must be RE-DERIVED against the NEW reminder
+            # instant — never copied, since the old ones belong to last cycle.
+            # ``create_task`` does not derive them itself; the REST route
+            # (gateway/routes/tasks.py) does it via ``resolve_pre_reminders``
+            # before calling the store. The respawn bypasses that route, so
+            # every occurrence after the first silently lost its T-2h/T-1h
+            # advance reminders — the reported "notifications are broken on
+            # recurring tasks".
+            from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
+
+            next_pre_reminders = await resolve_pre_reminders(
+                config, user_id, reminder_at=next_reminder, explicit=None,
+            )
 
             new_task = await create_task(
                 config, user_id,
@@ -1138,18 +1499,125 @@ async def complete_task(
                 reminder_at=next_reminder,
                 recurring=task["recurring"],
                 tags=tags,
+                steps=next_steps,
+                pre_reminders=next_pre_reminders or None,
             )
+
+            # Template-scoped settings ``create_task`` takes no kwargs for.
+            # Without this the next occurrence lost its pulse cadence and its
+            # slice of the project budget on every completion.
+            carried = {
+                col: task.get(col)
+                for col in _RESPAWN_CARRY_COLUMNS
+                if task.get(col) is not None
+            }
+            if carried:
+                await update_task(config, user_id, new_task["id"], **carried)
+
+            # Re-arm the pulse. The completed occurrence's pulse jobs were
+            # PAUSED above and they match on `[PULSE:<old_task_id>:`, so they
+            # can never fire for the new id — carrying `check_every` forward
+            # without minting a fresh job left the check-in cadence silent
+            # forever after the first completion. Needs both the cadence and a
+            # template; a pulse with no template fails inside the daemon.
+            if carried.get("check_every") and carried.get("progress_template_id"):
+                try:
+                    from lazyclaw.tasks.pulse import create_pulse_job
+
+                    await create_pulse_job(
+                        config, user_id, new_task["id"],
+                        carried["progress_template_id"],
+                        carried["check_every"],
+                    )
+                except Exception:
+                    logger.warning(
+                        "[tasks] could not re-arm pulse for respawned task %s "
+                        "(user=%s)", new_task.get("id"), user_id, exc_info=True,
+                    )
+
             logger.debug(
-                "[tasks] recurring respawn %s -> %s (next_due=%s user=%s)",
-                task_id, new_task.get("id"), next_date, user_id,
+                "[tasks] recurring respawn %s -> %s (next_due=%s steps=%d "
+                "pre_reminders=%d carried=%s user=%s)",
+                task_id, new_task.get("id"), next_date,
+                len(next_steps or []), len(next_pre_reminders),
+                sorted(carried), user_id,
             )
-        except Exception:
+        except Exception as exc:
+            # A swallowed respawn is silent DATA LOSS of a whole series: the
+            # task is already flipped to ``done`` above, and the ``status ==
+            # 'done'`` guard means no retry can ever respawn it — the user gets a
+            # 200 and the repeating task simply never comes back. We can't undo
+            # the completion (that would re-open a task the user finished), so
+            # make the failure durable + loud instead: stamp ``last_error`` on the
+            # row (visible in the UI + carried by the mobile /changes delta) and
+            # push a notification so the user can re-create the schedule.
             logger.warning(
                 "[tasks] recurring respawn failed for task %s (user=%s)",
                 task_id, user_id, exc_info=True,
             )
+            await _record_respawn_failure(config, user_id, task_id, task, exc)
 
     return True
+
+
+async def _record_respawn_failure(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    task: dict,
+    exc: BaseException,
+) -> None:
+    """Persist + surface a failed recurring respawn. Never raises.
+
+    Two independent best-effort legs so one broken subsystem can't hide the
+    other: the ``last_error`` stamp (durable on the task row, replicated to
+    clients by the ``/changes`` delta because we bump ``updated_at``) and a
+    notification-spine entry (Notification Center + Telegram).
+
+    ``last_error`` is a PLAINTEXT column, so only the exception *type* goes in —
+    the message may quote user content. The full traceback is already in the log.
+    """
+    detail = f"recurring respawn failed ({type(exc).__name__}) — series stopped"
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE tasks SET last_error = ?, updated_at = ? "
+                "WHERE id = ? AND user_id = ?",
+                (detail, now, task_id, user_id),
+            )
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "[tasks] could not record respawn failure on task %s (user=%s)",
+            task_id, user_id, exc_info=True,
+        )
+
+    try:
+        from lazyclaw.notifications.spine import notify
+
+        title = task.get("title") or "recurring task"
+        await notify(
+            config, user_id,
+            kind="task_respawn_failed",
+            title="Recurring task didn't reschedule",
+            # Title is user content — the spine encrypts title/body at rest.
+            body=(
+                f"“{title}” was completed but the next occurrence could not be "
+                f"created ({type(exc).__name__}). Re-create it to keep the "
+                "schedule alive."
+            ),
+            severity="important",
+            deep_link={"type": "task", "id": task_id},
+            # One alert per task per dedup window — a nightly cron hitting the
+            # same broken dependency must not spam the feed.
+            dedup_key=f"task_respawn_failed:{task_id}",
+        )
+    except Exception:
+        logger.warning(
+            "[tasks] could not notify about respawn failure for task %s "
+            "(user=%s)", task_id, user_id, exc_info=True,
+        )
 
 
 async def delete_task(
@@ -1201,6 +1669,69 @@ async def delete_task(
 # ---------------------------------------------------------------------------
 # Reminder job helpers
 # ---------------------------------------------------------------------------
+
+# How long a reminder job is protected from the orphan sweep. ``_create_reminder_job``
+# runs BEFORE the task row that references it exists, so a sweep firing inside
+# that gap would delete a perfectly good job.
+_ORPHAN_REMINDER_GRACE = timedelta(minutes=10)
+
+
+async def reap_orphan_reminder_jobs(config: Config, user_id: str) -> int:
+    """Delete past-due reminder jobs that no live, open task references.
+
+    Returns the number reaped.
+
+    A task-linked reminder job exists only as a HANDLE for ``complete_task`` /
+    ``update_task`` to cancel the reminder — the firing itself comes off the
+    tasks table in ``daemon._check_task_nagging``. The daemon's
+    ``_check_due_reminders`` therefore skips these rows with a bare ``continue``
+    that neither deletes them nor advances ``next_run``, so once one is stranded
+    it stays ``active`` with a past ``next_run`` FOREVER: every heartbeat tick
+    re-selects it (``next_run <= now``) and pays a decrypt to re-discover it
+    should be skipped. Nothing else can ever clean it up, because the only
+    deleters key off ``tasks.reminder_job_id``.
+
+    Stranding is easy: any path that marked a task done without going through
+    ``complete_task`` (the PATCH ``status='done'`` bypass did exactly that) left
+    its job behind. The live DB had one two days stale.
+
+    ``tasks.reminder_job_id`` is plaintext, so the orphan set is a plain
+    anti-join — no decryption, and it stays cheap as the table grows.
+    Deliberately conservative: only PAST-DUE jobs older than
+    ``_ORPHAN_REMINDER_GRACE`` are candidates.
+    """
+    cutoff = (datetime.now(timezone.utc) - _ORPHAN_REMINDER_GRACE).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "DELETE FROM agent_jobs "
+            "WHERE user_id = ? AND job_type = 'reminder' AND status = 'active' "
+            # datetime() on BOTH sides: compare instants, never strings.
+            # ``agent_jobs.created_at`` defaults to SQLite's own
+            # ``datetime('now')`` → "2026-07-27 14:16:01" (space, no zone),
+            # while our cutoff is ISO-8601 "…T…+00:00". Lexically the space
+            # (0x20) sorts before "T" (0x54), so EVERY freshly created job
+            # compared as older than any same-day cutoff and the grace window
+            # silently did nothing — the sweep would have raced task creation
+            # and deleted valid jobs.
+            "AND next_run IS NOT NULL AND datetime(next_run) <= datetime(?) "
+            "AND datetime(created_at) <= datetime(?) "
+            "AND id NOT IN ("
+            "  SELECT reminder_job_id FROM tasks "
+            "  WHERE user_id = ? AND reminder_job_id IS NOT NULL "
+            "    AND deleted_at IS NULL AND status != 'done'"
+            ")",
+            (user_id, now, cutoff, user_id),
+        )
+        await db.commit()
+    reaped = cur.rowcount or 0
+    if reaped:
+        logger.info(
+            "[tasks] reaped %d orphaned reminder job(s) for user %s",
+            reaped, user_id,
+        )
+    return reaped
+
 
 async def _create_reminder_job(
     config: Config,

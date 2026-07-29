@@ -28,6 +28,22 @@ void main() {
     test('null for date-only', () {
       expect(dueTimeParts('2026-06-08'), isNull);
     });
+    test('naive datetime is read as-is (already local)', () {
+      // A no-zone string is local wall-clock; `.toLocal()` must leave it put.
+      expect(dueTimeParts('2026-06-08T12:00:00'), (hour: 12, minute: 0));
+    });
+    test('UTC-aware reminder renders in local time (tz-agnostic round-trip)', () {
+      // The server stores reminders UTC-aware; the phone must show the user's
+      // LOCAL wall-clock. Build the input by round-tripping a known local
+      // instant so this holds on any machine zone (in Madrid noon → 10:00Z).
+      final local = DateTime(2026, 6, 8, 12, 0);
+      final utcAware = local.toUtc().toIso8601String();
+      expect(dueTimeParts(utcAware), (hour: 12, minute: 0));
+    });
+    test('Z-suffixed UTC reminder also converts to local', () {
+      final local = DateTime(2026, 6, 8, 8, 30);
+      expect(dueTimeParts(local.toUtc().toIso8601String()), (hour: 8, minute: 30));
+    });
   });
 
   group('formatClock12', () {

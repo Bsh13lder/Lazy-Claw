@@ -30,6 +30,14 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "gpt-4.1-mini": {"input": 0.0004, "output": 0.0016},
     "gpt-4.1": {"input": 0.002, "output": 0.008},
     # Anthropic — https://docs.anthropic.com/en/docs/about-claude/pricing
+    # Claude 5 generation. Fable 5 is the only tier priced above Opus.
+    # Sonnet 5 lists at $3/$15 with a $2/$10 intro rate through
+    # 2026-08-31 — the list price is used here so cost is never
+    # under-reported when the intro window closes.
+    "claude-opus-5": {"input": 0.005, "output": 0.025},
+    "claude-sonnet-5": {"input": 0.003, "output": 0.015},
+    "claude-fable-5": {"input": 0.010, "output": 0.050},
+    "claude-haiku-4-5": {"input": 0.001, "output": 0.005},
     "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
     "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
     # Opus dropped to $5/$25 per M at the 4.5 generation (was $15/$75).
@@ -70,6 +78,12 @@ _OPENAI_PRICING_URL = "https://platform.openai.com/docs/pricing"
 
 # Map provider pricing page model names → our MODEL_COSTS keys
 _ANTHROPIC_MODEL_MAP = {
+    "claude-opus-5": "claude-opus-5",
+    "claude-5-opus": "claude-opus-5",
+    "claude-sonnet-5": "claude-sonnet-5",
+    "claude-5-sonnet": "claude-sonnet-5",
+    "claude-fable-5": "claude-fable-5",
+    "claude-5-fable": "claude-fable-5",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-4-6-sonnet": "claude-sonnet-4-6",
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",

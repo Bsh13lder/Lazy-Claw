@@ -47,10 +47,20 @@ const List<ReminderOffsetOption> kReminderOffsetOptions = <ReminderOffsetOption>
 /// Default offset set when nothing is stored (the backend hasn't sent
 /// `reminder_offsets` yet, or prefs are absent/unparseable). MUST match the
 /// server default — `lazyclaw/settings/general.py` DEFAULT_GENERAL
-/// `"reminder_offsets": ["-2h", "-1h"]` — so an un-customised task fires the
+/// `"reminder_offsets": ["0m", "-2h", "-1h"]` — so an un-customised task fires the
 /// same advance reminders on the phone as the backend/Telegram side. Was
 /// `['-30m']`, which silently diverged from the server (T5).
-const List<String> kDefaultReminderOffsets = <String>['-2h', '-1h'];
+const List<String> kDefaultReminderOffsets = <String>['0m', '-2h', '-1h'];
+
+/// The canonical "fire AT the event" offset.
+///
+/// [TaskReminderService] ALWAYS schedules this one in addition to whatever the
+/// user selected: the default set above is advance-only, so out of the box a task
+/// due 08:00 buzzed at 06:00 and 07:00 and then went SILENT at 08:00 — the only
+/// at-time nudge was the server's Telegram nag, which app-only users never
+/// receive. It is added at SCHEDULE time (not migrated into the stored pref) so
+/// the user's Settings selection is never rewritten behind their back.
+const String kAtTimeReminderOffset = '0m';
 
 final RegExp _kOffsetGroup = RegExp(r'(\d+)([dhm])');
 

@@ -300,6 +300,45 @@ class EditMessageParams(BaseModel):
     )
 
 
+def build_url_fallback_row(
+    room_id: str, room_url: str, contact_name: str,
+) -> dict:
+    """Build the URL-mined stand-in row for a non-rendering sidebar.
+
+    When the user's tab is parked on a *conversation* view, Upwork's SPA
+    never renders the rooms-list sidebar, so extraction matches zero room
+    elements and we mine the open URL instead. The result LOOKS like an
+    inbox listing but carries no listing content.
+
+    2026-07-26: that ambiguity cost an 11-minute retry loop. The row had
+    no ``status``, so it reached ``empty_or_blocked_result`` never, and
+    the consuming skill could not distinguish "here is the one room I
+    could infer" from "here is your inbox". It reported "No Upwork
+    conversations found" while the thread sat one
+    ``get_conversation_messages`` call away.
+
+    The explicit ``status`` mirrors the ``empty_or_blocked`` contract
+    (page_state.py, 2026-06-10) so consumers branch on one vocabulary.
+    Kept a pure function so it is testable without a live ``page``.
+    """
+    return {
+        "room_id": room_id,
+        "room_url": room_url,
+        "contact_name": contact_name,
+        # Tag so the brain (and post-mortems) can tell this
+        # row didn't come from the rooms-list sidebar.
+        "source": "page_url_fallback",
+        "status": "sidebar_unavailable",
+        "hint": (
+            "The rooms sidebar did not render, so this row was mined "
+            "from the open conversation URL. It is NOT an inbox "
+            "listing — do not report it as the full set of "
+            "conversations. Read this thread with "
+            "upwork_get_conversation(room_id=...)."
+        ),
+    }
+
+
 async def get_messages(params: MessagesParams) -> list[dict] | dict:
     """Get messages from Upwork inbox.
 
@@ -351,7 +390,8 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     try:
         await page.wait_for_selector(
             '[data-test="rooms-panel"], [data-test="empty-state"], '
-            '.rooms-panel-body, [data-test="room-item"]',
+            '.rooms-panel-body, [data-test="room-list-item"], '
+            '[data-test="room-item"]',
             timeout=_ROOMS_PANEL_WAIT_MS,
         )
     except Exception as exc:
@@ -369,7 +409,16 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
     # it matches Upwork's whole-page chrome wrapper, not individual rows.
     # This is the upstream-original (fork commit 3009e69) chain that worked
     # reliably on MiniMax before the regression introduced in 12d3593.
-    _room_selector = '[data-test="room-item"], .room-item, .conversation-item'
+    # `[data-test="room-list-item"]` FIRST — verified live 2026-07-28 as
+    # the hook Upwork actually renders. The legacy `room-item` matched
+    # ZERO rows on a fully-mounted panel (2830 DOM elements), which is
+    # why every call fell through to the URL-mining fallback and shipped
+    # a contentless synthetic row. The old names are kept behind it so a
+    # rollback or an A/B'd layout still resolves.
+    _room_selector = (
+        '[data-test="room-list-item"], a[href*="/rooms/room_"], '
+        '[data-test="room-item"], .room-item, .conversation-item'
+    )
 
     # Selector-resilience widening (2026-07-03) — UNVERIFIED against
     # Upwork's live current DOM, needs live-capture confirmation. Same
@@ -518,14 +567,9 @@ async def get_messages(params: MessagesParams) -> list[dict] | dict:
                 and title.lower() not in {"messages", "upwork", "messages | upwork"}
                 else ""
             )
-            synthetic = {
-                "room_id": room_id,
-                "room_url": cur_url,
-                "contact_name": contact_name,
-                # Tag so the brain (and post-mortems) can tell this
-                # row didn't come from the rooms-list sidebar.
-                "source": "page_url_fallback",
-            }
+            synthetic = build_url_fallback_row(
+                room_id, cur_url, contact_name,
+            )
             logger.info(
                 "get_messages: returning URL-derived synthetic conv "
                 "room_id=%s contact_name=%r (sidebar empty, "
@@ -555,7 +599,11 @@ async def _extract_conversation(el) -> dict | None:
     # last-message preview, and timestamp. Specific selectors first,
     # then defensive row-text parsing so we never silently drop a real
     # conversation just because Upwork moved the name tag.
+    # `room-name` FIRST — verified live 2026-07-28 as the current hook
+    # ("James Blue, James Blue"); `contact-name` / `user-name` resolved
+    # to nothing on the real row. Legacy hooks kept behind it.
     name_el = await el.query_selector(
+        '[data-test="room-name"], '
         '[data-test="contact-name"], [data-test="user-name"], '
         '[data-test="room-contact-name"], '
         '[class*="contact-name"], [class*="contactName"], '
@@ -643,7 +691,23 @@ async def _extract_conversation(el) -> dict | None:
     # trailing segment, alphanumeric /nx/messages/<slug>, bare inbox URL
     # — is rejected. Partial conv is safer than seeding downstream
     # with a non-room URL.
-    candidates = await el.query_selector_all('a[href*="/messages/"]')
+    candidates = list(await el.query_selector_all('a[href*="/messages/"]'))
+
+    # The 2026 rooms list renders each row AS the anchor:
+    #   <a data-test="room-list-item" href="/ab/messages/rooms/room_…">
+    # `query_selector_all` searches DESCENDANTS ONLY, so on such a row it
+    # returns [] and every pass below fails on a row that plainly carries
+    # the href — the row is then dropped for "no resolvable room_id".
+    # Verified live 2026-07-28 (row tag=A, zero child anchors).
+    # Prepended so the row's OWN href wins Pass 1 over any attachment
+    # link nested inside it.
+    try:
+        _self_href = await el.get_attribute("href")
+    except Exception:  # noqa: BLE001 — non-anchor rows simply have none
+        _self_href = None
+    if _self_href and "/messages/" in _self_href:
+        candidates = [el, *candidates]
+
     chosen_href: str | None = None
     chosen_room_id: str | None = None
 

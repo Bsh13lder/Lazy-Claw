@@ -18,20 +18,31 @@ logs:
 # Open Claude Code's OAuth login flow inside the running container.
 # Credential lands in the persistent `claude_creds` volume and survives
 # `docker compose down` and image rebuilds. See scripts/docker-entrypoint.sh.
+# `claude /login` was removed as a CLI argument — on 2.1.197 it answers
+# "/login isn't available in this environment" and exits 0, so the old
+# target looked like it worked while leaving the token expired. The
+# subcommand is `claude auth login`. ANTHROPIC_API_KEY is blanked for the
+# duration because a set API key outranks the claude.ai OAuth login.
 claude-login:
 	@docker compose ps --services --filter status=running | grep -qx lazyclaw \
 	    || (echo "lazyclaw container is not running. Run 'make up' first." && exit 1)
-	docker exec -it lazyclaw claude /login
+	docker exec -it -e ANTHROPIC_API_KEY= -e ANTHROPIC_AUTH_TOKEN= lazyclaw claude auth login
 
 # Quick check: is the CLI logged in inside the container?
+# Checks the token's EXPIRY, not just that the file exists. The old
+# file-presence check reported "logged in" for a token that had been
+# dead for 37 days (2026-07-25 outage) — and `claude auth status` is no
+# better, it also answers loggedIn:true on an expired token.
 claude-status:
-	@docker exec lazyclaw sh -c '\
-	    if [ -s /home/lazyclaw/.claude/.credentials.json ]; then \
-	        echo "claude CLI: logged in (credential present in volume)"; \
-	    else \
-	        echo "claude CLI: NOT logged in. Run: make claude-login"; \
-	        exit 1; \
-	    fi'
+	@docker exec lazyclaw python3 -c 'import json,sys,time; \
+	    p="/home/lazyclaw/.claude/.credentials.json"; \
+	    d=json.load(open(p)); o=d.get("claudeAiOauth") or d; \
+	    exp=int(o.get("expiresAt") or 0); now=int(time.time()*1000); \
+	    ok=exp>now or bool(str(o.get("refreshToken") or "").strip()); \
+	    print("claude CLI: logged in (token valid)" if ok \
+	        else "claude CLI: TOKEN EXPIRED and not refreshable. Run: make claude-login"); \
+	    sys.exit(0 if ok else 1)' 2>/dev/null \
+	  || (echo "claude CLI: NOT logged in or credential unreadable. Run: make claude-login" && exit 1)
 
 # ── Host Brave bridge — auto-start helper for Docker on macOS ────────────────
 # `make host-bridge`  installs a launchd plist that auto-launches your real

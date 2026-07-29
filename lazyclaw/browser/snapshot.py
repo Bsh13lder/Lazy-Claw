@@ -460,11 +460,20 @@ class SnapshotManager:
         if not snapshot.landmarks:
             return (
                 f"Page: {snapshot.title} | {snapshot.url}\n\n"
-                f"⚠ PAGE IS BLANK — 0 elements detected. This usually means:\n"
-                f"1. The page requires LOGIN (session expired) — ask the user to log in\n"
-                f"2. The page is still loading — try browser(action='snapshot') after waiting\n"
-                f"3. JavaScript blocked the content\n"
-                f"Do NOT pretend you can see content. Tell the user the page is blank."
+                f"⚠ PAGE IS BLANK — 0 accessible elements detected.\n"
+                f"If you arrived here via action='open', a reload was ALREADY "
+                f"attempted automatically — do not just retry 'open'.\n"
+                f"Likely causes, and what to do:\n"
+                f"1. LOGIN required (session expired) — ask the user to sign in\n"
+                f"2. Bot / CAPTCHA wall, or a failed navigation that left an "
+                f"empty document — nothing is rendered, so vision won't help "
+                f"either; report it\n"
+                f"3. The page DOES render visually but exposes no accessibility "
+                f"tree (canvas, custom widgets). Read it VISUALLY instead: "
+                f"browser(action='ask_vision', question='<what you need>'), "
+                f"and browser(action='scroll') to page through long content\n"
+                f"Do NOT pretend you can see content. If it is genuinely blank, "
+                f"say so plainly."
             )
 
         lines = [f"Page: {snapshot.title} | {_short_url(snapshot.url)}"]

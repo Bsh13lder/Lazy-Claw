@@ -236,7 +236,7 @@ async def test_auto_assign_empty_inbox(cfg):
     assert "empty" in msg.lower() or "no unassigned" in msg.lower()
 
 
-def test_tasks_specialist_allowlists_new_budget_skills():  # noqa: remove asyncio mark
+def test_tasks_specialist_allowlists_new_budget_skills():
     from pathlib import Path
     text = Path("lazyclaw/teams/specialists/tasks_specialist.md").read_text()
     for name in ("move_expense", "auto_assign_inbox", "list_projects", "list_budget_topups"):

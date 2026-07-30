@@ -140,9 +140,13 @@ def _normalize_reminder_to_utc(value: str | None, user_id: str | None) -> str | 
     the agent / ``nl_time`` paths already emit UTC-aware via ``_to_utc_iso``. A
     naive ``08:00`` left as-is sorts like 08:00 UTC and fired ~2h late in Madrid.
 
-    Already-aware values pass through unchanged, so this is idempotent (an edit
-    that re-sends the stored value won't double-shift). Unparseable input is
-    returned untouched — ``_validate_iso_dt`` is the gate-keeper for that.
+    An AWARE input is re-anchored to ``+00:00`` (same instant) rather than
+    passed through: the heartbeat's due-check compares ISO strings lexically,
+    and a ``+02:00`` string sorts by its wall-clock digits against a ``+00:00``
+    "now" — smart-intake used to store ``10:00+02:00`` and the reminder fired
+    at 10:00 UTC, exactly 2h late in Madrid. ``astimezone(utc)`` is idempotent,
+    so an edit that re-sends the stored value won't double-shift. Unparseable
+    input is returned untouched — ``_validate_iso_dt`` is the gate-keeper.
     """
     if not value:
         return value
@@ -151,10 +155,22 @@ def _normalize_reminder_to_utc(value: str | None, user_id: str | None) -> str | 
     except (ValueError, TypeError):
         return value
     if dt.tzinfo is not None:
-        return value
+        return dt.astimezone(timezone.utc).isoformat()
     from lazyclaw.lazybrain.timezone_util import user_tz
 
     return dt.replace(tzinfo=user_tz(user_id)).astimezone(timezone.utc).isoformat()
+
+
+def normalize_reminder_to_utc(value: str | None, user_id: str | None) -> str | None:
+    """Public boundary alias for :func:`_normalize_reminder_to_utc`.
+
+    Callers that derive OTHER timestamps from ``reminder_at`` (the REST create
+    route's pre-reminder derivation) must normalize FIRST with the exact same
+    convention the store applies at write time — deriving from the raw client
+    value read mobile's naive Madrid wall-clock as UTC and every advance
+    reminder fired 2h late.
+    """
+    return _normalize_reminder_to_utc(value, user_id)
 
 
 def _compute_reminder_offset_minutes(
@@ -1032,7 +1048,8 @@ async def update_task(
                 from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
 
                 recomputed = await resolve_pre_reminders(
-                    config, user_id, reminder_at=new_rem, explicit=None,
+                    config, user_id, reminder_at=new_rem,
+                    due_date=new_due, explicit=None,
                 )
                 set_clauses.append("pre_reminders = ?")
                 params.append(json.dumps(sorted(set(recomputed))) if recomputed else None)
@@ -1485,7 +1502,8 @@ async def complete_task(
             from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
 
             next_pre_reminders = await resolve_pre_reminders(
-                config, user_id, reminder_at=next_reminder, explicit=None,
+                config, user_id, reminder_at=next_reminder,
+                due_date=next_date, explicit=None,
             )
 
             new_task = await create_task(

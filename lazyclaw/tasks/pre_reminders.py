@@ -26,7 +26,11 @@ logger = logging.getLogger(__name__)
 
 # Fallback offsets used only when the settings read fails. Mirrors
 # ``settings.general.DEFAULT_GENERAL["reminder_offsets"]``.
-_FALLBACK_OFFSETS: tuple[str, ...] = ("-2h", "-1h")
+# One advance ping, not two — trimmed 2026-07-30 as part of the noise pass:
+# a single timed task used to generate 2 pre-reminders + 5 nags + 3 local
+# alarms + feed pops (~14 pings/day). The user can widen reminder_offsets in
+# Settings; this is only the nothing-configured fallback.
+_FALLBACK_OFFSETS: tuple[str, ...] = ("-30m",)
 
 # Negative relative offset like "-2h", "-30m", "-1d2h30m".
 _OFFSET_RE = re.compile(
@@ -56,14 +60,23 @@ def parse_offset_against(value: str, base: datetime) -> datetime | None:
 
 
 def parse_iso_datetime(value: str) -> datetime | None:
-    """Parse an ISO-8601 datetime string → UTC-aware datetime, or ``None``."""
+    """Parse an ISO-8601 datetime string → UTC-aware datetime, or ``None``.
+
+    An aware input is converted to UTC (the docstring always promised this;
+    until 2026-07-30 a ``+02:00`` value kept its offset and every timestamp
+    derived from it inherited the same 2h skew against the daemon's lexical
+    string compare). A naive input is still read as UTC — by the time values
+    reach this module they are canonical UTC-aware (``_normalize_reminder_to_utc``
+    runs at every write boundary); naive-as-UTC only remains as the least-wrong
+    reading for un-migrated legacy strings.
+    """
     try:
         dt = datetime.fromisoformat(value.strip())
     except (ValueError, TypeError, AttributeError):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.astimezone(timezone.utc)
 
 
 async def _load_offsets(config: Config, user_id: str) -> list[str]:
@@ -86,11 +99,31 @@ async def _load_offsets(config: Config, user_id: str) -> list[str]:
         return list(_FALLBACK_OFFSETS)
 
 
+def _timed_due_instant(due_date: str | None, user_id: str) -> datetime | None:
+    """The UTC instant of a TIMED due date, or None for date-only/absent.
+
+    A naive timed due is the user's local wall-clock (mobile writes
+    ``YYYY-MM-DDTHH:MM:SS``); an aware one converts directly.
+    """
+    if not due_date or "T" not in due_date:
+        return None
+    try:
+        dt = datetime.fromisoformat(due_date.strip())
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        from lazyclaw.lazybrain.timezone_util import user_tz
+
+        dt = dt.replace(tzinfo=user_tz(user_id))
+    return dt.astimezone(timezone.utc)
+
+
 async def resolve_pre_reminders(
     config: Config,
     user_id: str,
     *,
     reminder_at: str | None,
+    due_date: str | None = None,
     explicit: list[str] | None = None,
 ) -> list[str]:
     """Compute advance-reminder ISO timestamps for a task.
@@ -100,16 +133,27 @@ async def resolve_pre_reminders(
     - Otherwise offsets come from the user's ``reminder_offsets`` setting and
       apply to EVERY task with a ``reminder_at`` (Proton-Calendar style).
 
+    Offsets are anchored on the EVENT: a TIMED ``due_date`` when present,
+    else ``reminder_at``. The phone's local alarms use exactly this
+    precedence (``reminderBaseTime`` in the mobile app), so both surfaces
+    now ping at the SAME instants — anchoring on ``reminder_at`` while the
+    phone anchored on the due time made the two ladders interleave into
+    seemingly random pings ("-2h" firing at 05:30 while the phone rang at
+    06:00).
+
     Returns a sorted, de-duplicated list of absolute ISO-8601 timestamps that
-    fall strictly between "now" and ``reminder_at``. Returns ``[]`` when there
-    is no reminder time, no offsets, or nothing resolves to a future-but-
-    pre-due instant. Never mutates its inputs.
+    fall strictly between "now" and the anchor, excluding the reminder
+    instant itself (the at-time reminder is the nag ladder's entry 0 — a
+    pre-reminder landing on the same minute would double-ping). Returns
+    ``[]`` when there is no reminder time, no offsets, or nothing resolves
+    to a future-but-pre-due instant. Never mutates its inputs.
     """
     if not reminder_at:
         return []
-    base = parse_iso_datetime(reminder_at)
-    if base is None:
+    reminder_instant = parse_iso_datetime(reminder_at)
+    if reminder_instant is None:
         return []
+    base = _timed_due_instant(due_date, user_id) or reminder_instant
 
     raw = explicit if explicit is not None else await _load_offsets(config, user_id)
     if not raw:
@@ -121,7 +165,7 @@ async def resolve_pre_reminders(
         if not isinstance(entry, str):
             continue
         dt = parse_offset_against(entry, base) or parse_iso_datetime(entry)
-        if dt and now < dt < base:
+        if dt and now < dt < base and dt != reminder_instant:
             out.append(dt.isoformat())
     resolved = sorted(set(out))
     logger.debug(

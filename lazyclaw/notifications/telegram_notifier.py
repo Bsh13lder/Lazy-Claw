@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import html
 import logging
-import re
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -26,39 +25,12 @@ _KIND_TITLES: dict[str, str] = {
 }
 
 
-def _strip_html(text: str) -> str:
-    """Flatten the notifier's HTML payload to plain text for the in-app feed."""
-    no_tags = re.sub(r"<[^>]+>", "", text or "")
-    return html.unescape(no_tags).strip()
-
-
-def _strip_markdown(text: str) -> str:
-    """Remove common markdown formatting for plain-text Telegram messages.
-
-    Closed pairs are stripped first; any orphan `**` runs left after a
-    mid-stream truncation upstream are then collapsed, so the user never
-    sees raw `**foo` leak through.
-    """
-    # Bold: **text** or __text__
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
-    text = re.sub(r'__(.+?)__', r'\1', text, flags=re.DOTALL)
-    # Italic: *text* or _text_
-    text = re.sub(r'\*(.+?)\*', r'\1', text, flags=re.DOTALL)
-    # Strikethrough: ~~text~~
-    text = re.sub(r'~~(.+?)~~', r'\1', text, flags=re.DOTALL)
-    # Inline code: `text`
-    text = re.sub(r'`(.+?)`', r'\1', text, flags=re.DOTALL)
-    # Headers: ### text → text
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # Links: [text](url) → text (url)
-    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
-    # Bullet points: - text → • text
-    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
-    # Orphan bold/strike runs (truncation leftovers). `**` and `~~` never
-    # appear as literal content in real chat output, so it's safe to drop.
-    text = re.sub(r'\*\*+', '', text)
-    text = re.sub(r'~~+', '', text)
-    return text
+# Canonical implementations live in feed_store (the record-time choke point
+# also needs them); these aliases keep this module's call sites unchanged.
+from lazyclaw.notifications.feed_store import (  # noqa: E402
+    strip_html as _strip_html,
+    strip_markdown as _strip_markdown,
+)
 
 
 def _format_stats_html(meta: dict) -> str:

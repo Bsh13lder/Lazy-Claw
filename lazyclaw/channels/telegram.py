@@ -1279,12 +1279,20 @@ class TelegramAdapter(ChannelAdapter):
                 ok = await complete_task(self._config, owner_id, task_id)
                 msg = "✅ Done" if ok else "⚠️ Could not complete"
             elif action == "snooze":
+                from lazyclaw.tasks.timezone import get_user_tz
                 new_at = _dt.now(timezone.utc) + _td(hours=1)
                 ok = await update_task(
                     self._config, owner_id, task_id,
                     reminder_at=new_at.isoformat(),
                 )
-                msg = f"⏰ Snoozed 1h → {new_at.astimezone().strftime('%H:%M')}" if ok else "⚠️ Snooze failed"
+                # Owner's tz, like the 'tomorrow' branch below — a bare
+                # astimezone() is the SERVER clock and shows the wrong
+                # wall-clock on any non-Madrid container.
+                snooze_tz = await get_user_tz(self._config, owner_id)
+                msg = (
+                    f"⏰ Snoozed 1h → {new_at.astimezone(snooze_tz).strftime('%H:%M')}"
+                    if ok else "⚠️ Snooze failed"
+                )
             elif action == "tomorrow":
                 from lazyclaw.tasks.timezone import get_user_tz
                 tz = await get_user_tz(self._config, owner_id)

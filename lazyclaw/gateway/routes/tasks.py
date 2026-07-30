@@ -29,6 +29,7 @@ from lazyclaw.tasks.store import (
     get_task,
     get_task_changes,
     list_tasks,
+    normalize_reminder_to_utc,
     set_steps,
     toggle_step,
     update_task,
@@ -169,13 +170,21 @@ async def create_task_route(
     steps_payload = (
         [s.model_dump() for s in body.steps] if body.steps else None
     )
+    # Normalize BEFORE deriving: mobile posts naive Madrid wall-clock, and
+    # deriving offsets from the raw value read it as UTC — the "2h before"
+    # heads-up landed exactly AT the reminder. ``create_task`` re-normalizes
+    # (idempotent), so both the stored reminder and its advance reminders are
+    # computed from the same UTC instant. The PATCH path already does this
+    # (``update_task`` re-derives after normalizing).
+    reminder_at = normalize_reminder_to_utc(body.reminder_at, user.id)
     # Derive advance reminders from the user's reminder_offsets (or honour an
     # explicit list) so REST/mobile-created timed tasks fire the same
     # Proton-Calendar-style advance reminders as the chat/Telegram path.
     pre_reminders = await resolve_pre_reminders(
         _config,
         user.id,
-        reminder_at=body.reminder_at,
+        reminder_at=reminder_at,
+        due_date=body.due_date,
         explicit=body.pre_reminders,
     )
     task = await create_task(
@@ -187,7 +196,7 @@ async def create_task_route(
         priority=body.priority,
         owner="user",
         due_date=body.due_date,
-        reminder_at=body.reminder_at,
+        reminder_at=reminder_at,
         recurring=body.recurring,
         tags=body.tags,
         steps=steps_payload,
@@ -492,7 +501,11 @@ async def parse_task_route(
     if body.mode == "ai":
         draft = await ai_parse_task(_config, user.id, body.text)
     else:
-        draft = regex_parse_full(body.text)
+        # Thread the user's tz like the reschedule route below — without it
+        # the parser falls back to the hard-coded Madrid default and "today
+        # 9am" lands wrong the moment the settings timezone diverges.
+        from lazyclaw.tasks.timezone import get_user_tz
+        draft = regex_parse_full(body.text, tz=await get_user_tz(_config, user.id))
     return {"draft": draft, "mode": body.mode}
 
 

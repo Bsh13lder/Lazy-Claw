@@ -423,6 +423,7 @@ async def _run_headless(
 
             async def _telegram_push_fn(
                 text: str, reply_markup=None, dedup_key: str | None = None,
+                dedup_window=None,
             ) -> None:
                 # Telegram delivery closure — only awaited when the user's
                 # channel toggle includes Telegram. The chat-id guard lives
@@ -446,7 +447,7 @@ async def _run_headless(
                     )
                     await deliver_heartbeat_push(
                         config, text, telegram_send=_send_telegram,
-                        dedup_key=dedup_key,
+                        dedup_key=dedup_key, dedup_window=dedup_window,
                     )
                 except Exception as exc:
                     logger.warning("Telegram push failed: %s", exc)

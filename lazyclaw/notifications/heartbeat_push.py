@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import timedelta
 from typing import Any, Awaitable, Callable
 
 from lazyclaw.notifications.channel import (
@@ -66,6 +67,7 @@ async def deliver_heartbeat_push(
     telegram_send: Callable[[], Awaitable[None]],
     kind: str = "heartbeat",
     dedup_key: str | None = None,
+    dedup_window: timedelta | None = None,
 ) -> None:
     """Route one heartbeat push through the user's notification channel.
 
@@ -105,6 +107,7 @@ async def deliver_heartbeat_push(
             await record_notification(
                 config, admin_uid, kind, _derive_push_title(text), text,
                 dedup_key=dedup_key or _dedup_key(kind, text),
+                dedup_window=dedup_window,
             )
         except Exception:
             logger.warning("heartbeat push feed record failed", exc_info=True)

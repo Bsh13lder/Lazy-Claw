@@ -166,23 +166,37 @@ class RescheduleTaskSkill(BaseSkill):
             updates["due_date"] = None
             applied.append("deadline cleared")
         else:
+            # Both branches confirm a time back to the user — resolve their
+            # zone once so the shown wall-clock matches when it actually
+            # fires ("snoozed → Wed 14:00" used to show the UTC clock, 2h
+            # off the real Madrid fire time).
+            user_tz = await get_user_tz(self._config, user_id)
             # Snooze (relative offset from now)
             snooze_dt = _parse_snooze(phrase)
             if snooze_dt is not None:
                 updates["reminder_at"] = snooze_dt.isoformat()
-                updates["due_date"] = snooze_dt.date().isoformat()
-                applied.append(f"snoozed → {snooze_dt.strftime('%a %H:%M')}")
+                local_snooze = snooze_dt.astimezone(user_tz)
+                updates["due_date"] = local_snooze.date().isoformat()
+                applied.append(f"snoozed → {local_snooze.strftime('%a %H:%M')}")
             else:
                 # Fall through to the NL time parser ("Friday 10am",
                 # "tomorrow 9", "next Monday"). Pass user tz so wall
                 # clocks land correctly for non-UTC users.
-                user_tz = await get_user_tz(self._config, user_id)
                 parsed = nl_time_parse(phrase, tz=user_tz)
                 if parsed.reminder_at:
                     updates["reminder_at"] = parsed.reminder_at
                     if parsed.due_date:
                         updates["due_date"] = parsed.due_date
-                    applied.append(f"reminder → {parsed.reminder_at}")
+                    shown = parsed.reminder_at
+                    try:
+                        shown = (
+                            datetime.fromisoformat(parsed.reminder_at)
+                            .astimezone(user_tz)
+                            .strftime("%a %d %b · %H:%M")
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                    applied.append(f"reminder → {shown}")
 
         if not updates:
             return (
@@ -243,7 +257,7 @@ class AskAboutTaskSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         from lazyclaw.skills.builtin.task_manager import _fuzzy_match_task
         from lazyclaw.tasks.store import list_tasks
-        from lazyclaw.tasks.timezone import get_user_tz
+        from lazyclaw.tasks.timezone import get_user_tz, parse_user_dt
 
         task_name = (params.get("task_name") or "").strip()
         if not task_name:
@@ -269,13 +283,14 @@ class AskAboutTaskSkill(BaseSkill):
             lines.append(f"📅 Due: {match['due_date']}")
 
         if match.get("reminder_at"):
-            try:
-                rem_dt = datetime.fromisoformat(match["reminder_at"])
-                if rem_dt.tzinfo is None:
-                    rem_dt = rem_dt.replace(tzinfo=timezone.utc)
+            # parse_user_dt reads a naive stored value as the USER's
+            # wall-clock (the write-side convention) — reading it as UTC
+            # displayed legacy pre-2026-07-25 rows 2h late.
+            rem_dt = parse_user_dt(match["reminder_at"], user_tz)
+            if rem_dt is not None:
                 local = rem_dt.astimezone(user_tz)
                 lines.append(f"⏰ Reminder: {local.strftime('%a %d %b · %H:%M')}")
-            except (ValueError, TypeError):
+            else:
                 lines.append(f"⏰ Reminder: {match['reminder_at']}")
 
         if match.get("recurring"):

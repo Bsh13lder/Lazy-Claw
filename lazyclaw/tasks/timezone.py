@@ -6,11 +6,13 @@ Single source of truth for "what wall-clock time is this user in?". Reads
 default), then to UTC if even Madrid fails to load.
 
 Why a tasks-local helper rather than reusing ``lazybrain.timezone_util``:
-that one is sync and env-only by design (its callers can't await). Tasks
-need an async, per-user-aware lookup so a Telegram-only user with a
-different tz from the Web user gets the right wall clock for their
-reminders. Both helpers share the same fallback chain so they can't
-disagree.
+that one is sync (its callers can't await). Tasks need an async,
+per-user-aware lookup so a Telegram-only user with a different tz from the
+Web user gets the right wall clock for their reminders. Every successful
+settings read here is published into ``timezone_util``'s write-through
+cache (``remember_user_tz``), so the sync firing-math paths resolve the
+SAME zone as the display paths instead of silently staying on the env
+default when the user changes their settings timezone.
 """
 
 from __future__ import annotations
@@ -61,8 +63,14 @@ async def get_user_tz(config: Config, user_id: str | None) -> ZoneInfo:
     except Exception:
         logger.debug("get_user_tz: settings lookup failed", exc_info=True)
         return _fallback_tz()
-    tz = _safe_zoneinfo(settings.get("timezone"))
+    name = settings.get("timezone")
+    tz = _safe_zoneinfo(name)
     if tz is not None:
+        try:
+            from lazyclaw.lazybrain.timezone_util import remember_user_tz
+            remember_user_tz(user_id, name)
+        except Exception:
+            logger.debug("get_user_tz: tz cache publish failed", exc_info=True)
         return tz
     return _fallback_tz()
 

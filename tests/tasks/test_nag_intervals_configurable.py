@@ -96,15 +96,15 @@ async def _run_ladder_to_exhaustion(cfg: Config, task_id: str, rounds: int = 8) 
     return await _nag_count(cfg, task_id)
 
 
-async def test_default_matches_the_historical_ladder(cfg) -> None:
-    """Default behaviour is unchanged for anyone who never configures it."""
-    assert DEFAULT_GENERAL["nag_intervals"] == [0, 15, 30, 60, 60]
+async def test_default_matches_the_quiet_ladder(cfg) -> None:
+    """The quiet default (2026-07-30 noise pass): at-time + two escalations."""
+    assert DEFAULT_GENERAL["nag_intervals"] == [0, 15, 30]
 
     gen = await get_general_settings(cfg, "u1")
-    assert gen["nag_intervals"] == [0, 15, 30, 60, 60]
+    assert gen["nag_intervals"] == [0, 15, 30]
 
     task_id = await _overdue_task(cfg)
-    assert await _run_ladder_to_exhaustion(cfg, task_id) == 5
+    assert await _run_ladder_to_exhaustion(cfg, task_id) == 3
 
 
 async def test_single_entry_gives_one_reminder_and_no_escalation(cfg) -> None:

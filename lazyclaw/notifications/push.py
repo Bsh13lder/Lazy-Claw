@@ -50,11 +50,19 @@ async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
 
         if should_record_feed(channel):
             try:
-                from lazyclaw.notifications.feed_store import record_notification
+                from lazyclaw.notifications.feed_store import (
+                    record_notification,
+                    strip_markdown,
+                )
 
+                # Skill pushes are Markdown-formatted for Telegram; the feed
+                # renders verbatim, so flatten it here (record_notification's
+                # choke point only strips HTML — Markdown stripping is opt-in
+                # because it can mangle non-Markdown content).
+                plain = strip_markdown(text)
                 await record_notification(
                     config, admin_uid, "push",
-                    _derive_push_title(text), text,
+                    _derive_push_title(plain), plain,
                 )
             except Exception:
                 logger.warning("push_telegram feed record failed", exc_info=True)

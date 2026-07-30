@@ -299,7 +299,9 @@ def _validate_deadline(value: Any, user_tz: Any = None) -> str | None:
         dt = dt.replace(tzinfo=user_tz or timezone.utc)
     if dt <= datetime.now(timezone.utc):
         return None
-    return dt.isoformat()
+    # Serialize in UTC: a '+02:00' string stored verbatim compared LEXICALLY
+    # against the daemon's '+00:00' now-string and fired exactly 2h late.
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _validate_category(value: Any) -> str | None:

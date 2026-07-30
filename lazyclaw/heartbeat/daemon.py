@@ -9,7 +9,7 @@ import os
 import shutil
 import signal
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lazyclaw.config import Config
@@ -28,6 +28,14 @@ from lazyclaw.runtime.browser_turn_lock import (
 from lazyclaw.notifications.dispatch import deliver
 
 logger = logging.getLogger(__name__)
+
+# Feed-collapse window for one task OCCURRENCE. Every push of a single dose —
+# pre-reminders through the last nag — shares dedup_key ``task:<id>``, but the
+# feed's default 30-min window is SHORTER than the gaps inside the ladder, so
+# one occurrence still split into ~5 Notification Center rows. 12h spans any
+# ladder the settings allow while a next-day occurrence (recurring respawns
+# mint a fresh task id → fresh key) always gets its own row.
+_TASK_DEDUP_WINDOW = timedelta(hours=12)
 
 
 def _tags_from_raw(raw: object) -> list[str]:
@@ -1551,10 +1559,13 @@ class HeartbeatDaemon:
                     svc = ctx.get("service", "watcher")
                     if self._telegram_push:
                         try:
+                            # Plain text: this push has no parse_mode on the
+                            # Telegram leg and also lands in the phone feed —
+                            # HTML tags were literal on both.
                             await self._telegram_push(
-                                f"\U0001f441️ Watching <b>{svc}</b> · baseline "
+                                f"\U0001f441️ Watching {svc} · baseline "
                                 f"{baseline} message{'s' if baseline != 1 else ''} "
-                                f"recorded. Only <i>new</i> messages will notify."
+                                f"recorded. Only new messages will notify."
                             )
                         except Exception:
                             logger.debug("baseline push failed", exc_info=True)
@@ -1787,11 +1798,17 @@ class HeartbeatDaemon:
 
         # Find all users who have tasks with due reminders
         async with db_session(self._config) as db:
+            # datetime() on both sides: a bare string compare is lexical,
+            # so any non-'+00:00' offset shape (legacy rows, foreign
+            # writers) sorts by wall-clock digits and fires hours late.
+            # SQLite's datetime() honours ISO offsets and compares the
+            # actual instants (same hardening as reap_orphan_reminder_jobs).
             cursor = await db.execute(
                 "SELECT DISTINCT user_id FROM tasks "
                 "WHERE status IN ('todo', 'in_progress') "
                 "AND deleted_at IS NULL "
-                "AND reminder_at IS NOT NULL AND reminder_at <= ?",
+                "AND reminder_at IS NOT NULL "
+                "AND datetime(reminder_at) <= datetime(?)",
                 (now_iso,),
             )
             user_ids = [r[0] for r in await cursor.fetchall()]
@@ -1813,7 +1830,8 @@ class HeartbeatDaemon:
                     "FROM tasks "
                     "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
                     "AND deleted_at IS NULL "
-                    "AND reminder_at IS NOT NULL AND reminder_at <= ? "
+                    "AND reminder_at IS NOT NULL "
+                    "AND datetime(reminder_at) <= datetime(?) "
                     "AND nag_count < ?",
                     (user_id, now_iso, len(intervals)),
                 )
@@ -1978,13 +1996,20 @@ class HeartbeatDaemon:
                     await self._telegram_push(
                         msg_text, reply_markup=keyboard,
                         dedup_key=f"task:{task_id}",
+                        dedup_window=_TASK_DEDUP_WINDOW,
                     )
                 except TypeError:
                     logger.debug("Telegram keyboard not supported, sending plain text", exc_info=True)
-                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
+                    await self._telegram_push(
+                        msg_text, dedup_key=f"task:{task_id}",
+                        dedup_window=_TASK_DEDUP_WINDOW,
+                    )
                 except ImportError:
                     logger.debug("Telegram library not available for keyboard, sending plain text")
-                    await self._telegram_push(msg_text, dedup_key=f"task:{task_id}")
+                    await self._telegram_push(
+                        msg_text, dedup_key=f"task:{task_id}",
+                        dedup_window=_TASK_DEDUP_WINDOW,
+                    )
 
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
@@ -2004,7 +2029,6 @@ class HeartbeatDaemon:
         heads-up notifications; the at-time reminder (with Done/Snooze/
         Tomorrow buttons) fires separately when ``reminder_at`` lands.
         """
-        import html as _html
         import json
         from datetime import timedelta
 
@@ -2030,7 +2054,13 @@ class HeartbeatDaemon:
             except (json.JSONDecodeError, TypeError):
                 logger.debug("bad pre_reminders JSON on task %s, skipping", task_id)
                 continue
-            due = [t for t in pending if t and t <= now_iso]
+            # Compare INSTANTS, not strings — a lexical compare reads any
+            # non-'+00:00' entry by its wall-clock digits and fires late.
+            from lazyclaw.tasks.pre_reminders import parse_iso_datetime as _parse_pre
+            due = [
+                t for t in pending
+                if t and (dt := _parse_pre(t)) is not None and dt <= now
+            ]
             if not due:
                 continue
 
@@ -2053,14 +2083,18 @@ class HeartbeatDaemon:
                 pri_icon = {"urgent": "\U0001f534", "high": "\U0001f7e0"}.get(
                     priority or "", "",
                 )
-                msg = (
-                    f"⏰ {pri_icon} <b>{_html.escape(title)}</b>\n"
-                    f"<i>{_html.escape(lead)}</i>"
-                )
+                # Plain text on purpose: this string reaches Telegram via a
+                # closure that sends WITHOUT parse_mode AND the phone feed,
+                # so HTML tags rendered literally on BOTH surfaces
+                # ("⏰ <b>Medicine</b>" was the reported bug).
+                msg = f"⏰ {pri_icon} {title}\n{lead}".replace("  ", " ")
                 try:
                     # Same feed row as this task's other reminders — see the
                     # nag site below for why they all share one key.
-                    await self._telegram_push(msg, dedup_key=f"task:{task_id}")
+                    await self._telegram_push(
+                        msg, dedup_key=f"task:{task_id}",
+                        dedup_window=_TASK_DEDUP_WINDOW,
+                    )
                     pre_fired += 1
                 except Exception as exc:
                     pre_failed += 1
@@ -2070,7 +2104,15 @@ class HeartbeatDaemon:
                         task_id, user_id, type(exc).__name__, exc,
                     )
 
-            remaining = [t for t in pending if t and t > now_iso]
+            # Symmetric to the `due` selection above (instant compare, not
+            # lexical) so no entry can land in BOTH fired and kept — a
+            # mixed-shape entry that fired but lexically sorted "future"
+            # used to re-fire on every tick. Unparseable entries are dropped:
+            # they can never fire and only re-select the row forever.
+            remaining = [
+                t for t in pending
+                if t and (dt := _parse_pre(t)) is not None and dt > now
+            ]
             try:
                 await update_task(
                     self._config, user_id, task_id,

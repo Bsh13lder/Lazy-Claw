@@ -54,7 +54,7 @@ async def test_get_returns_default_reminder_offsets(client) -> None:
     r = client.get("/api/settings/general")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert data["reminder_offsets"] == ["-2h", "-1h"]
+    assert data["reminder_offsets"] == ["0m", "-30m"]
 
 
 @pytest.mark.asyncio

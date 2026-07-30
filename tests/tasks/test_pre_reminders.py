@@ -157,7 +157,6 @@ async def test_settings_read_failure_uses_fallback(monkeypatch) -> None:
     out = await resolve_pre_reminders(
         object(), "u1", reminder_at=base_dt.isoformat(), explicit=None
     )
-    # Fallback offsets are ["-2h", "-1h"].
+    # Fallback offsets are ["-30m"] (quiet default, 2026-07-30 noise pass).
     got = {parse_iso_datetime(x) for x in out}
-    assert (base_dt - timedelta(hours=2)) in got
-    assert (base_dt - timedelta(hours=1)) in got
+    assert got == {base_dt - timedelta(minutes=30)}

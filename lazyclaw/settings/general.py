@@ -50,7 +50,11 @@ DEFAULT_GENERAL = {
     # at-time fire is already owned by `reminder_at` itself.
     # MUST stay in sync with mobile `core/reminder_offset.dart`
     # kDefaultReminderOffsets.
-    "reminder_offsets": ["0m", "-2h", "-1h"],
+    # Trimmed 2026-07-30 (noise pass): ["0m","-2h","-1h"] gave every timed
+    # task 3 local alarms + 2 server advance pings before the nag ladder even
+    # started. At-time + one 30-min heads-up is the quiet default; users who
+    # want more add offsets in Settings → Notifications.
+    "reminder_offsets": ["0m", "-30m"],
     # Task-nag escalation ladder, in minutes. Entry 0 is the AT-TIME reminder
     # (offset 0 from reminder_at); every later entry is minutes since the
     # PREVIOUS nag fired. The list length is also the cap — five entries means
@@ -62,7 +66,10 @@ DEFAULT_GENERAL = {
     # Set [0] for "remind me once, then leave me alone"; an empty list
     # normalises to [0] (a reminder that never fires is a footgun, not a
     # preference).
-    "nag_intervals": [0, 15, 30, 60, 60],
+    # Trimmed 2026-07-30 (noise pass): the 5-step [0,15,30,60,60] ladder kept
+    # nagging for 2h45m per occurrence. At-time + two escalations (≤45m) is
+    # the quiet default; the list stays a user setting.
+    "nag_intervals": [0, 15, 30],
     # Auto-save successful multi-step browser flows as templates (upsert by
     # primary host). Off → user must manually save via canvas/chat skill.
     "auto_save_browser_templates": True,
@@ -181,6 +188,14 @@ async def update_general_settings(
                 f"Invalid timezone {tz_val!r}. Use an IANA name like 'Europe/Madrid'."
             )
         clean["timezone"] = tz_val
+        # Publish immediately so sync firing math (reminder normalization,
+        # cron evaluation, recurring respawn) switches zone with the save
+        # instead of waiting for the next settings-aware display read.
+        try:
+            from lazyclaw.lazybrain.timezone_util import remember_user_tz
+            remember_user_tz(user_id, tz_val)
+        except Exception:
+            logger.debug("timezone cache publish failed", exc_info=True)
 
     if "reminder_offsets" in updates and updates["reminder_offsets"] is not None:
         vals = updates["reminder_offsets"]

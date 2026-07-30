@@ -167,7 +167,9 @@ class SetReminderSkill(BaseSkill):
                         "When to fire the reminder. Accepts RELATIVE times: "
                         "'+10m' (10 min), '+1h' (1 hour), '+2h30m', '+1d'. "
                         "ALWAYS use relative format for 'in X minutes/hours'. "
-                        "Also accepts ISO 8601 (e.g. '2026-03-17T17:00:00') for specific times."
+                        "Also accepts ISO 8601 (e.g. '2026-03-17T17:00:00') for "
+                        "specific times — a naive value (no offset) is the "
+                        "USER's local wall-clock."
                     ),
                 },
             },
@@ -205,7 +207,12 @@ class SetReminderSkill(BaseSkill):
             try:
                 dt = datetime.fromisoformat(remind_at)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    # Naive ISO from the brain is the USER's wall-clock
+                    # ("remind me at 17:00" = 17:00 Madrid) — stamping UTC
+                    # here fired the reminder 2h late.
+                    from lazyclaw.lazybrain.timezone_util import user_tz
+                    dt = dt.replace(tzinfo=user_tz(user_id))
+                dt = dt.astimezone(timezone.utc)
                 if dt <= datetime.now(timezone.utc):
                     return (
                         f"Reminder time '{remind_at}' is in the past. "
@@ -218,7 +225,14 @@ class SetReminderSkill(BaseSkill):
                 )
 
         next_run_iso = dt.isoformat()
-        display_time = dt.strftime("%B %d at %I:%M %p")
+        # Display the user's wall-clock, not the stored UTC instant.
+        try:
+            from lazyclaw.tasks.timezone import get_user_tz
+            display_time = dt.astimezone(
+                await get_user_tz(self._config, user_id)
+            ).strftime("%B %d at %I:%M %p")
+        except Exception:
+            display_time = dt.strftime("%B %d at %I:%M %p")
 
         # Idempotency: a reminder with the same message + active status is
         # treated as the same reminder. Calling set_reminder again UPDATES

@@ -60,14 +60,14 @@ def _future_iso(**delta) -> str:
 
 @pytest.mark.asyncio
 async def test_timed_task_gets_default_pre_reminders(client) -> None:
-    """A timed task (no priority hint) gets the default 2 advance reminders."""
+    """A timed task (no priority hint) gets the default advance reminder."""
     reminder = _future_iso(days=3)
     r = client.post("/api/tasks", json={"title": "water the plants", "reminder_at": reminder})
     assert r.status_code == 200, r.text
     task = r.json()["task"]
     assert task["pre_reminders"] is not None
     entries = json.loads(task["pre_reminders"])
-    assert len(entries) == 2  # default offsets ["-2h", "-1h"]
+    assert len(entries) == 1  # quiet default offsets ["0m", "-30m"] -> one pre-ping
     base = datetime.fromisoformat(reminder)
     now = datetime.now(timezone.utc)
     for e in entries:

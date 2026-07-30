@@ -358,6 +358,70 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("budget_entries.updated_at backfill skipped", exc_info=True)
 
+        # Backfill: normalize LEGACY NAIVE task reminders to UTC-aware.
+        # Before 2026-07-25 mobile wrote reminder_at as a naive local
+        # wall-clock ("2026-08-02T08:00:00" meaning 08:00 Madrid); the
+        # daemon reads naive as UTC, so every surviving pre-fix row fired
+        # ~2h late on each occurrence. Naive rows are by construction
+        # mobile-written local times (every other writer emitted UTC-aware),
+        # so interpreting them in the user's tz is the row's original
+        # meaning, not a guess. Only pending work is touched (done/cancelled
+        # rows are inert history). Idempotent: normalized rows are aware and
+        # never match again. Stored pre_reminders derived from the mis-read
+        # base carry the same skew — they are shifted by the identical
+        # delta so the advance pings stay consistent with the reminder.
+        try:
+            from datetime import datetime as _dt, timezone as _utc_tz
+            import json as _json
+
+            cursor = await db.execute(
+                "SELECT id, user_id, reminder_at, pre_reminders FROM tasks "
+                "WHERE reminder_at IS NOT NULL "
+                "AND status NOT IN ('done', 'cancelled')"
+            )
+            rows = await cursor.fetchall()
+            for task_pk, row_uid, rem_raw, pre_raw in rows:
+                try:
+                    naive_dt = _dt.fromisoformat(rem_raw)
+                except (ValueError, TypeError):
+                    continue
+                if naive_dt.tzinfo is not None:
+                    continue  # already canonical
+                from lazyclaw.lazybrain.timezone_util import user_tz as _user_tz
+                fixed = naive_dt.replace(tzinfo=_user_tz(row_uid)).astimezone(
+                    _utc_tz.utc
+                )
+                delta = fixed - naive_dt.replace(tzinfo=_utc_tz.utc)
+                new_pre = pre_raw
+                if pre_raw:
+                    try:
+                        entries = _json.loads(pre_raw)
+                        shifted = []
+                        for entry in entries:
+                            try:
+                                entry_dt = _dt.fromisoformat(entry)
+                            except (ValueError, TypeError):
+                                continue
+                            if entry_dt.tzinfo is None:
+                                entry_dt = entry_dt.replace(tzinfo=_utc_tz.utc)
+                            shifted.append(
+                                (entry_dt + delta).astimezone(_utc_tz.utc).isoformat()
+                            )
+                        new_pre = _json.dumps(shifted)
+                    except (ValueError, TypeError):
+                        pass
+                await db.execute(
+                    "UPDATE tasks SET reminder_at = ?, pre_reminders = ? "
+                    "WHERE id = ?",
+                    (fixed.isoformat(), new_pre, task_pk),
+                )
+                logger.info(
+                    "Normalized legacy naive reminder on task %s: %s -> %s",
+                    task_pk, rem_raw, fixed.isoformat(),
+                )
+        except Exception:
+            logger.debug("naive reminder_at backfill skipped", exc_info=True)
+
         # PDF version index — created HERE (post-migration) not in schema.sql,
         # because on an existing DB the `version_of` column only exists after the
         # ALTER migration above runs; a CREATE INDEX on it inside the schema

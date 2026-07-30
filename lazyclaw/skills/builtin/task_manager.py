@@ -50,24 +50,23 @@ _PRIORITY_ICON = {"urgent": "!!", "high": "!", "medium": "-", "low": "."}
 _STATUS_ICON = {"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "cancelled": "[-]"}
 
 
-def _get_local_tz() -> timezone:
-    """Get Madrid timezone offset (CET/CEST).
+def _get_local_tz():
+    """The user's timezone for display formatting.
 
-    Uses system local time as the offset since the server runs in Madrid.
-    Falls back to UTC+1 (CET) if detection fails.
+    Resolved via ``lazybrain.timezone_util.user_tz`` (settings cache → env →
+    Madrid) instead of trusting the SERVER clock — a container without
+    ``TZ=Europe/Madrid`` used to print UTC wall-clock here.
     """
     try:
-        import time as _time
-        # Use system's local UTC offset (accounts for DST automatically)
-        offset_s = -_time.timezone if _time.daylight == 0 else -_time.altzone
-        return timezone(timedelta(seconds=offset_s))
+        from lazyclaw.lazybrain.timezone_util import user_tz
+        return user_tz(None)
     except Exception:
-        logger.debug("Failed to detect local timezone, falling back to CET", exc_info=True)
+        logger.debug("Failed to resolve user timezone, falling back to CET", exc_info=True)
         return timezone(timedelta(hours=1))  # CET fallback
 
 
 def _to_local(dt: datetime) -> datetime:
-    """Convert a UTC datetime to local (Madrid) time."""
+    """Convert a UTC datetime to the user's local time."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(_get_local_tz())
@@ -240,7 +239,8 @@ class AddTaskSkill(BaseSkill):
                         "When to send a reminder. Accepts RELATIVE times: "
                         "'+10m' (10 minutes), '+1h' (1 hour), '+2h30m' (2.5 hours), "
                         "'+1d' (1 day). ALWAYS use relative format for 'in X minutes/hours'. "
-                        "Also accepts ISO datetime (e.g. '2026-03-30T21:00:00') for specific times. "
+                        "Also accepts ISO datetime (e.g. '2026-03-30T21:00:00') for specific times — "
+                        "a naive value (no offset) is the USER's local wall-clock. "
                         "Fires via Telegram with Done/Snooze/Tomorrow buttons."
                     ),
                 },
@@ -305,9 +305,10 @@ class AddTaskSkill(BaseSkill):
                         "Optional advance reminders. Each item is a "
                         "negative relative offset ('-2h', '-1h', '-30m') OR "
                         "an absolute ISO datetime. Offsets are computed "
-                        "from reminder_at. When omitted, ANY task that has a "
+                        "from the timed due (or reminder_at when the due has "
+                        "no time). When omitted, ANY task that has a "
                         "reminder_at defaults to the user's reminder_offsets "
-                        "setting (typically ['-2h', '-1h']). Pass [] to opt "
+                        "setting (default ['-30m']). Pass [] to opt "
                         "this task out of advance reminders."
                     ),
                 },
@@ -332,7 +333,14 @@ class AddTaskSkill(BaseSkill):
                 try:
                     dt = datetime.fromisoformat(reminder_at)
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        # A naive ISO from the brain is the USER's wall-clock
+                        # ("remind me at 21:00" = 21:00 Madrid, not UTC) —
+                        # same convention the store's normalizer applies.
+                        # Stamping UTC here used to pre-empt that normalizer
+                        # and fire chat-created reminders 2h late.
+                        from lazyclaw.lazybrain.timezone_util import user_tz
+                        dt = dt.replace(tzinfo=user_tz(user_id))
+                    dt = dt.astimezone(timezone.utc)
                     if dt <= datetime.now(timezone.utc):
                         return f"Reminder time '{reminder_at}' is in the past."
                     reminder_at = dt.isoformat()
@@ -397,6 +405,7 @@ class AddTaskSkill(BaseSkill):
         pre_reminders = await resolve_pre_reminders(
             self._config, user_id,
             reminder_at=reminder_at,
+            due_date=due_date_param,
             explicit=params.get("pre_reminders"),
         )
 
@@ -435,7 +444,10 @@ class AddTaskSkill(BaseSkill):
         if task.get("due_date"):
             result_parts.append(f"Due: {task['due_date']}")
         if task.get("reminder_at"):
-            stamp = task["reminder_at"]
+            # Show the user's wall-clock, not the stored UTC ISO string —
+            # "Reminder: 2026-07-31T19:00:00+00:00" read as 19:00 to a user
+            # who asked for 21:00 Madrid.
+            stamp = _format_time(task["reminder_at"])
             suffix = " (suggested)" if intake_reason else ""
             result_parts.append(f"Reminder: {stamp}{suffix}")
         if pre_reminders:

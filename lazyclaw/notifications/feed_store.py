@@ -17,8 +17,10 @@ Storage threat model — plaintext vs encrypted:
 
 from __future__ import annotations
 
+import html as _html_mod
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -41,6 +43,55 @@ DEDUP_WINDOW = timedelta(minutes=30)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def strip_html(text: str) -> str:
+    """Flatten Telegram-HTML markup to plain text for phone surfaces.
+
+    Producers build ``<b>``/``<i>`` strings for Telegram's HTML parse mode;
+    the phone's Notification Center and OS notifications render text
+    verbatim, so a task heads-up used to show literally as
+    ``⏰ <b>Medicine</b>``. Applied at :func:`record_notification` — the one
+    choke point every feed writer passes through — so no individual funnel
+    can leak markup again. Telegram delivery happens on separate code paths
+    and keeps its HTML.
+    """
+    no_tags = re.sub(r"<[^>]+>", "", text or "")
+    return _html_mod.unescape(no_tags).strip()
+
+
+def strip_markdown(text: str) -> str:
+    """Remove common Markdown formatting from a known-Markdown string.
+
+    NOT applied at the record_notification choke point — the italic rule
+    would mangle legitimate content like ``5 * 3 * 2``. Callers that KNOW
+    their text is Markdown (the skill-push funnel, the Telegram notifier's
+    plain-text fallbacks) opt in at their own seam.
+
+    Closed pairs are stripped first; any orphan ``**`` runs left after a
+    mid-stream truncation upstream are then collapsed, so the user never
+    sees raw ``**foo`` leak through.
+    """
+    # Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', r'\1', text, flags=re.DOTALL)
+    # Italic: *text* or _text_
+    text = re.sub(r'\*(.+?)\*', r'\1', text, flags=re.DOTALL)
+    # Strikethrough: ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'\1', text, flags=re.DOTALL)
+    # Inline code: `text`
+    text = re.sub(r'`(.+?)`', r'\1', text, flags=re.DOTALL)
+    # Headers: ### text → text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Links: [text](url) → text (url)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
+    # Bullet points: - text → • text
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    # Orphan bold/strike runs (truncation leftovers). `**` and `~~` never
+    # appear as literal content in real chat output, so it's safe to drop.
+    text = re.sub(r'\*\*+', '', text)
+    text = re.sub(r'~~+', '', text)
+    return text
 
 
 def _normalize_severity(value: str | None) -> str:
@@ -106,6 +157,7 @@ async def record_notification(
     deep_link: dict | None = None,
     actions: list | None = None,
     dedup_key: str | None = None,
+    dedup_window: timedelta | None = None,
 ) -> dict:
     """Persist one feed entry (title/body/meta encrypted). Returns the decrypted dict.
 
@@ -122,12 +174,19 @@ async def record_notification(
     safe_kind = (kind or "info").strip() or "info"
     safe_sev = _normalize_severity(severity)
     merged_meta = _build_meta(meta, deep_link, actions)
+    # Phone surfaces render verbatim — never let Telegram-HTML through.
+    title = strip_html(title)
+    body = strip_html(body)
 
     async with db_session(config) as db:
         # ── dedup: collapse a recent unread repeat into the existing row ──
+        # A caller may widen the window when its repeats span more than the
+        # default 30min — the task nag ladder stretches ~45min-3h across one
+        # occurrence, so the daemon passes hours and the whole ladder folds
+        # into ONE row instead of one row per gap > window.
         if dedup_key:
             cutoff_iso = (
-                datetime.now(timezone.utc) - DEDUP_WINDOW
+                datetime.now(timezone.utc) - (dedup_window or DEDUP_WINDOW)
             ).isoformat()
             existing = await _find_dedup_row(db, user_id, dedup_key, cutoff_iso)
             if existing is not None:

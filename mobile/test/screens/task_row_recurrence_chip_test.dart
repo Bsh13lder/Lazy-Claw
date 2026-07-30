@@ -10,18 +10,20 @@ import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_row.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
-Task _task({required String id, String? recurring}) => Task(
-  id: id,
-  userId: 'u1',
-  title: 'Sample task',
-  priority: 'medium',
-  status: 'todo',
-  owner: 'user',
-  dueDate: '2026-06-08',
-  recurring: recurring,
-  nagCount: 0,
-  createdAt: '2026-06-06T00:00:00Z',
-);
+Task _task({required String id, String? recurring, String? recurUntil}) =>
+    Task(
+      id: id,
+      userId: 'u1',
+      title: 'Sample task',
+      priority: 'medium',
+      status: 'todo',
+      owner: 'user',
+      dueDate: '2026-06-08',
+      recurring: recurring,
+      recurUntil: recurUntil,
+      nagCount: 0,
+      createdAt: '2026-06-06T00:00:00Z',
+    );
 
 Widget _host(Task task) => MaterialApp(
   theme: buildAppTheme(),
@@ -70,5 +72,28 @@ void main() {
     await tester.pumpWidget(_host(_task(id: 'r4', recurring: null)));
     await tester.pump();
     expect(find.byKey(const ValueKey('task-row-recurrence-r4')), findsNothing);
+  });
+
+  testWidgets('a series end appends "· until <day>" to the chip label', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_host(
+      _task(id: 'r5', recurring: '0 9 * * *', recurUntil: '2026-09-30'),
+    ));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('task-row-recurrence-r5')),
+      findsOneWidget,
+    );
+    expect(find.text('Daily · until 2026-09-30'), findsOneWidget);
+  });
+
+  testWidgets('an empty recurUntil (the cleared sentinel) keeps the plain '
+      'label', (tester) async {
+    await tester.pumpWidget(_host(
+      _task(id: 'r6', recurring: '0 9 * * *', recurUntil: ''),
+    ));
+    await tester.pump();
+    expect(find.text('Daily'), findsOneWidget);
   });
 }

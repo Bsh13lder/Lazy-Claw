@@ -3,6 +3,7 @@ import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import 'project_color_picker.dart';
+import 'project_date_chips.dart';
 
 /// Bottom sheet for adding a new expense.
 ///
@@ -236,10 +237,16 @@ class AddProjectSheet extends StatefulWidget {
     required this.onSubmit,
   });
 
-  /// Called with (name, budget?, color?). The color is a `"#RRGGBB"` hex string
-  /// or null when the user left it unset.
-  final Future<bool> Function(String name, double? budget, String? color)
-      onSubmit;
+  /// Called with (name, budget?, color?, startDate?, dueDate?). The color is a
+  /// `"#RRGGBB"` hex string; the dates are `yyyy-MM-dd` strings — each null
+  /// when the user left it unset.
+  final Future<bool> Function(
+    String name,
+    double? budget,
+    String? color,
+    String? startDate,
+    String? dueDate,
+  ) onSubmit;
 
   @override
   State<AddProjectSheet> createState() => _AddProjectSheetState();
@@ -249,6 +256,8 @@ class _AddProjectSheetState extends State<AddProjectSheet> {
   final _nameCtrl = TextEditingController();
   final _budgetCtrl = TextEditingController();
   String? _selectedColor;
+  String? _startDate;
+  String? _dueDate;
   bool _loading = false;
   String? _nameError;
 
@@ -272,7 +281,8 @@ class _AddProjectSheetState extends State<AddProjectSheet> {
       _nameError = null;
     });
 
-    final ok = await widget.onSubmit(name, budget, _selectedColor);
+    final ok = await widget.onSubmit(
+        name, budget, _selectedColor, _startDate, _dueDate);
     if (!mounted) return;
     if (ok) {
       Navigator.pop(context);
@@ -318,6 +328,18 @@ class _AddProjectSheetState extends State<AddProjectSheet> {
         ProjectColorSwatches(
           selected: _selectedColor,
           onSelected: (hex) => setState(() => _selectedColor = hex),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        Text(
+          'Time frame (optional)',
+          style: AppText.label.copyWith(color: AppColors.textSecondary),
+        ),
+        const SizedBox(height: AppSpacing.md),
+        ProjectDateChips(
+          startDate: _startDate,
+          dueDate: _dueDate,
+          onStartChanged: (v) => setState(() => _startDate = v),
+          onDueChanged: (v) => setState(() => _dueDate = v),
         ),
         const SizedBox(height: AppSpacing.xl),
         LzButton.primary(

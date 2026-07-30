@@ -99,9 +99,14 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       context,
       title: 'New Project',
       builder: (_) => AddProjectSheet(
-        onSubmit: (name, budget, color) => ref
-            .read(budgetsProvider.notifier)
-            .createProject(name, budget: budget, color: color),
+        onSubmit: (name, budget, color, startDate, dueDate) =>
+            ref.read(budgetsProvider.notifier).createProject(
+                  name,
+                  budget: budget,
+                  color: color,
+                  startDate: startDate,
+                  dueDate: dueDate,
+                ),
       ),
     );
   }
@@ -116,6 +121,11 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
         onRename: (name) => notifier.renameProject(project.id, name),
         onSetBudget: (budget) => notifier.setProjectBudget(project.id, budget),
         onSetColor: (color) => notifier.setProjectColor(project.id, color),
+        onSetDates: (startDate, dueDate) => notifier.setProjectDates(
+          project.id,
+          startDate: startDate,
+          dueDate: dueDate,
+        ),
         onDelete: () async {
           await notifier.deleteProject(project.id);
           return true;

@@ -156,6 +156,7 @@ class TasksRepository {
     String? dueDate,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     List<Map<String, dynamic>>? steps,
   }) async {
     final body = <String, dynamic>{'title': title};
@@ -166,6 +167,7 @@ class TasksRepository {
     if (dueDate != null) body['due_date'] = dueDate;
     if (reminderAt != null) body['reminder_at'] = reminderAt;
     if (recurring != null) body['recurring'] = recurring;
+    if (recurUntil != null) body['recur_until'] = recurUntil;
     // The initial sub-task checklist rides POST /api/tasks (CreateTaskBody
     // accepts `steps: list[StepDraft]`), so a task created with sub-tasks
     // lands them in one round-trip — no post-create PUT /steps needed.

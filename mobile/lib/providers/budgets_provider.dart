@@ -134,18 +134,27 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   /// Trigger a sync (e.g. when reachability flips to true) then refresh.
   Future<void> syncNow() => _syncThenRefresh();
 
-  /// Create a project locally (optimistic) with an optional [budget] and an
-  /// optional [color] (a `"#RRGGBB"` hex string). Lands in the cache + outbox,
+  /// Create a project locally (optimistic) with an optional [budget], an
+  /// optional [color] (a `"#RRGGBB"` hex string) and an optional time frame
+  /// ([startDate]/[dueDate], `yyyy-MM-dd`). Lands in the cache + outbox,
   /// then best-effort syncs. Returns true on success, false (with `state.error`
   /// set) when the local write throws.
   Future<bool> createProject(
     String name, {
     double? budget,
     String? color,
+    String? startDate,
+    String? dueDate,
   }) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
-      await _dao.applyLocalProjectCreate(name, budget: budget, color: color);
+      await _dao.applyLocalProjectCreate(
+        name,
+        budget: budget,
+        color: color,
+        startDate: startDate,
+        dueDate: dueDate,
+      );
       await _refreshFromCache();
       state = state.copyWith(isSubmitting: false);
       unawaited(_syncThenRefresh());
@@ -178,6 +187,33 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
       await _dao.applyLocalProjectUpdate(id, color: color);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Set a project's time frame (optimistic). Each of [startDate]/[dueDate]
+  /// follows the `''` clear-sentinel convention: a `yyyy-MM-dd` value sets,
+  /// `''` clears (the server leniently nulls empty values), null leaves the
+  /// field untouched. Returns true on success, false (with `state.error` set)
+  /// on a local throw.
+  Future<bool> setProjectDates(
+    String id, {
+    String? startDate,
+    String? dueDate,
+  }) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(
+        id,
+        startDate: startDate,
+        dueDate: dueDate,
+      );
       await _refreshFromCache();
       state = state.copyWith(isSubmitting: false);
       unawaited(_syncThenRefresh());

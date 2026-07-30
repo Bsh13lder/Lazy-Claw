@@ -72,11 +72,15 @@ class _RecordingDao extends BudgetsDao {
     String currency = 'USD',
     String? description,
     String? color,
+    String? startDate,
+    String? dueDate,
   }) async {
     createCalls.add({
       'name': name,
       'budget': budget,
       'color': color,
+      'startDate': startDate,
+      'dueDate': dueDate,
     });
     if (throwOnCreate) throw StateError('create boom');
     return Project(
@@ -86,6 +90,8 @@ class _RecordingDao extends BudgetsDao {
       currency: currency,
       status: 'active',
       color: color,
+      startDate: startDate,
+      dueDate: dueDate,
     );
   }
 
@@ -98,6 +104,8 @@ class _RecordingDao extends BudgetsDao {
     String? status,
     String? color,
     bool? isFavorite,
+    String? startDate,
+    String? dueDate,
   }) async {
     updateCalls.add({
       'id': id,
@@ -107,6 +115,8 @@ class _RecordingDao extends BudgetsDao {
       'status': status,
       'color': color,
       'isFavorite': isFavorite,
+      'startDate': startDate,
+      'dueDate': dueDate,
     });
     if (throwOnUpdate) throw StateError('update boom');
     return null;
@@ -184,6 +194,21 @@ void main() {
       expect(dao.createCalls.single['color'], isNull);
     });
 
+    test('threads the time frame (startDate/dueDate) through to the DAO',
+        () async {
+      final dao = await _freshDao();
+      final n = _notifier(dao);
+
+      final ok = await n.createProject('Timed',
+          startDate: '2026-08-01', dueDate: '2026-09-15');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(ok, isTrue);
+      final call = dao.createCalls.single;
+      expect(call['startDate'], '2026-08-01');
+      expect(call['dueDate'], '2026-09-15');
+    });
+
     test('sets state.error when the DAO throws', () async {
       final dao = await _freshDao()..throwOnCreate = true;
       final n = _notifier(dao);
@@ -214,6 +239,35 @@ void main() {
       final n = _notifier(dao);
 
       await n.renameProject('p1', 'x');
+      expect(n.state.error, contains('update boom'));
+    });
+  });
+
+  group('BudgetsNotifier.setProjectDates', () {
+    test('forwards startDate/dueDate (incl. the "" clear sentinel) to '
+        'applyLocalProjectUpdate', () async {
+      final dao = await _freshDao();
+      final n = _notifier(dao);
+
+      final ok = await n.setProjectDates('p1',
+          startDate: '2026-08-01', dueDate: '');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(ok, isTrue);
+      final call = dao.updateCalls.single;
+      expect(call['id'], 'p1');
+      expect(call['startDate'], '2026-08-01');
+      expect(call['dueDate'], '');
+      expect(call['name'], isNull);
+      expect(n.state.error, isNull);
+    });
+
+    test('sets state.error when the DAO throws', () async {
+      final dao = await _freshDao()..throwOnUpdate = true;
+      final n = _notifier(dao);
+
+      final ok = await n.setProjectDates('p1', dueDate: '2026-09-15');
+      expect(ok, isFalse);
       expect(n.state.error, contains('update boom'));
     });
   });

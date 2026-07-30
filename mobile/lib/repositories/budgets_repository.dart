@@ -244,12 +244,16 @@ class BudgetsRepository {
     double? budget,
     String? description,
     String? color,
+    String? startDate,
+    String? dueDate,
   }) async {
     final body = <String, dynamic>{'name': name};
     if (id != null) body['id'] = id;
     if (budget != null) body['budget'] = budget;
     if (description != null) body['description'] = description;
     if (color != null) body['color'] = color;
+    if (startDate != null) body['start_date'] = startDate;
+    if (dueDate != null) body['due_date'] = dueDate;
 
     final json = await _t.postJson('/api/budgets/projects', body);
     final raw = json['project'] as Map<String, dynamic>? ?? json;

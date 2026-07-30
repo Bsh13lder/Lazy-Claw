@@ -23,6 +23,13 @@ class Project {
   /// Expenses tab. Round-trips through the budgets offline sync.
   final bool isFavorite;
 
+  /// The project's time frame, as plaintext `yyyy-MM-dd` strings (or null when
+  /// unset). An `''` riding an update is the clear sentinel — the server
+  /// leniently nulls empty/invalid values. Round-trips through the budgets
+  /// offline sync alongside the rest of the project fields.
+  final String? startDate;
+  final String? dueDate;
+
   /// Rolled-up totals — present on list/report responses, null otherwise.
   final double? spent;
   final double? remaining;
@@ -38,6 +45,8 @@ class Project {
     this.lazybrainNoteId,
     this.color,
     this.isFavorite = false,
+    this.startDate,
+    this.dueDate,
     this.spent,
     this.remaining,
   });
@@ -73,6 +82,8 @@ class Project {
       lazybrainNoteId: _str(json['lazybrain_note_id']),
       color: _str(json['color']),
       isFavorite: _bool(json['is_favorite']),
+      startDate: _str(json['start_date']),
+      dueDate: _str(json['due_date']),
       spent: _double(json['spent']),
       remaining: _double(json['remaining']),
     );
@@ -89,6 +100,8 @@ class Project {
         'lazybrain_note_id': lazybrainNoteId,
         'color': color,
         'is_favorite': isFavorite,
+        'start_date': startDate,
+        'due_date': dueDate,
         'spent': spent,
         'remaining': remaining,
       };
@@ -104,6 +117,8 @@ class Project {
     String? lazybrainNoteId,
     String? color,
     bool? isFavorite,
+    String? startDate,
+    String? dueDate,
     double? spent,
     double? remaining,
   }) =>
@@ -118,6 +133,8 @@ class Project {
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
         color: color ?? this.color,
         isFavorite: isFavorite ?? this.isFavorite,
+        startDate: startDate ?? this.startDate,
+        dueDate: dueDate ?? this.dueDate,
         spent: spent ?? this.spent,
         remaining: remaining ?? this.remaining,
       );

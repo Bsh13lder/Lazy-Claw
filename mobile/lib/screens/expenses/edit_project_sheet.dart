@@ -3,6 +3,7 @@ import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import 'project_color_picker.dart';
+import 'project_date_chips.dart';
 
 /// Bottom sheet for managing an existing project: rename it, edit its budget,
 /// pick a color, or delete it. The actual mutations run through the
@@ -21,6 +22,7 @@ class EditProjectSheet extends StatefulWidget {
     required this.onSetBudget,
     required this.onSetColor,
     required this.onDelete,
+    this.onSetDates,
     this.onOpenBudgetLog,
   });
 
@@ -38,6 +40,11 @@ class EditProjectSheet extends StatefulWidget {
   /// Delete the project. Returns true on success.
   final Future<bool> Function() onDelete;
 
+  /// Set the project's time frame. Each value is a `yyyy-MM-dd` day or `''`
+  /// (the clear sentinel — the server leniently nulls empty values). Returns
+  /// true on success. When null the time-frame chips are hidden.
+  final Future<bool> Function(String startDate, String dueDate)? onSetDates;
+
   /// Opens the Budget ledger sheet (add-to-budget top-ups + the credits/debits
   /// Log). When null the affordance is hidden.
   final VoidCallback? onOpenBudgetLog;
@@ -50,6 +57,13 @@ class _EditProjectSheetState extends State<EditProjectSheet> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _budgetCtrl;
   late String? _selectedColor;
+
+  /// Working copy of the time frame (`yyyy-MM-dd` or null = unset). Seeded from
+  /// the project (an `''` cache value reads as unset). Save writes them only
+  /// when either changed, sending `''` to clear.
+  late String? _startDate;
+  late String? _dueDate;
+
   bool _saving = false;
   bool _deleting = false;
   String? _nameError;
@@ -62,7 +76,13 @@ class _EditProjectSheetState extends State<EditProjectSheet> {
     _budgetCtrl =
         TextEditingController(text: _formatBudget(widget.project.budget));
     _selectedColor = widget.project.color;
+    _startDate = _normDate(widget.project.startDate);
+    _dueDate = _normDate(widget.project.dueDate);
   }
+
+  /// Null/blank → unset; anything else is kept as-is (`yyyy-MM-dd`).
+  static String? _normDate(String? v) =>
+      (v == null || v.isEmpty) ? null : v;
 
   @override
   void dispose() {
@@ -118,6 +138,13 @@ class _EditProjectSheetState extends State<EditProjectSheet> {
         _selectedColor != null &&
         _selectedColor != widget.project.color) {
       ok = await widget.onSetColor(_selectedColor!);
+    }
+    // Time frame: only write when either date actually changed. Both current
+    // values ride together, with '' as the clear sentinel for an unset chip.
+    final datesChanged = _startDate != _normDate(widget.project.startDate) ||
+        _dueDate != _normDate(widget.project.dueDate);
+    if (ok && widget.onSetDates != null && datesChanged) {
+      ok = await widget.onSetDates!(_startDate ?? '', _dueDate ?? '');
     }
 
     if (!mounted) return;
@@ -208,6 +235,21 @@ class _EditProjectSheetState extends State<EditProjectSheet> {
           selected: _selectedColor,
           onSelected: (hex) => setState(() => _selectedColor = hex),
         ),
+        if (widget.onSetDates != null) ...[
+          const SizedBox(height: AppSpacing.xl),
+          Text(
+            'Time frame',
+            style: AppText.label.copyWith(color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          ProjectDateChips(
+            startDate: _startDate,
+            dueDate: _dueDate,
+            enabled: !_busy,
+            onStartChanged: (v) => setState(() => _startDate = v),
+            onDueChanged: (v) => setState(() => _dueDate = v),
+          ),
+        ],
         const SizedBox(height: AppSpacing.xl),
         LzButton.primary(
           label: 'Save',

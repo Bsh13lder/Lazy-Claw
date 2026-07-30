@@ -423,6 +423,8 @@ class BudgetsDao {
     String currency = 'USD',
     String? description,
     String? color,
+    String? startDate,
+    String? dueDate,
   }) async {
     final projectId = id ?? newLocalId();
     final now = _now();
@@ -434,6 +436,8 @@ class BudgetsDao {
       status: 'active',
       description: description,
       color: color,
+      startDate: startDate,
+      dueDate: dueDate,
       spent: 0.0,
       remaining: budget ?? 0.0,
     );
@@ -456,6 +460,8 @@ class BudgetsDao {
         'budget': ?budget,
         'description': ?description,
         'color': ?color,
+        'start_date': ?startDate,
+        'due_date': ?dueDate,
       };
       await _enqueueTxn(
           txn, BudgetsOutboxOp.create, kProjectEntity, projectId, payload, now);
@@ -466,8 +472,12 @@ class BudgetsDao {
   }
 
   /// Patch an existing project locally
-  /// (name/budget/description/status/color/isFavorite).
+  /// (name/budget/description/status/color/isFavorite/startDate/dueDate).
   /// Bumps updated_at + dirty and enqueues an `update`.
+  ///
+  /// [startDate]/[dueDate] follow the `''` clear-sentinel convention: a value
+  /// sets, `''` clears (rides the patch verbatim — the server leniently nulls
+  /// empty values), null leaves the field untouched.
   Future<Project?> applyLocalProjectUpdate(
     String id, {
     String? name,
@@ -476,6 +486,8 @@ class BudgetsDao {
     String? status,
     String? color,
     bool? isFavorite,
+    String? startDate,
+    String? dueDate,
   }) async {
     final existing = await getProject(id);
     if (existing == null) return null;
@@ -488,6 +500,8 @@ class BudgetsDao {
       status: status,
       color: color,
       isFavorite: isFavorite,
+      startDate: startDate,
+      dueDate: dueDate,
     );
 
     // Shared scalar fields (String/num) — safe verbatim in BOTH the SQLite
@@ -498,6 +512,8 @@ class BudgetsDao {
       'description': ?description,
       'status': ?status,
       'color': ?color,
+      'start_date': ?startDate,
+      'due_date': ?dueDate,
     };
 
     // is_favorite needs two shapes: the SQLite cache stores an INTEGER 0/1
@@ -1006,6 +1022,8 @@ class BudgetsDao {
           'budget': p.budget,
           if (p.description != null) 'description': p.description,
           if (p.color != null) 'color': p.color,
+          if (p.startDate != null) 'start_date': p.startDate,
+          if (p.dueDate != null) 'due_date': p.dueDate,
         };
         await _enqueueTxn(
             txn, BudgetsOutboxOp.create, kProjectEntity, id, payload, now);
@@ -1279,6 +1297,8 @@ class BudgetsDao {
         color: row['color'] as String?,
         // Stored as INTEGER 0/1; treat anything non-zero as favorited.
         isFavorite: ((row['is_favorite'] as num?)?.toInt() ?? 0) != 0,
+        startDate: row['start_date'] as String?,
+        dueDate: row['due_date'] as String?,
         spent: (row['spent'] as num?)?.toDouble(),
         remaining: (row['remaining'] as num?)?.toDouble(),
       );
@@ -1295,6 +1315,8 @@ class BudgetsDao {
         'color': p.color,
         // sqflite has no bool column type — persist as INTEGER 0/1.
         'is_favorite': p.isFavorite ? 1 : 0,
+        'start_date': p.startDate,
+        'due_date': p.dueDate,
         'spent': p.spent,
         'remaining': p.remaining,
       };

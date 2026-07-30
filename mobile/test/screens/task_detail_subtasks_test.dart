@@ -70,6 +70,7 @@ class _StubTasksNotifier extends TasksNotifier {
     String? steps,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? tags,
     double? allocatedBudget,
     bool clearAllocatedBudget = false,

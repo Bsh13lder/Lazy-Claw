@@ -131,6 +131,43 @@ void main() {
       expect(json['budget'], 500.0);
       expect(json['currency'], 'EUR');
     });
+
+    // ── start_date / due_date (the project time frame) ──────────────────────
+
+    test('fromJson reads start_date/due_date and toJson round-trips them', () {
+      final p = Project.fromJson({
+        'id': 'tf1',
+        'name': 'Timed',
+        'start_date': '2026-08-01',
+        'due_date': '2026-09-15',
+      });
+      expect(p.startDate, '2026-08-01');
+      expect(p.dueDate, '2026-09-15');
+      final json = p.toJson();
+      expect(json['start_date'], '2026-08-01');
+      expect(json['due_date'], '2026-09-15');
+    });
+
+    test('startDate/dueDate are null when absent', () {
+      final p = Project.fromJson({'id': 'tf2', 'name': 'Untimed'});
+      expect(p.startDate, isNull);
+      expect(p.dueDate, isNull);
+      expect(p.toJson()['start_date'], isNull);
+      expect(p.toJson()['due_date'], isNull);
+    });
+
+    test('copyWith sets the dates without mutating the original', () {
+      final original = Project.fromJson({'id': 'tf3', 'name': 'Orig'});
+      final updated =
+          original.copyWith(startDate: '2026-08-01', dueDate: '2026-09-15');
+      expect(updated.startDate, '2026-08-01');
+      expect(updated.dueDate, '2026-09-15');
+      expect(original.startDate, isNull); // immutable
+      // A copyWith that doesn't touch them preserves the values.
+      final renamed = updated.copyWith(name: 'Renamed');
+      expect(renamed.startDate, '2026-08-01');
+      expect(renamed.dueDate, '2026-09-15');
+    });
   });
 
   // ── Expense.fromJson ──────────────────────────────────────────────────────

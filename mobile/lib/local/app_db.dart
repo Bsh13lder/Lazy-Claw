@@ -40,7 +40,13 @@ import 'uuid.dart';
 ///     `deleted_budget_entries`); this table lets the Log render offline and
 ///     reflect cross-device top-ups, and (Phase 1B) lets a top-up be queued
 ///     offline as a real audit row instead of a silent budget bump.
-const int kAppDbVersion = 10;
+/// v11: adds `task_cache.recur_until` (a recurring task's series end — date-only
+///     `YYYY-MM-DD` or full ISO, null = repeats forever) and
+///     `project_cache.start_date` + `project_cache.due_date` (a project's time
+///     frame, plaintext `YYYY-MM-DD` or null). All three round-trip through the
+///     offline sync; a missed mapping point would silently drop the field and
+///     LWW would propagate the loss.
+const int kAppDbVersion = 11;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -73,6 +79,7 @@ const List<String> kAppDbSchema = [
     due_date TEXT,
     reminder_at TEXT,
     recurring TEXT,
+    recur_until TEXT,
     tags TEXT,
     nag_count INTEGER,
     created_at TEXT,
@@ -145,6 +152,8 @@ const List<String> kAppDbSchema = [
     lazybrain_note_id TEXT,
     color TEXT,
     is_favorite INTEGER NOT NULL DEFAULT 0,
+    start_date TEXT,
+    due_date TEXT,
     spent REAL,
     remaining REAL,
     created_at TEXT,
@@ -346,6 +355,25 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
   // the row is absent (fresh installs never reach here).
   if (oldVersion < 10) {
     await db.delete('sync_state', where: 'entity = ?', whereArgs: ['budgets']);
+  }
+  // v10 → v11: add the recurring-series end date to task_cache and the project
+  // time-frame columns to project_cache. Idempotent — each column is only
+  // ALTERed in when genuinely absent, so a re-run can't throw (clones the v4
+  // color-branch pattern).
+  if (oldVersion < 11) {
+    final taskCols = await db.rawQuery("PRAGMA table_info('task_cache')");
+    final taskPresent = taskCols.map((c) => c['name']).toSet();
+    if (!taskPresent.contains('recur_until')) {
+      await db.execute('ALTER TABLE task_cache ADD COLUMN recur_until TEXT');
+    }
+    final projCols = await db.rawQuery("PRAGMA table_info('project_cache')");
+    final projPresent = projCols.map((c) => c['name']).toSet();
+    if (!projPresent.contains('start_date')) {
+      await db.execute('ALTER TABLE project_cache ADD COLUMN start_date TEXT');
+    }
+    if (!projPresent.contains('due_date')) {
+      await db.execute('ALTER TABLE project_cache ADD COLUMN due_date TEXT');
+    }
   }
 }
 

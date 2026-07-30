@@ -126,6 +126,19 @@ class _ProjectCardState extends State<ProjectCard> {
                           ),
                           const SizedBox(width: AppSpacing.sm),
                         ],
+                        // Project due date — a quiet "due <day>" badge when the
+                        // time frame's due date is set.
+                        if (project.dueDate != null &&
+                            project.dueDate!.isNotEmpty) ...[
+                          LzChip(
+                            key: ValueKey('project-due-${project.id}'),
+                            label: 'due ${project.dueDate!}',
+                            dense: true,
+                            icon: Icons.event_outlined,
+                            color: AppColors.info,
+                          ),
+                          const SizedBox(width: AppSpacing.xs),
+                        ],
                         if (project.isArchived) ...[
                           LzChip(
                             label: 'Archived',

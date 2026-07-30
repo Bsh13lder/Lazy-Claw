@@ -77,6 +77,7 @@ class _RecordingDao extends TaskDao {
     String? reminderAt,
     String? steps,
     String? recurring,
+    String? recurUntil,
     String? tags,
     double? allocatedBudget,
     bool clearAllocatedBudget = false,
@@ -90,6 +91,7 @@ class _RecordingDao extends TaskDao {
       'dueDate': dueDate,
       'steps': steps,
       'recurring': recurring,
+      'recurUntil': recurUntil,
       'tags': tags,
       'allocatedBudget': allocatedBudget,
       'clearAllocatedBudget': clearAllocatedBudget,
@@ -157,6 +159,24 @@ void main() {
         expect(n.state.error, isNull);
       },
     );
+
+    test('threads recurUntil (incl. the "" clear sentinel) through to '
+        'applyLocalUpdate', () async {
+      final dao = await _freshDao();
+      final n = TasksNotifier(
+        dao,
+        _NoopSync(dao, TasksRepository(_OfflineTransport())),
+      );
+
+      await n.updateTask('task-ru', recurUntil: '2026-09-30');
+      await n.updateTask('task-ru', recurUntil: '');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(dao.updateCalls, hasLength(2));
+      expect(dao.updateCalls[0]['recurUntil'], '2026-09-30');
+      expect(dao.updateCalls[1]['recurUntil'], '',
+          reason: 'the clear sentinel must reach the DAO, not be dropped');
+    });
 
     test('only forwards the fields that were passed', () async {
       final dao = await _freshDao();

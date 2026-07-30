@@ -212,6 +212,7 @@ class TaskSync {
             dueDate: p['due_date']?.toString(),
             reminderAt: p['reminder_at']?.toString(),
             recurring: p['recurring']?.toString(),
+            recurUntil: p['recur_until']?.toString(),
             steps: rawSteps == null ? null : _decodeSteps(rawSteps),
           );
           break;

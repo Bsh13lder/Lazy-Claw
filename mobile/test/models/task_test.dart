@@ -153,5 +153,46 @@ void main() {
       expect(json['status'], 'in_progress');
       expect(json['nag_count'], 2);
     });
+
+    // ── recur_until (the recurring series' end) ──────────────────────────────
+
+    test('fromJson reads recur_until and toJson round-trips it', () {
+      final task = Task.fromJson({
+        'id': 'ru1',
+        'title': 'Water plants',
+        'recurring': '0 9 * * *',
+        'recur_until': '2026-09-30',
+        'nag_count': 0,
+        'created_at': '2026-06-05T00:00:00Z',
+      });
+      expect(task.recurUntil, '2026-09-30');
+      expect(task.toJson()['recur_until'], '2026-09-30');
+    });
+
+    test('recurUntil is null when recur_until is absent or null', () {
+      final absent = Task.fromJson({
+        'id': 'ru2',
+        'title': 'Forever',
+        'nag_count': 0,
+        'created_at': '2026-06-05T00:00:00Z',
+      });
+      expect(absent.recurUntil, isNull);
+      expect(absent.toJson()['recur_until'], isNull);
+    });
+
+    test('copyWith sets recurUntil without mutating the original', () {
+      final original = Task.fromJson({
+        'id': 'ru3',
+        'title': 'Original',
+        'recurring': '0 9 * * 1',
+        'nag_count': 0,
+        'created_at': '2026-06-05T00:00:00Z',
+      });
+      final updated = original.copyWith(recurUntil: '2027-01-01');
+      expect(updated.recurUntil, '2027-01-01');
+      expect(original.recurUntil, isNull); // immutable — original not mutated
+      // A copyWith that doesn't touch it preserves the value.
+      expect(updated.copyWith(title: 'Renamed').recurUntil, '2027-01-01');
+    });
   });
 }

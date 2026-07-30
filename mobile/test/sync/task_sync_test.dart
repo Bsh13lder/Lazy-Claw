@@ -1061,6 +1061,63 @@ void main() {
       expect(await dao.dirtyIds(), isNot(contains('rej-1')));
     });
   });
+
+  // ── recur_until (the recurring series' end) rides push AND pull ───────────
+
+  group('TaskSync — recur_until', () {
+    test('push: an offline create carries recur_until in the POST body',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('Water plants', id: 'ru-c1',
+          recurring: '0 9 * * *', recurUntil: '2026-09-30');
+
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+
+      final post =
+          transport.calls.firstWhere((c) => c.method == 'POST');
+      expect(post.body!['recur_until'], '2026-09-30',
+          reason: 'a missed create-payload mapping silently drops the field');
+    });
+
+    test('push: an update carries recur_until (incl. the "" clear) in the '
+        'PATCH body', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('Repeats', id: 'ru-u1',
+          recurring: '0 9 * * *', recurUntil: '2026-09-30');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate('ru-u1', recurUntil: '');
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+
+      final patch =
+          transport.calls.firstWhere((c) => c.method == 'PATCH');
+      expect(patch.body!.containsKey('recur_until'), isTrue,
+          reason: 'the clear sentinel must ride the PATCH, not be dropped');
+      expect(patch.body!['recur_until'], '');
+    });
+
+    test('pull: a server task with recur_until lands it in the cache',
+        () async {
+      final dao = await _freshDao();
+      final serverJson = _serverTaskJson(id: 'ru-p1', title: 'From server');
+      serverJson['recurring'] = '0 9 * * *';
+      serverJson['recur_until'] = '2026-10-15';
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [serverJson],
+        'deleted': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+
+      await TaskSync(dao, TasksRepository(transport)).pull();
+
+      final stored = await dao.getById('ru-p1');
+      expect(stored!.recurUntil, '2026-10-15',
+          reason: 'a missed pull-merge mapping loses the field and LWW '
+              'propagates the loss');
+    });
+  });
 }
 
 // ── test helpers ─────────────────────────────────────────────────────────────

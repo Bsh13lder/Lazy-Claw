@@ -1420,6 +1420,84 @@ void main() {
     // With the old lexical _gte this stayed 'Local name' (server stranded).
     expect((await dao.getProject('ts1'))!.name, 'Server name');
   });
+
+  // ── start_date / due_date (the project time frame) ride push AND pull ─────
+
+  group('BudgetsSync — project time frame', () {
+    test('push: an offline-created project keeps its dates in the create '
+        'POST body', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Timed', id: 'tf-c1',
+          startDate: '2026-08-01', dueDate: '2026-09-15');
+
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      final post = transport.calls.firstWhere((c) => c.method == 'POST');
+      expect(post.body!['start_date'], '2026-08-01',
+          reason: 'the create payload builder hand-enumerates fields — a '
+              'missed one silently drops the date on push');
+      expect(post.body!['due_date'], '2026-09-15');
+    });
+
+    test('push: a dates update (incl. the "" clear) rides the PATCH body',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Timed', id: 'tf-u1',
+          startDate: '2026-08-01', dueDate: '2026-09-15');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+
+      await dao.applyLocalProjectUpdate('tf-u1',
+          startDate: '2026-08-05', dueDate: '');
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      final patch = transport.calls.firstWhere((c) => c.method == 'PATCH');
+      expect(patch.body!['start_date'], '2026-08-05');
+      expect(patch.body!.containsKey('due_date'), isTrue,
+          reason: 'the clear sentinel must ride the PATCH, not be dropped');
+      expect(patch.body!['due_date'], '');
+    });
+
+    test('pull: a server project with dates lands them in the cache',
+        () async {
+      final dao = await _freshDao();
+      final serverJson = _serverProjectJson(id: 'tf-p1', name: 'From server');
+      serverJson['start_date'] = '2026-08-01';
+      serverJson['due_date'] = '2026-09-15';
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [serverJson],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+
+      await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      final stored = await dao.getProject('tf-p1');
+      expect(stored!.startDate, '2026-08-01');
+      expect(stored.dueDate, '2026-09-15');
+    });
+
+    test('self-heal: a stranded project create re-enqueues WITH its dates',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Stranded', id: 'tf-o1',
+          startDate: '2026-08-01', dueDate: '2026-09-15');
+      // Simulate an older build silently draining the create op.
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      final healed = await dao.reenqueueOrphanedCreates();
+
+      expect(healed, 1);
+      final outbox = await dao.readBudgetsOutbox();
+      expect(outbox.single.payload['start_date'], '2026-08-01');
+      expect(outbox.single.payload['due_date'], '2026-09-15');
+    });
+  });
 }
 
 // ── test helpers ─────────────────────────────────────────────────────────────

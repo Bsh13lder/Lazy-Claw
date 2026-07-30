@@ -116,6 +116,14 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late Recurrence _recurrence;
   bool _recurrenceTouched = false;
 
+  /// The recurring series' end day (`yyyy-MM-dd`), or null = repeats forever
+  /// ("Never"). Seeded from the task (the stored value may be a full ISO
+  /// datetime — only the day part is edited here). [_recurUntilTouched] gates
+  /// whether Save writes the column (sending the `''` sentinel to clear), so a
+  /// title-only edit never churns it.
+  String? _recurUntil;
+  bool _recurUntilTouched = false;
+
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
 
   @override
@@ -148,6 +156,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _originalSteps = serializeSubtasks(_subtasks);
     _category = (t.category == null || t.category!.isEmpty) ? null : t.category;
     _recurrence = recurrenceFromCron(t.recurring);
+    _recurUntil = (t.recurUntil == null || t.recurUntil!.isEmpty)
+        ? null
+        : dueDateDayPart(t.recurUntil!);
   }
 
   /// The effective reminder lead (explicit choice wins over the global default).
@@ -318,6 +329,18 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 dueAnchor: recurrenceAnchorFromDue(_composedDue),
               ) ??
               '');
+    // Only write `recur_until` when the user touched the Ends control (the ''
+    // sentinel clears back to "Never" — mirrors the recurring convention). When
+    // the recurrence itself was just cleared, an end date is an orphan: clear it
+    // too (but only when there is something to clear, so a plain edit doesn't
+    // churn the column).
+    String? recurUntilArg;
+    if (recurringArg != null && recurringArg.isEmpty) {
+      recurUntilArg =
+          (_recurUntil != null || _recurUntilTouched) ? '' : null;
+    } else if (_recurUntilTouched) {
+      recurUntilArg = _recurUntil ?? '';
+    }
     await ref
         .read(tasksProvider.notifier)
         .updateTask(
@@ -334,6 +357,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           // Untouched reminders ride as null (absent) — see [_reminderArg].
           reminderAt: _reminderArg,
           recurring: recurringArg,
+          recurUntil: recurUntilArg,
           tags: tagsArg,
           allocatedBudget: budgetArg,
           clearAllocatedBudget: clearBudget,
@@ -683,6 +707,52 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             }),
           ),
 
+          // ── Series end (only when a recurrence is selected) ────────────
+          if (_recurrence.repeats) ...[
+            const SizedBox(height: AppSpacing.md),
+            _SectionLabel('ENDS'),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                LzChip(
+                  key: const Key('task-detail-recur-until-never'),
+                  label: 'Never',
+                  icon: Icons.all_inclusive,
+                  selected: _recurUntil == null,
+                  color: AppColors.accent,
+                  onTap: () => setState(() {
+                    _recurUntilTouched = true;
+                    _recurUntil = null;
+                  }),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  key: const Key('task-detail-recur-until-date'),
+                  label: _recurUntil ?? 'On date…',
+                  icon: Icons.event_outlined,
+                  selected: _recurUntil != null,
+                  color: AppColors.info,
+                  onTap: _pickRecurUntil,
+                ),
+                if (_recurUntil != null) ...[
+                  const SizedBox(width: AppSpacing.sm),
+                  GestureDetector(
+                    key: const Key('task-detail-recur-until-clear'),
+                    onTap: () => setState(() {
+                      _recurUntilTouched = true;
+                      _recurUntil = null;
+                    }),
+                    child: Icon(
+                      Icons.close,
+                      size: 16,
+                      color: AppColors.textMuted,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ],
+
           const SizedBox(height: AppSpacing.xl),
 
           // ── Sub-tasks ──────────────────────────────────────────────────
@@ -766,6 +836,36 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       setState(() {
         _dueTouched = true;
         _dueDay = _isoFor(picked);
+      });
+    }
+  }
+
+  /// Pick the series' end day. A long horizon (10 years) so a yearly recurrence
+  /// can still be given a meaningful end date.
+  Future<void> _pickRecurUntil() async {
+    final now = DateTime.now();
+    DateTime initial = now.add(const Duration(days: 30));
+    final existing = _recurUntil == null ? null : DateTime.tryParse(_recurUntil!);
+    if (existing != null && !existing.isBefore(now)) initial = existing;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 3650)),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.accent,
+            surface: AppColors.bgSurfaceElevated,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() {
+        _recurUntilTouched = true;
+        _recurUntil = _isoFor(picked);
       });
     }
   }

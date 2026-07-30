@@ -15,6 +15,11 @@ class Task {
   final String? dueDate;
   final String? reminderAt;
   final String? recurring;
+
+  /// The recurring series' end: a date-only `yyyy-MM-dd` (the series runs
+  /// through the END of that day) or a full ISO datetime. Null (or the `''`
+  /// clear sentinel riding an update, mirroring [recurring]) = repeats forever.
+  final String? recurUntil;
   final String? tags;
   final int nagCount;
   final String createdAt;
@@ -39,6 +44,7 @@ class Task {
     this.dueDate,
     this.reminderAt,
     this.recurring,
+    this.recurUntil,
     this.tags,
     required this.nagCount,
     required this.createdAt,
@@ -71,6 +77,7 @@ class Task {
       dueDate: _str(json['due_date']),
       reminderAt: _str(json['reminder_at']),
       recurring: _str(json['recurring']),
+      recurUntil: _str(json['recur_until']),
       tags: _str(json['tags']),
       nagCount: _int(json['nag_count']) ?? 0,
       createdAt: _str(json['created_at']) ?? '',
@@ -97,6 +104,7 @@ class Task {
         'due_date': dueDate,
         'reminder_at': reminderAt,
         'recurring': recurring,
+        'recur_until': recurUntil,
         'tags': tags,
         'nag_count': nagCount,
         'created_at': createdAt,
@@ -127,6 +135,7 @@ class Task {
     bool clearDueDate = false,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? tags,
     int? nagCount,
     String? createdAt,
@@ -152,6 +161,7 @@ class Task {
         dueDate: clearDueDate ? null : (dueDate ?? this.dueDate),
         reminderAt: reminderAt ?? this.reminderAt,
         recurring: recurring ?? this.recurring,
+        recurUntil: recurUntil ?? this.recurUntil,
         tags: tags ?? this.tags,
         nagCount: nagCount ?? this.nagCount,
         createdAt: createdAt ?? this.createdAt,

@@ -224,6 +224,8 @@ class BudgetsSync {
               budget: _asDouble(p['budget']),
               description: p['description']?.toString(),
               color: p['color']?.toString(),
+              startDate: p['start_date']?.toString(),
+              dueDate: p['due_date']?.toString(),
             );
             break;
           case BudgetsOutboxOp.update:
@@ -714,6 +716,8 @@ class BudgetsSync {
       'description',
       'color',
       'is_favorite',
+      'start_date',
+      'due_date',
     ];
     final serverJson = serverProject.toJson();
     var any = false;

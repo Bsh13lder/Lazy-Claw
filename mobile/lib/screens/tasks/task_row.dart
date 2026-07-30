@@ -238,8 +238,17 @@ class _TaskRowState extends State<TaskRow> {
     // a date-only due (the Smart-Reschedule 10:00 AM default). Null = no time.
     final cardTimeLabel = cardDueTimeLabel(task.dueDate, task.reminderAt);
     // A subtle "🔁 <label>" chip when the task repeats (the recurrence cron
-    // parses to a known kind, or a generic "Repeats" for a custom cron).
-    final recurLabel = cronChipLabel(task.recurring);
+    // parses to a known kind, or a generic "Repeats" for a custom cron). When
+    // the series carries an end date, append "· until <day>" so the finite run
+    // is visible at a glance.
+    final baseRecurLabel = cronChipLabel(task.recurring);
+    final hasRecurUntil =
+        task.recurUntil != null && task.recurUntil!.isNotEmpty;
+    final recurLabel = baseRecurLabel == null
+        ? null
+        : (hasRecurUntil
+            ? '$baseRecurLabel · until ${dueDateDayPart(task.recurUntil!)}'
+            : baseRecurLabel);
     final subtasksEditable = widget.onSubtasksChanged != null;
     final showChecklist = hasSubtasks && subtasksEditable && _subtasksExpanded;
 

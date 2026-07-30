@@ -257,6 +257,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           category: result.category,
           reminderAt: result.reminderAt,
           recurring: result.recurring,
+          recurUntil: result.recurUntil,
           description: result.description,
           steps: result.steps,
         );
@@ -271,9 +272,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       context,
       title: 'New Project',
       builder: (_) => AddProjectSheet(
-        onSubmit: (name, budget, color) => ref
-            .read(budgetsProvider.notifier)
-            .createProject(name, budget: budget, color: color),
+        onSubmit: (name, budget, color, startDate, dueDate) =>
+            ref.read(budgetsProvider.notifier).createProject(
+                  name,
+                  budget: budget,
+                  color: color,
+                  startDate: startDate,
+                  dueDate: dueDate,
+                ),
       ),
     );
   }

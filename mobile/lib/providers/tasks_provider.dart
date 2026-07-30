@@ -213,6 +213,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? description,
     String? steps,
   }) async {
@@ -225,6 +226,12 @@ class TasksNotifier extends StateNotifier<TasksState> {
           : reminderAt;
       // Likewise an empty cron means "does not repeat" — normalise to null.
       final recur = (recurring != null && recurring.isEmpty) ? null : recurring;
+      // An empty series-end means "repeats forever" on create — normalise to
+      // null (the '' sentinel is only meaningful as a *clear* on update). A
+      // series end without a recurrence is meaningless, so it's dropped too.
+      final until = (recurUntil == null || recurUntil.isEmpty || recur == null)
+          ? null
+          : recurUntil;
       // Empty notes / an empty serialized checklist mean "none" on create —
       // normalise to null so we don't persist a blank column or a literal "[]".
       final desc = (description != null && description.isEmpty)
@@ -238,6 +245,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
         category: category,
         reminderAt: remAt,
         recurring: recur,
+        recurUntil: until,
         description: desc,
         steps: st,
       );
@@ -267,6 +275,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? steps,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? tags,
     double? allocatedBudget,
     bool clearAllocatedBudget = false,
@@ -282,6 +291,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
         steps: steps,
         reminderAt: reminderAt,
         recurring: recurring,
+        recurUntil: recurUntil,
         tags: tags,
         allocatedBudget: allocatedBudget,
         clearAllocatedBudget: clearAllocatedBudget,

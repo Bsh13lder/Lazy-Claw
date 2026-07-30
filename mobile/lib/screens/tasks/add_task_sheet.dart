@@ -72,6 +72,10 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   Recurrence? _manualRecurrence;
   bool _recurrenceTouched = false;
 
+  /// The series' end day (`yyyy-MM-dd`), or null = repeats forever ("Never").
+  /// Only meaningful (and only shown) while a recurrence is selected.
+  String? _recurUntil;
+
   bool _submitting = false;
 
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
@@ -208,6 +212,8 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       recurrence,
       dueAnchor: recurrenceAnchorFromDue(dueDate),
     );
+    // The series end only rides along when the task actually repeats.
+    final recurUntil = recurring == null ? null : _recurUntil;
 
     // Notes → description (null when blank so we don't persist an empty column)
     // and the checklist → serialized `steps` (null for an empty list).
@@ -223,6 +229,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
         category: parsed.project,
         reminderAt: reminderAt.isEmpty ? null : reminderAt,
         recurring: recurring,
+        recurUntil: recurUntil,
         description: notes.isEmpty ? null : notes,
         steps: steps,
       ),
@@ -547,6 +554,53 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             }),
           ),
 
+          // ── Series end (only when a recurrence is selected) ────────────
+          if (_effectiveRecurrence.repeats) ...[
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'ENDS',
+              style: AppText.caption.copyWith(
+                color: AppColors.textMuted,
+                letterSpacing: 0.8,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                LzChip(
+                  key: const Key('add-task-recur-until-never'),
+                  label: 'Never',
+                  icon: Icons.all_inclusive,
+                  selected: _recurUntil == null,
+                  color: AppColors.accent,
+                  onTap: () => setState(() => _recurUntil = null),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  key: const Key('add-task-recur-until-date'),
+                  label: _recurUntil ?? 'On date…',
+                  icon: Icons.event_outlined,
+                  selected: _recurUntil != null,
+                  color: AppColors.info,
+                  onTap: _pickRecurUntil,
+                ),
+                if (_recurUntil != null) ...[
+                  const SizedBox(width: AppSpacing.sm),
+                  GestureDetector(
+                    key: const Key('add-task-recur-until-clear'),
+                    onTap: () => setState(() => _recurUntil = null),
+                    child: Icon(
+                      Icons.close,
+                      size: 16,
+                      color: AppColors.textMuted,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ],
+
           // ── Sub-tasks ──────────────────────────────────────────────────
           const SizedBox(height: AppSpacing.xl),
           Row(
@@ -658,6 +712,33 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     }
   }
 
+  /// Pick the series' end day. A long horizon (10 years) so a yearly recurrence
+  /// can still be given a meaningful end date.
+  Future<void> _pickRecurUntil() async {
+    final now = DateTime.now();
+    DateTime initial = now.add(const Duration(days: 30));
+    final existing = _recurUntil == null ? null : DateTime.tryParse(_recurUntil!);
+    if (existing != null && !existing.isBefore(now)) initial = existing;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 3650)),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.accent,
+            surface: AppColors.bgSurfaceElevated,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() => _recurUntil = _isoFor(picked));
+    }
+  }
+
   String _isoFor(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
@@ -675,6 +756,7 @@ class _AddTaskResult {
     this.category,
     this.reminderAt,
     this.recurring,
+    this.recurUntil,
     this.description,
     this.steps,
   });
@@ -688,6 +770,10 @@ class _AddTaskResult {
 
   /// A standard 5-field cron expression when the task repeats, else null.
   final String? recurring;
+
+  /// The series' end day (`yyyy-MM-dd`) when the task repeats until a date,
+  /// else null (repeats forever / does not repeat).
+  final String? recurUntil;
 
   /// Free-form notes → the task's `description`, or null when blank.
   final String? description;
@@ -714,6 +800,7 @@ Future<
     String? category,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? description,
     String? steps,
   })?
@@ -737,6 +824,7 @@ showAddTaskSheet(
     category: result.category,
     reminderAt: result.reminderAt,
     recurring: result.recurring,
+    recurUntil: result.recurUntil,
     description: result.description,
     steps: result.steps,
   );

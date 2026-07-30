@@ -223,6 +223,7 @@ class TaskDao {
     String? dueDate,
     String? reminderAt,
     String? recurring,
+    String? recurUntil,
     String? steps,
     String owner = 'user',
     String? userId,
@@ -241,6 +242,7 @@ class TaskDao {
       dueDate: dueDate,
       reminderAt: reminderAt,
       recurring: recurring,
+      recurUntil: recurUntil,
       steps: steps,
       nagCount: 0,
       createdAt: now,
@@ -270,6 +272,7 @@ class TaskDao {
         'due_date': ?dueDate,
         'reminder_at': ?reminderAt,
         'recurring': ?recurring,
+        'recur_until': ?recurUntil,
         'steps': ?steps,
       };
       await _enqueueTxn(txn, OutboxOp.create, taskId, payload, now);
@@ -291,6 +294,7 @@ class TaskDao {
     String? reminderAt,
     String? steps,
     String? recurring,
+    String? recurUntil,
     String? tags,
     double? allocatedBudget,
     bool clearAllocatedBudget = false,
@@ -317,6 +321,7 @@ class TaskDao {
       reminderAt: reminderAt,
       steps: steps,
       recurring: recurring,
+      recurUntil: recurUntil,
       tags: tags,
       allocatedBudget: allocatedBudget,
       clearAllocatedBudget: clearAllocatedBudget,
@@ -332,6 +337,10 @@ class TaskDao {
       'reminder_at': ?reminderAt,
       'steps': ?steps,
       'recurring': ?recurring,
+      // recur_until mirrors the `recurring` convention exactly: a value sets,
+      // the `''` sentinel rides verbatim (server clears on empty), null =
+      // untouched (the ?-syntax drops the key).
+      'recur_until': ?recurUntil,
       // tags rides as a JSON-array STRING (same as the cache column); it's
       // decoded to a list at push time (task_sync), mirroring `steps`.
       'tags': ?tags,
@@ -577,6 +586,7 @@ class TaskDao {
           if (task.dueDate != null) 'due_date': task.dueDate,
           if (task.reminderAt != null) 'reminder_at': task.reminderAt,
           if (task.recurring != null) 'recurring': task.recurring,
+          if (task.recurUntil != null) 'recur_until': task.recurUntil,
           if (task.steps != null) 'steps': task.steps,
         };
         await _enqueueTxn(txn, OutboxOp.create, id, payload, now);
@@ -761,6 +771,7 @@ class TaskDao {
     dueDate: row['due_date'] as String?,
     reminderAt: row['reminder_at'] as String?,
     recurring: row['recurring'] as String?,
+    recurUntil: row['recur_until'] as String?,
     tags: row['tags'] as String?,
     nagCount: (row['nag_count'] as int?) ?? 0,
     createdAt: row['created_at'] as String? ?? '',
@@ -786,6 +797,7 @@ class TaskDao {
     'due_date': t.dueDate,
     'reminder_at': t.reminderAt,
     'recurring': t.recurring,
+    'recur_until': t.recurUntil,
     'tags': t.tags,
     'nag_count': t.nagCount,
     'created_at': t.createdAt,

@@ -769,3 +769,135 @@ class AddRecurringExpenseSkill(BaseSkill):
             f"Scheduled {_fmt_money(amount, rule.get('currency'))} recurring on "
             f"**{proj['name']}** (`{cron}`). Next charge: {rule.get('next_run')}."
         )
+
+
+class ListProjectsSkill(BaseSkill):
+    """Enumerate the user's projects with budget/spent/remaining."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "list_projects"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List all the user's projects with budget, spent and remaining. "
+            "Use to enumerate projects ('what projects do I have', 'show my "
+            "project budgets') or before filing expenses. Read-only."
+        )
+
+    @property
+    def category(self) -> str:
+        return "budgets"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter: 'active' (default), 'archived' or 'all'",
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.budgets import store
+
+        status = (params.get("status") or "active").strip().lower()
+        projects = await store.list_projects(
+            self._config, user_id, status=None if status == "all" else status,
+        )
+        if not projects:
+            return "No projects yet. Create one with create_project or just log an expense."
+        lines = [
+            f"• **{p['name']}** — budget {_fmt_money(p.get('budget'), p.get('currency'))}, "
+            f"spent {_fmt_money(p.get('spent', 0), p.get('currency'))}, "
+            f"{_fmt_money(p.get('remaining', 0), p.get('currency'))} left"
+            + (" _(archived)_" if p.get("status") == "archived" else "")
+            for p in projects
+        ]
+        return "\n".join(lines)
+
+
+class ListBudgetTopupsSkill(BaseSkill):
+    """Read the budget top-up ledger (budget_entries) — the money-IN side."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "list_budget_topups"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Show budget top-ups (top up / topup history): the ledger of money "
+            "ADDED to project budgets — when, how much, and the source (who/why). "
+            "Answers 'show my top-ups', 'budget history', 'where did the budget "
+            "come from', 'money added to X'. Omit project for all projects. "
+            "Read-only."
+        )
+
+    @property
+    def category(self) -> str:
+        return "budgets"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Project name (fuzzy-matched). Omit for ALL projects.",
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.budgets import resolver, store
+
+        projects = await store.list_projects(self._config, user_id)
+        query = (params.get("project") or "").strip()
+        if query:
+            res = resolver.resolve_project(query, projects)
+            if res.resolved is None:
+                names = ", ".join(p["name"] for p in projects[:10])
+                return f"No project matches `{query}`. Projects: {names or '(none)'}."
+            projects = [p for p in projects if p["id"] == res.resolved.id]
+
+        sections: list[str] = []
+        for p in projects:
+            entries = await store.list_budget_entries(self._config, user_id, p["id"])
+            if not entries:
+                continue
+            lines = [
+                f"  {'＋' if float(e.get('amount') or 0) >= 0 else '−'}"
+                f"{_fmt_money(abs(float(e.get('amount') or 0)), e.get('currency'))} "
+                f"— {e.get('source') or ('budget edit' if e.get('kind') == 'edit' else 'top-up')} "
+                f"({(e.get('created_at') or '')[:10]})"
+                for e in entries
+            ]
+            total = sum(float(e.get("amount") or 0) for e in entries)
+            sections.append(
+                f"**{p['name']}** — {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}, "
+                f"net {_fmt_money(total, p.get('currency'))}:\n" + "\n".join(lines)
+            )
+        if not sections:
+            scope = f" on **{projects[0]['name']}**" if query and projects else ""
+            return f"No top-ups recorded{scope} yet. Add one with add_project_budget."
+        return "\n\n".join(sections)

@@ -93,6 +93,7 @@ class UpdateExpenseBody(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     vendor: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
+    project_id: str | None = None
     task_id: str | None = None
     spent_at: str | None = None
     status: Literal["posted", "void"] | None = None
@@ -363,6 +364,12 @@ async def update_expense_route(
     for required in ("amount", "currency", "status"):
         if required in fields and fields[required] is None:
             fields.pop(required)
+    if "project_id" in fields:
+        if not fields["project_id"]:
+            raise HTTPException(400, "project_id cannot be null — every expense belongs to a project")
+        target = await store.get_project(_config, user.id, fields["project_id"])
+        if target is None:
+            raise HTTPException(404, "project not found")
     if not fields:
         logger.warning(
             "[route:budgets] PATCH expense id=%s user=%s -> 400 no fields to update",

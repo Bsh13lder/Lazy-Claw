@@ -110,3 +110,39 @@ async def test_set_budget_and_report(client) -> None:
     body = r.json()
     assert body["total_budget"] == 750
     assert body["projects"][0]["name"] == "nima"
+
+
+@pytest.mark.asyncio
+async def test_patch_expense_moves_project(client) -> None:
+    tc = client
+    a = tc.post("/api/budgets/projects", json={"name": "General"}).json()["project"]
+    b = tc.post("/api/budgets/projects", json={"name": "ClubBay"}).json()["project"]
+    e = tc.post(
+        f"/api/budgets/projects/{a['id']}/expenses",
+        json={"amount": 12, "description": "coffee"},
+    ).json()["expense"]
+
+    r = tc.patch(f"/api/budgets/expenses/{e['id']}", json={"project_id": b["id"]})
+    assert r.status_code == 200, r.text
+
+    # The move persisted server-side (this was silently dropped before).
+    moved = tc.get(f"/api/budgets/projects/{b['id']}/expenses").json()["expenses"]
+    assert [x["id"] for x in moved] == [e["id"]]
+    assert tc.get(f"/api/budgets/projects/{a['id']}/expenses").json()["expenses"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_expense_rejects_bad_project(client) -> None:
+    tc = client
+    a = tc.post("/api/budgets/projects", json={"name": "General"}).json()["project"]
+    e = tc.post(
+        f"/api/budgets/projects/{a['id']}/expenses",
+        json={"amount": 5, "description": "x"},
+    ).json()["expense"]
+
+    assert tc.patch(
+        f"/api/budgets/expenses/{e['id']}", json={"project_id": "nope"}
+    ).status_code == 404
+    assert tc.patch(
+        f"/api/budgets/expenses/{e['id']}", json={"project_id": None}
+    ).status_code == 400

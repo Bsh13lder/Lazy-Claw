@@ -535,7 +535,12 @@ export function TaskDetail({
         <div className="text-[10px] text-text-muted space-x-3">
           <span>ID <span className="font-mono">{task.id.slice(0, 8)}</span></span>
           <span>· created {new Date(task.created_at).toLocaleDateString()}</span>
-          {task.recurring && <span>· recurring {task.recurring}</span>}
+          {task.recurring && (
+            <span>
+              · recurring {task.recurring}
+              {task.recur_until ? ` until ${task.recur_until}` : ""}
+            </span>
+          )}
           {task.reminder_job_id && <span>· reminder scheduled</span>}
         </div>
       </div>

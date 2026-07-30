@@ -65,6 +65,9 @@ class CreateTaskBody(BaseModel):
     due_date: str | None = None
     reminder_at: str | None = None
     recurring: str | None = None
+    # Recurrence end — "YYYY-MM-DD" (series runs through the end of that day
+    # in the user's tz) or a full ISO datetime. Omit/None = repeats forever.
+    recur_until: str | None = None
     tags: list[str] | None = None
     steps: list[StepDraft] | None = None
     # Advance reminders. Omit (None) to auto-derive from the user's
@@ -86,6 +89,9 @@ class UpdateTaskBody(BaseModel):
     # complete via get_next_run). An empty string clears the recurrence — it is
     # falsy, so the respawn path treats it as "does not repeat".
     recurring: str | None = None
+    # Recurrence end. Empty string or explicit null clears it (mirrors the
+    # recurring convention).
+    recur_until: str | None = None
     tags: list[str] | None = None
     # Per-task budget allocation — a slice of the parent project's budget.
     # `None` leaves it alone; `0` clears it.
@@ -124,6 +130,31 @@ def _validate_recurring(value: str | None) -> None:
                 "cron expression — e.g. '0 9 * * 1' (every Monday at 09:00), "
                 "'0 8 * * *' (daily at 08:00), '0 9 1 * *' (1st of the month). "
                 "Send an empty string to clear the recurrence."
+            ),
+        )
+
+
+def _validate_recur_until(value: str | None) -> None:
+    """Reject a ``recur_until`` the respawn can't compare. 400, not 500.
+
+    Same fail-loud-at-the-boundary rationale as ``_validate_recurring``: an
+    LLM phrase like "in two weeks" stored silently would either be skipped by
+    the respawn (series never ends) or mis-flagged as a respawn failure.
+    ``None`` / empty string are allowed — they clear the end date.
+    """
+    if value is None or not str(value).strip():
+        return
+    from datetime import datetime as _dt
+
+    try:
+        _dt.fromisoformat(str(value).strip())
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{value!r} is not a valid recur_until. Use 'YYYY-MM-DD' "
+                "(the series runs through the end of that day) or a full ISO "
+                "datetime. Send an empty string to clear it."
             ),
         )
 
@@ -167,6 +198,7 @@ async def create_task_route(
         bool(body.id),
     )
     _validate_recurring(body.recurring)
+    _validate_recur_until(body.recur_until)
     steps_payload = (
         [s.model_dump() for s in body.steps] if body.steps else None
     )
@@ -198,6 +230,7 @@ async def create_task_route(
         due_date=body.due_date,
         reminder_at=reminder_at,
         recurring=body.recurring,
+        recur_until=body.recur_until,
         tags=body.tags,
         steps=steps_payload,
         pre_reminders=pre_reminders,
@@ -252,6 +285,8 @@ async def update_task_route(
         raise HTTPException(status_code=400, detail="No fields to update")
     if "recurring" in updates:
         _validate_recurring(updates["recurring"])
+    if "recur_until" in updates:
+        _validate_recur_until(updates["recur_until"])
 
     # Split the done transition out of the plain-field update.
     new_status = updates.pop("status", None)

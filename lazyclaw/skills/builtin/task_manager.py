@@ -248,8 +248,18 @@ class AddTaskSkill(BaseSkill):
                     "type": "string",
                     "description": (
                         "Cron expression for recurring tasks "
-                        "(e.g. '0 9 * * 1' for every Monday at 9am). "
+                        "(e.g. '0 9 * * 1' for every Monday at 9am, "
+                        "'0 9,21 * * *' for twice a day at 9 and 21). "
                         "When completed, the next occurrence auto-creates."
+                    ),
+                },
+                "recur_until": {
+                    "type": "string",
+                    "description": (
+                        "End date for a BOUNDED recurring series — "
+                        "'YYYY-MM-DD' (runs through the end of that day) or "
+                        "full ISO. 'medicines for two weeks' → today+14d. "
+                        "Omit for repeat-forever."
                     ),
                 },
                 "owner": {
@@ -420,6 +430,7 @@ class AddTaskSkill(BaseSkill):
                 due_date=due_date_param,
                 reminder_at=reminder_at,
                 recurring=recurring,
+                recur_until=params.get("recur_until"),
                 tags=user_supplied_tags,
                 steps=params.get("steps"),
                 pre_reminders=pre_reminders,
@@ -453,7 +464,8 @@ class AddTaskSkill(BaseSkill):
         if pre_reminders:
             result_parts.append("Advance reminders: " + ", ".join(pre_reminders))
         if task.get("recurring"):
-            result_parts.append(f"Recurring: {task['recurring']}")
+            until = f" · until {task['recur_until']}" if task.get("recur_until") else ""
+            result_parts.append(f"Recurring: {task['recurring']}{until}")
         if intake_clarification:
             result_parts.append("")
             result_parts.append(intake_clarification)

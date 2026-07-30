@@ -673,6 +673,7 @@ export interface TaskItem {
   reminder_at: string | null;
   reminder_job_id: string | null;
   recurring: string | null;
+  recur_until: string | null;
   tags: string | null;
   nag_count: number;
   created_at: string;
@@ -732,6 +733,7 @@ export const addTask = (body: {
   due_date?: string;
   reminder_at?: string;
   recurring?: string;
+  recur_until?: string;
   tags?: string[];
   steps?: { title: string; done?: boolean }[];
 }) =>
@@ -768,6 +770,8 @@ export const updateTask = (
     status: "todo" | "in_progress" | "done";
     due_date: string | null;
     reminder_at: string | null;
+    recurring: string | null;
+    recur_until: string | null;
     tags: string[];
     allocated_budget: number;
   }>,
@@ -820,6 +824,9 @@ export interface Project {
   status: "active" | "archived";
   description: string | null;
   lazybrain_note_id: string | null;
+  /** Project time frame — plaintext YYYY-MM-DD (or null). */
+  start_date?: string | null;
+  due_date?: string | null;
   /** Rolled-up totals (present on list/report). */
   spent?: number;
   remaining?: number;

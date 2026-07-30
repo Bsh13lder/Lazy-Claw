@@ -289,6 +289,17 @@ async def init_db(config: Config) -> None:
             # un-favorited. Exposed via list + /api/budgets/changes for the
             # offline sync pull, exactly like `color`.
             ("projects", "is_favorite", "ALTER TABLE projects ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
+            # Recurrence end (feat/task-timeframes 2026-07-30) — "medicines,
+            # twice a day, for two weeks". Plaintext date/ISO string (same
+            # profile as tasks.due_date); NULL = repeats forever. The respawn
+            # in complete_task stops the series past this bound.
+            ("tasks", "recur_until", "ALTER TABLE tasks ADD COLUMN recur_until TEXT"),
+            # Project time frame (feat/task-timeframes 2026-07-30) — plaintext
+            # YYYY-MM-DD start/deadline so the clients can show "due Aug 12"
+            # on a project. Cloned end-to-end from the `color` plumbing;
+            # exposed via list + /api/budgets/changes for the offline sync.
+            ("projects", "start_date", "ALTER TABLE projects ADD COLUMN start_date TEXT"),
+            ("projects", "due_date", "ALTER TABLE projects ADD COLUMN due_date TEXT"),
             # Per-expense favorite flag (star) — plaintext INTEGER 0/1, default 0.
             # Stars an individual expense so the web/mobile overview can show a
             # "starred only" total. Exposed via list + /api/budgets/changes for

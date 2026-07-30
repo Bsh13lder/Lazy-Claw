@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -71,6 +71,15 @@ TASK_COLUMNS = [
     # Per-task budget allocation — a slice of the parent project's budget.
     # Plaintext REAL (same profile as projects.budget); nullable.
     "allocated_budget",
+    # Recurrence end — plaintext date ("YYYY-MM-DD", end-of-day in the user's
+    # tz) or full ISO instant. NULL = repeats forever. Checked by the respawn:
+    # when the NEXT occurrence would land beyond it, the series finishes
+    # cleanly ("medicines, twice a day, for two weeks"). Carried onto every
+    # occurrence via the respawn's create_task kwarg — see
+    # test_recur_until_respawn.py for the behavioral guard (the disposition
+    # test's kwarg introspection alone cannot see whether the respawn actually
+    # passes it: the trace_session_id precedent).
+    "recur_until",
     # Offline-sync columns (feat/flutter-mobile) — plaintext timestamps so
     # the /changes delta feed can filter with a simple SQL comparison.
     # updated_at: bumped on every mutation (insert + every UPDATE path).
@@ -171,6 +180,83 @@ def normalize_reminder_to_utc(value: str | None, user_id: str | None) -> str | N
     reminder fired 2h late.
     """
     return _normalize_reminder_to_utc(value, user_id)
+
+
+def _validate_recur_until(value: str | None) -> str | None:
+    """Validate a recurrence-end value; empty clears, invalid raises.
+
+    Accepts a plain date (``YYYY-MM-DD`` — the series runs through the END of
+    that day in the user's tz) or a full ISO datetime. Loud rejection at the
+    write boundary on purpose: an unparseable value stored silently would
+    either be skipped by the respawn (series never ends, discovered weeks
+    later) or blow up inside its broad except and masquerade as a respawn
+    failure — the exact swallowed-``recurring`` history documented on the
+    route's ``_validate_recurring``.
+    """
+    if not value:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    try:
+        datetime.fromisoformat(trimmed)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"recur_until={trimmed!r} is not a date (YYYY-MM-DD) or ISO datetime"
+        ) from exc
+    return trimmed
+
+
+def _series_expired(
+    recur_until: str | None,
+    next_date: str | None,
+    next_reminder: str | None,
+    user_id: str,
+) -> bool:
+    """True when the NEXT occurrence lands beyond the series end.
+
+    A date-only ``recur_until`` means end-of-day IN THE USER'S TZ — comparing
+    against naive/UTC midnight would drop the final day's evening dose for a
+    Madrid user (the same off-by-one class as the 2026-07-25 naive drift).
+    """
+    if not recur_until:
+        return False
+    from lazyclaw.lazybrain.timezone_util import user_tz
+
+    tz = user_tz(user_id)
+    try:
+        parsed_until = datetime.fromisoformat(recur_until.strip())
+    except (ValueError, TypeError):
+        return False  # write-boundary validation makes this unreachable
+    if len(recur_until.strip()) == 10:
+        until_end = datetime.combine(parsed_until.date(), time(23, 59, 59), tzinfo=tz)
+    else:
+        until_end = (
+            parsed_until if parsed_until.tzinfo else parsed_until.replace(tzinfo=tz)
+        )
+
+    anchor: datetime | None = None
+    raw_anchor = next_reminder or next_date
+    if raw_anchor:
+        try:
+            anchor = datetime.fromisoformat(raw_anchor)
+        except (ValueError, TypeError):
+            return False
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=tz)
+    if anchor is None:
+        return False
+    return anchor.astimezone(timezone.utc) > until_end.astimezone(timezone.utc)
+
+
+class _SeriesEnded(Exception):
+    """Control-flow sentinel: the recurrence reached its ``recur_until``.
+
+    Raised inside the respawn's try so the deliberate end of a series is
+    caught BEFORE the broad respawn-failure handler — routing it through
+    ``_record_respawn_failure`` would stamp ``last_error`` and push an
+    'important' alert for a schedule that finished exactly as designed.
+    """
 
 
 def _compute_reminder_offset_minutes(
@@ -502,6 +588,7 @@ async def create_task(
     due_date: str | None = None,
     reminder_at: str | None = None,
     recurring: str | None = None,
+    recur_until: str | None = None,
     tags: list[str] | None = None,
     trace_session_id: str | None = None,
     steps: list[dict] | None = None,
@@ -521,6 +608,7 @@ async def create_task(
     # the API surface returns a 400 with a real reason instead of the
     # row landing in the table and never being nagged.
     reminder_at = _validate_iso_dt(reminder_at, "reminder_at")
+    recur_until = _validate_recur_until(recur_until)
     # Normalise a naive (mobile-shaped) reminder to UTC-aware so the heartbeat
     # fires it on time — see _normalize_reminder_to_utc.
     reminder_at = _normalize_reminder_to_utc(reminder_at, user_id)
@@ -646,6 +734,7 @@ async def create_task(
                 None,  # nudge_sent_at
                 None,  # last_pulse_fired_at
                 None,  # allocated_budget — opted into via update_task
+                recur_until,
                 updated_at,  # updated_at == created_at on insert
                 None,  # deleted_at — NULL until delete_task is called
             ),
@@ -680,6 +769,7 @@ async def create_task(
         "nudge_sent_at": None,
         "last_pulse_fired_at": None,
         "allocated_budget": None,
+        "recur_until": recur_until,
         "updated_at": updated_at,
         "deleted_at": None,
     }
@@ -969,6 +1059,10 @@ async def update_task(
         fields["reminder_at"] = _normalize_reminder_to_utc(
             fields["reminder_at"], user_id
         )
+    if "recur_until" in fields:
+        # '' and None both clear (mirrors the recurring convention); anything
+        # else must parse or the whole update is rejected loudly.
+        fields["recur_until"] = _validate_recur_until(fields["recur_until"])
     if "pre_reminders" in fields and fields["pre_reminders"] is not None:
         raw_list = fields["pre_reminders"]
         if isinstance(raw_list, str):
@@ -1470,6 +1564,11 @@ async def complete_task(
                 orig_reminder=task.get("reminder_at"),
             )
 
+            if _series_expired(
+                task.get("recur_until"), next_date, next_reminder, user_id
+            ):
+                raise _SeriesEnded
+
             tags = None
             if task.get("tags"):
                 try:
@@ -1516,6 +1615,12 @@ async def complete_task(
                 due_date=next_date,
                 reminder_at=next_reminder,
                 recurring=task["recurring"],
+                # Explicit on purpose: the disposition guard's kwarg
+                # introspection is satisfied by the parameter EXISTING, so an
+                # omission here would silently drop the end date on first
+                # completion and the series would repeat forever
+                # (trace_session_id precedent).
+                recur_until=task.get("recur_until"),
                 tags=tags,
                 steps=next_steps,
                 pre_reminders=next_pre_reminders or None,
@@ -1560,6 +1665,16 @@ async def complete_task(
                 len(next_steps or []), len(next_pre_reminders),
                 sorted(carried), user_id,
             )
+        except _SeriesEnded:
+            # The deliberate end of a bounded series ("for two weeks") — a
+            # finish, not a failure. Must be caught before the broad handler
+            # below: routing it there would stamp last_error and tell the
+            # user their schedule broke when it ended exactly as designed.
+            logger.info(
+                "[tasks] recurring series finished for task %s (user=%s, "
+                "until=%s)", task_id, user_id, task.get("recur_until"),
+            )
+            await _notify_series_finished(config, user_id, task_id, task)
         except Exception as exc:
             # A swallowed respawn is silent DATA LOSS of a whole series: the
             # task is already flipped to ``done`` above, and the ``status ==
@@ -1576,6 +1691,39 @@ async def complete_task(
             await _record_respawn_failure(config, user_id, task_id, task, exc)
 
     return True
+
+
+async def _notify_series_finished(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    task: dict,
+) -> None:
+    """Tell the user a bounded recurring series completed its run. Never raises."""
+    try:
+        from lazyclaw.notifications.spine import notify
+
+        title = task.get("title") or "recurring task"
+        until = task.get("recur_until") or ""
+        await notify(
+            config, user_id,
+            kind="task_series_finished",
+            title="Recurring series finished",
+            # Title is user content — the spine encrypts title/body at rest.
+            body=(
+                f"“{title}” ran its full course"
+                + (f" (through {until})" if until else "")
+                + ". No more occurrences are scheduled."
+            ),
+            severity="normal",
+            deep_link={"type": "task", "id": task_id},
+            dedup_key=f"task_series_finished:{task_id}",
+        )
+    except Exception:
+        logger.warning(
+            "[tasks] could not notify series finish for task %s (user=%s)",
+            task_id, user_id, exc_info=True,
+        )
 
 
 async def _record_respawn_failure(

@@ -45,6 +45,11 @@ class CreateProjectBody(BaseModel):
     # Optional favorite flag — pins the project into the mobile Home
     # "Favorites" section. None = leave as-is on an upsert.
     is_favorite: bool | None = None
+    # Optional time frame — plaintext YYYY-MM-DD. Lenient server-side: an
+    # unparseable date is cleared to None (never 500s), a datetime truncates
+    # to its date part.
+    start_date: str | None = Field(default=None, max_length=32)
+    due_date: str | None = Field(default=None, max_length=32)
 
 
 class SetBudgetBody(BaseModel):
@@ -64,6 +69,10 @@ class UpdateProjectBody(BaseModel):
     # Optional favorite flag — toggled from the mobile star control. None means
     # "leave unchanged" (dropped by the route's None-filter); True/False set it.
     is_favorite: bool | None = None
+    # Optional time frame — YYYY-MM-DD; empty string clears (normalized to
+    # NULL by the store's lenient _clean_project_date).
+    start_date: str | None = Field(default=None, max_length=32)
+    due_date: str | None = Field(default=None, max_length=32)
 
 
 class CreateExpenseBody(BaseModel):
@@ -144,7 +153,9 @@ async def create_project_route(
     project = await store.create_project(
         _config, user.id, body.name,
         budget=body.budget, currency=body.currency, description=body.description,
-        color=body.color, is_favorite=body.is_favorite, project_id=body.id or None,
+        color=body.color, is_favorite=body.is_favorite,
+        start_date=body.start_date, due_date=body.due_date,
+        project_id=body.id or None,
     )
     return {"project": project}
 

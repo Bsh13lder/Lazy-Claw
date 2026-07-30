@@ -36,6 +36,12 @@ Return ONLY a JSON object with these keys (use null when not mentioned):
                   reminders (e.g. lawyer/doctor/court appointments — emit
                   the resolved timestamps for "2 hours before" and
                   "1 hour before" reminder_at), or [] when not relevant.
+  recurring     — 5-field cron expression when the task repeats, else null.
+                  "every day at 9" → "0 9 * * *"; "twice a day at 9 and 21"
+                  → "0 9,21 * * *"; "every Monday" → "0 9 * * 1".
+  recur_until   — "YYYY-MM-DD" end date for a BOUNDED series, else null.
+                  "for two weeks" → the date 14 days from now; "until
+                  August 12" → "YYYY-08-12". Only meaningful with recurring.
 
 Rules:
   - If the user says "tomorrow", "in 2 hours", "next Monday" etc., you MUST
@@ -46,6 +52,9 @@ Rules:
     UNLESS the user already specified a different lead time.
   - Each pre_reminder must be strictly between now and reminder_at — never
     in the past, never at/after reminder_at.
+  - "medicines twice a day for two weeks" is the canonical bounded series:
+    recurring "0 9,21 * * *" (anchor stated times when given, else 9/21),
+    recur_until now+14 days, reminder_at = the first upcoming dose.
   - Keep the title terse — strip time phrases, priority words, tags.
   - Output strictly valid JSON with no markdown fences, no commentary.
 """
@@ -79,8 +88,11 @@ async def ai_parse_task(config: Config, user_id: str, text: str) -> dict:
     paid_router = LLMRouter(config)
     router = EcoRouter(config, paid_router)
 
-    now_iso = datetime.now().astimezone().isoformat()
-    user_msg = f"now: {now_iso}\ntimezone: Europe/Madrid\ninput: {text}"
+    from lazyclaw.tasks.timezone import get_user_tz
+
+    tz = await get_user_tz(config, user_id)
+    now_iso = datetime.now(tz).isoformat()
+    user_msg = f"now: {now_iso}\ntimezone: {tz}\ninput: {text}"
 
     messages = [
         LLMMessage(role="system", content=_SYSTEM_PROMPT),
@@ -108,6 +120,29 @@ async def ai_parse_task(config: Config, user_id: str, text: str) -> dict:
             return [v.strip()]
         return []
 
+    # Recurrence: only ship values downstream code can actually schedule —
+    # an invalid cron or date is dropped here rather than stored to die
+    # silently inside the respawn (the swallowed-"daily" history).
+    recurring = None
+    raw_recurring = parsed.get("recurring")
+    if isinstance(raw_recurring, str) and raw_recurring.strip():
+        try:
+            from lazyclaw.heartbeat.cron import is_valid as _cron_valid
+
+            if _cron_valid(raw_recurring.strip()):
+                recurring = raw_recurring.strip()
+        except Exception:
+            logger.debug("ai_parse_task: cron validation unavailable", exc_info=True)
+
+    recur_until = None
+    raw_until = parsed.get("recur_until")
+    if recurring and isinstance(raw_until, str) and raw_until.strip():
+        try:
+            datetime.fromisoformat(raw_until.strip())
+            recur_until = raw_until.strip()
+        except ValueError:
+            logger.debug("ai_parse_task: dropping unparseable recur_until %r", raw_until)
+
     return {
         "title": str(parsed.get("title") or "").strip(),
         "due_date": parsed.get("due_date") or None,
@@ -117,5 +152,7 @@ async def ai_parse_task(config: Config, user_id: str, text: str) -> dict:
         "tags": _as_list(parsed.get("tags")),
         "steps": _as_list(parsed.get("steps")),
         "pre_reminders": _as_list(parsed.get("pre_reminders")),
+        "recurring": recurring,
+        "recur_until": recur_until,
         "matched_time": None,
     }

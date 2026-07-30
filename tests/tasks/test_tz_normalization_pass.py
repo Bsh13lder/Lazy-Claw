@@ -154,6 +154,7 @@ async def test_create_route_derives_pre_reminders_from_normalized(cfg, monkeypat
         due_date = "2199-07-31"
         reminder_at = "2199-07-31T08:00:00"  # naive Madrid wall-clock
         recurring = None
+        recur_until = None
         tags = None
         steps = None
         pre_reminders = None

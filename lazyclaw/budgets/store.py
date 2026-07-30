@@ -41,6 +41,11 @@ PROJECT_COLUMNS = [
     # Per-project favorite flag (feat/flutter-mobile) — INTEGER 0/1, plaintext.
     # Pins a project into the mobile Home "Favorites" section. Default 0.
     "is_favorite",
+    # Project time frame (feat/task-timeframes 2026-07-30) — plaintext
+    # YYYY-MM-DD strings (or NULL) so clients can show "due Aug 12" on a
+    # project. Same lenient-normalize profile as color.
+    "start_date",
+    "due_date",
     "lazybrain_note_id", "created_at", "updated_at",
     # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
     # NULL = live; non-NULL = deleted. Exposed via /api/budgets/changes.
@@ -102,6 +107,26 @@ def _clean_color(value: str | None) -> str | None:
         return None
     candidate = value.strip()
     return candidate if _HEX_COLOR_RE.match(candidate) else None
+
+
+def _clean_project_date(value: str | None) -> str | None:
+    """Normalize a project start/due date to ``YYYY-MM-DD`` (or ``None``).
+
+    Lenient like ``_clean_color``: anything that isn't a parseable ISO date is
+    cleared to ``None`` rather than raising — a bad date must never 500 a
+    project write. A full datetime is truncated to its date part.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(candidate).date().isoformat()
+    except (ValueError, TypeError):
+        return None
 
 
 def _clean_favorite(value) -> int:
@@ -288,6 +313,8 @@ async def _merge_into_existing_project(
     description: str | None,
     color: str | None,
     is_favorite: bool | None,
+    start_date: str | None = None,
+    due_date: str | None = None,
 ) -> dict:
     """Idempotent upsert into an already-existing project (resolved by its
     ``name_key``). Only explicitly-provided, non-empty fields are applied so a
@@ -305,6 +332,10 @@ async def _merge_into_existing_project(
         updates["color"] = color
     if is_favorite is not None:
         updates["is_favorite"] = is_favorite
+    if start_date is not None:
+        updates["start_date"] = start_date
+    if due_date is not None:
+        updates["due_date"] = due_date
     if not existing.get("lazybrain_note_id"):
         note_id = await _ensure_project_note(
             config, user_id, name,
@@ -332,6 +363,8 @@ async def create_project(
     description: str | None = None,
     color: str | None = None,
     is_favorite: bool | None = None,
+    start_date: str | None = None,
+    due_date: str | None = None,
     project_id: str | None = None,
 ) -> dict:
     """Create or upsert a project by ``name_key``. Idempotent against
@@ -357,6 +390,8 @@ async def create_project(
     key = await get_user_dek(config, user_id)
     name_key = _name_key(name)
     color = _clean_color(color)
+    start_date = _clean_project_date(start_date)
+    due_date = _clean_project_date(due_date)
 
     # Idempotent replay: if the client-minted id already exists for this user,
     # return the existing row without inserting a duplicate.
@@ -381,6 +416,7 @@ async def create_project(
             config, user_id, existing,
             name=name, budget=budget, currency=currency,
             description=description, color=color, is_favorite=is_favorite,
+            start_date=start_date, due_date=due_date,
         )
 
     project_id = project_id or str(uuid4())
@@ -395,12 +431,13 @@ async def create_project(
             await db.execute(
                 "INSERT INTO projects "
                 "(id, user_id, name, name_key, budget, currency, status, "
-                "description, color, is_favorite, lazybrain_note_id, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+                "description, color, is_favorite, start_date, due_date, "
+                "lazybrain_note_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     project_id, user_id, encrypt(name, key), name_key,
                     budget, currency, _enc(description, key), color, favorite_int,
+                    start_date, due_date,
                     note_id, now, now,
                 ),
             )
@@ -416,6 +453,7 @@ async def create_project(
                 config, user_id, collided,
                 name=name, budget=budget, currency=currency,
                 description=description, color=color, is_favorite=is_favorite,
+                start_date=start_date, due_date=due_date,
             )
         raise
 
@@ -424,7 +462,9 @@ async def create_project(
         "id": project_id, "user_id": user_id, "name": name, "name_key": name_key,
         "budget": budget, "currency": currency, "status": "active",
         "description": description, "color": color,
-        "is_favorite": bool(favorite_int), "lazybrain_note_id": note_id,
+        "is_favorite": bool(favorite_int),
+        "start_date": start_date, "due_date": due_date,
+        "lazybrain_note_id": note_id,
         "created_at": now, "updated_at": now, "deleted_at": None,
     }
 
@@ -584,6 +624,11 @@ async def update_project(
     # Normalize the favorite flag to a stored INTEGER 0/1 (immutable update).
     if "is_favorite" in fields:
         fields = {**fields, "is_favorite": _clean_favorite(fields["is_favorite"])}
+    # Normalize time-frame dates (immutable update); invalid/empty clears.
+    if "start_date" in fields:
+        fields = {**fields, "start_date": _clean_project_date(fields["start_date"])}
+    if "due_date" in fields:
+        fields = {**fields, "due_date": _clean_project_date(fields["due_date"])}
 
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []

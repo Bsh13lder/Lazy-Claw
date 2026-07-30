@@ -256,7 +256,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     trace_session_id TEXT,                        -- conversation trace that created this task
     lazybrain_note_id TEXT,                       -- mirror note id for status sync
     pre_reminders TEXT,                           -- JSON array of pending advance-reminder ISO timestamps
-    allocated_budget REAL                         -- per-task slice of the parent project's budget (nullable; plaintext)
+    allocated_budget REAL,                        -- per-task slice of the parent project's budget (nullable; plaintext)
+    recur_until TEXT                              -- recurrence end: YYYY-MM-DD (end-of-day, user tz) or ISO instant; NULL = forever
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status
@@ -477,6 +478,8 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL DEFAULT 'active',   -- active | archived
     description TEXT,                  -- encrypted
     lazybrain_note_id TEXT,            -- the "<Name> Project" page note
+    start_date TEXT,                   -- plaintext YYYY-MM-DD; project time frame start
+    due_date TEXT,                     -- plaintext YYYY-MM-DD; project deadline
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );

@@ -40,3 +40,16 @@ def test_task_writes_are_not_auto_exempt() -> None:
 def test_write_set_is_subset_of_known_budget_tools() -> None:
     # Guard against typos — every exempt write must be a real budget tool.
     assert _QUICK_INLINE_BUDGET_WRITES <= _BUDGET_TOOL_NAMES
+
+
+def test_new_budget_tools_and_keywords_wired() -> None:
+    from lazyclaw.runtime import agent as agent_mod
+
+    for name in ("move_expense", "auto_assign_inbox", "list_projects", "list_budget_topups"):
+        assert name in agent_mod._BUDGET_TOOL_NAMES
+    for kw in ("top up", "top-up", "topup", "inbox", "assign"):
+        assert kw in agent_mod._BUDGET_KEYWORDS
+    for name in ("move_expense", "auto_assign_inbox"):
+        assert name in agent_mod._QUICK_INLINE_BUDGET_WRITES
+    for name in ("list_projects", "list_budget_topups"):
+        assert agent_mod._is_readonly_inspection(name)

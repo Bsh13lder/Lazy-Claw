@@ -234,3 +234,10 @@ async def test_auto_assign_empty_inbox(cfg):
     """Test that auto_assign_inbox gracefully handles empty inbox."""
     msg = await AutoAssignInboxSkill(cfg).execute("u1", {})
     assert "empty" in msg.lower() or "no unassigned" in msg.lower()
+
+
+def test_tasks_specialist_allowlists_new_budget_skills():  # noqa: remove asyncio mark
+    from pathlib import Path
+    text = Path("lazyclaw/teams/specialists/tasks_specialist.md").read_text()
+    for name in ("move_expense", "auto_assign_inbox", "list_projects", "list_budget_topups"):
+        assert f"- {name}" in text, name

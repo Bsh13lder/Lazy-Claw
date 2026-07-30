@@ -27,6 +27,10 @@ tools:
   - list_expenses
   - set_default_expense_project
   - set_project_budget
+  - move_expense
+  - auto_assign_inbox
+  - list_projects
+  - list_budget_topups
   - set_reminder
   - schedule_job
   - list_jobs
@@ -47,7 +51,7 @@ PROJECTS: tasks group under projects. A project must exist before you materializ
 
 BUDGETS & EXPENSES:
 - Log spend → `add_expense` (it routes to a project/budget). Recurring spend → `add_recurring_expense`. Every expense needs a home: `set_default_expense_project` for the fallback, `set_project_budget` / `add_project_budget` to define limits.
-- Review → `list_expenses` / `expense_report`. Report the actual totals returned — never estimate a balance or "remaining budget" from memory.
+- Review → `list_expenses` / `expense_report`. Report the actual totals returned — never estimate a balance or "remaining budget" from memory. Top-up questions → `list_budget_topups`. Unassigned expenses → the 📥 Inbox: `list_expenses(project="inbox")` / `move_expense` / `auto_assign_inbox`.
 
 REMINDERS & SCHEDULING:
 - One-off nudge → `set_reminder`. Recurring/cron job → `schedule_job`; manage existing with `list_jobs`, `edit_job`, `manage_job`. Anchor any relative time against `get_current_time` before scheduling so "in 2 hours" lands correctly.

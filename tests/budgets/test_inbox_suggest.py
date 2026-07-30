@@ -58,6 +58,38 @@ async def test_unknown_project_name_is_discarded(cfg, monkeypatch):
     assert s.confidence == "none"
 
 
+async def test_candidate_outside_first_20_is_discarded(cfg, monkeypatch):
+    # 21 active projects: the prompt only shows the LLM the first 20
+    # (`names[:20]`). A name that lands OUTSIDE that window must never be
+    # accepted, even though it's a real existing project — otherwise the
+    # LLM could "guess" a project it was never shown and we'd trust it.
+    for i in range(21):
+        await store.create_project(cfg, "u1", f"Proj{i:02d}")
+
+    # Discover the actual ordering `suggest_expense_project` will see
+    # (list_projects sorts by updated_at DESC) so the test doesn't assume
+    # a specific temporal pattern — it asks the real store for the truth.
+    projects = await store.list_projects(cfg, "u1", status="active")
+    names = [p["name"] for p in projects if p.get("name_key") != "general"]
+    assert len(names) == 21
+    outside_name = names[20]  # index 20 == 21st project, outside names[:20]
+
+    async def fake_chat(*a, **k):
+        return {
+            "content": (
+                '{"project_name": "%s", "confidence": "high", '
+                '"reason": "guessed"}' % outside_name
+            )
+        }
+    monkeypatch.setattr(inbox_suggest, "_worker_chat", fake_chat)
+
+    s = await inbox_suggest.suggest_expense_project(
+        cfg, "u1", description="x", vendor=None, amount=1, currency="EUR",
+    )
+    assert s.project_name is None
+    assert s.confidence == "none"
+
+
 async def test_timeout_and_garbage_never_raise(cfg, monkeypatch):
     await store.create_project(cfg, "u1", "ClubBay")
 

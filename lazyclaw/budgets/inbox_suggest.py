@@ -64,13 +64,18 @@ async def suggest_expense_project(
     timeout_s: float = 3.0,
 ) -> ExpenseSuggestion:
     """Never raises. Suggests only EXISTING project names (never General)."""
-    from lazyclaw.budgets import store
-
     try:
+        from lazyclaw.budgets import store
+
         projects = await store.list_projects(config, user_id, status="active")
         names = [p["name"] for p in projects if p.get("name_key") != "general"]
         if not names or not (description or vendor):
             return _empty()
+        # Cap ONCE: the same capped list is used for both the prompt context
+        # AND the validation set below, so an LLM reply can never resolve to
+        # a project name that was never shown to it (candidate/validation
+        # mismatch bug — a name outside the first 20 must be rejected).
+        candidates = names[:20]
 
         recents = await store.list_all_expenses(config, user_id)
         by_project: dict[str, list[str]] = {}
@@ -84,7 +89,7 @@ async def suggest_expense_project(
 
         context = "\n".join(
             f"- {n}: {', '.join(by_project.get(n, [])) or '(no expenses yet)'}"
-            for n in names[:20]
+            for n in candidates
         )
         prompt = (
             "An expense needs to be filed into one of the user's existing projects.\n"
@@ -108,7 +113,7 @@ async def suggest_expense_project(
             return _empty()
 
         name = data.get("project_name")
-        by_fold = {n.casefold(): n for n in names}
+        by_fold = {n.casefold(): n for n in candidates}
         resolved = by_fold.get(str(name).casefold()) if name else None
         if resolved is None:
             return _empty()

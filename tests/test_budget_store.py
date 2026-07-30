@@ -241,3 +241,37 @@ async def test_move_expense_repoints_note(cfg, monkeypatch):
     rows = await store.list_expenses(cfg, "u1", project_id=b["id"])
     assert rows[0]["lazybrain_note_id"] == "note-new"
 
+
+async def test_move_void_expense_repoints_note(cfg, monkeypatch):
+    """Verify that moving a void expense still re-points its note.
+
+    This test ensures that the re-point logic passes status=None to list_expenses,
+    not the default status="posted", so it finds and re-points even void expenses.
+    """
+    a = await store.create_project(cfg, "u1", "General")
+    b = await store.create_project(cfg, "u1", "ClubBay")
+    e = await store.create_expense(cfg, "u1", a["id"], amount=9, description="domain")
+
+    # Mark as void first
+    await store.update_expense(cfg, "u1", e["id"], status="void")
+
+    calls = {}
+    async def fake_write(config, user_id, **kw):
+        calls["project_name"] = kw["project_name"]
+        return "note-void-new"
+    async def fake_delete(config, user_id, note_id):
+        calls["deleted"] = note_id
+    monkeypatch.setattr(store, "_write_expense_note", fake_write)
+    monkeypatch.setattr(store, "_delete_note", fake_delete)
+
+    # Move the void expense to another project
+    ok = await store.update_expense(cfg, "u1", e["id"], project_id=b["id"])
+    assert ok
+    assert calls["project_name"] == "ClubBay", "re-point must run even for void expenses"
+
+    # Fetch with status=None to verify the note ID updated
+    rows = await store.list_expenses(cfg, "u1", project_id=b["id"], status=None)
+    void_rows = [r for r in rows if r["id"] == e["id"]]
+    assert void_rows, "void expense must be in the results with status=None filter"
+    assert void_rows[0]["lazybrain_note_id"] == "note-void-new"
+

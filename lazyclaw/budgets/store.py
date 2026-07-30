@@ -917,7 +917,7 @@ async def update_expense(
     # Re-point the LazyBrain note if the project changed (best-effort, never fails).
     if moved and "project_id" in fields:
         try:
-            rows = await list_expenses(config, user_id, project_id=fields["project_id"])
+            rows = await list_expenses(config, user_id, project_id=fields["project_id"], status=None)
             exp = next((r for r in rows if r["id"] == expense_id), None)
             proj = await get_project(config, user_id, fields["project_id"])
             if exp and proj:

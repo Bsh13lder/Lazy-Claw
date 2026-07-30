@@ -110,3 +110,93 @@ async def test_set_budget_and_report(client) -> None:
     body = r.json()
     assert body["total_budget"] == 750
     assert body["projects"][0]["name"] == "nima"
+
+
+@pytest.mark.asyncio
+async def test_patch_expense_moves_project(client) -> None:
+    tc = client
+    a = tc.post("/api/budgets/projects", json={"name": "General"}).json()["project"]
+    b = tc.post("/api/budgets/projects", json={"name": "ClubBay"}).json()["project"]
+    e = tc.post(
+        f"/api/budgets/projects/{a['id']}/expenses",
+        json={"amount": 12, "description": "coffee"},
+    ).json()["expense"]
+
+    r = tc.patch(f"/api/budgets/expenses/{e['id']}", json={"project_id": b["id"]})
+    assert r.status_code == 200, r.text
+
+    # The move persisted server-side (this was silently dropped before).
+    moved = tc.get(f"/api/budgets/projects/{b['id']}/expenses").json()["expenses"]
+    assert [x["id"] for x in moved] == [e["id"]]
+    assert tc.get(f"/api/budgets/projects/{a['id']}/expenses").json()["expenses"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_expense_rejects_bad_project(client) -> None:
+    tc = client
+    a = tc.post("/api/budgets/projects", json={"name": "General"}).json()["project"]
+    e = tc.post(
+        f"/api/budgets/projects/{a['id']}/expenses",
+        json={"amount": 5, "description": "x"},
+    ).json()["expense"]
+
+    assert tc.patch(
+        f"/api/budgets/expenses/{e['id']}", json={"project_id": "nope"}
+    ).status_code == 404
+    assert tc.patch(
+        f"/api/budgets/expenses/{e['id']}", json={"project_id": None}
+    ).status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_inbox_suggestions_endpoint(client, monkeypatch) -> None:
+    tc = client
+    tc.post("/api/budgets/projects", json={"name": "General"})
+    club = tc.post("/api/budgets/projects", json={"name": "ClubBay"}).json()["project"]
+    gen = next(p for p in tc.get("/api/budgets/projects").json()["projects"]
+               if p["name_key"] == "general")
+    e = tc.post(f"/api/budgets/projects/{gen['id']}/expenses",
+                json={"amount": 50, "description": "venue deposit"}).json()["expense"]
+
+    from lazyclaw.budgets.inbox_suggest import ExpenseSuggestion
+    import lazyclaw.gateway.routes.budgets as routes_mod
+
+    async def fake_suggest(config, user_id, **kw):
+        return ExpenseSuggestion("ClubBay", "high", "club spend", "llm")
+    monkeypatch.setattr(routes_mod.inbox_suggest, "suggest_expense_project", fake_suggest)
+
+    r = tc.post("/api/budgets/inbox/suggestions", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["suggestions"] == [{
+        "expense_id": e["id"], "project_id": club["id"], "project_name": "ClubBay",
+        "confidence": "high", "reason": "club spend",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_inbox_suggestions_empty_expense_ids_means_none(client, monkeypatch) -> None:
+    """An explicit ``expense_ids: []`` must mean "suggest for NONE of them",
+    not "absent" (which means ALL). Regression: ``if body.expense_ids:`` was
+    falsy for an empty list, silently falling through to "suggest for the
+    whole inbox"."""
+    tc = client
+    tc.post("/api/budgets/projects", json={"name": "General"})
+    gen = next(p for p in tc.get("/api/budgets/projects").json()["projects"]
+               if p["name_key"] == "general")
+    tc.post(f"/api/budgets/projects/{gen['id']}/expenses",
+            json={"amount": 50, "description": "venue deposit"})
+
+    import lazyclaw.gateway.routes.budgets as routes_mod
+
+    calls: list[int] = []
+
+    async def counting_suggest(config, user_id, **kw):
+        calls.append(1)
+        from lazyclaw.budgets.inbox_suggest import ExpenseSuggestion
+        return ExpenseSuggestion(None, "none", None, "none")
+    monkeypatch.setattr(routes_mod.inbox_suggest, "suggest_expense_project", counting_suggest)
+
+    r = tc.post("/api/budgets/inbox/suggestions", json={"expense_ids": []})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"suggestions": [], "skipped": 0}
+    assert calls == []

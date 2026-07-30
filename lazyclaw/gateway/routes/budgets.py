@@ -14,7 +14,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from lazyclaw.budgets import store
+from lazyclaw.budgets import inbox_suggest, store
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
 
@@ -93,12 +93,17 @@ class UpdateExpenseBody(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     vendor: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
+    project_id: str | None = None
     task_id: str | None = None
     spent_at: str | None = None
     status: Literal["posted", "void"] | None = None
     # Per-expense favorite flag (star). None = leave unchanged (dropped by the
     # route's None-filter); True/False set it — powers the "starred only" overview.
     is_favorite: bool | None = None
+
+
+class InboxSuggestionsBody(BaseModel):
+    expense_ids: list[str] | None = None
 
 
 class CreateRecurringBody(BaseModel):
@@ -363,6 +368,12 @@ async def update_expense_route(
     for required in ("amount", "currency", "status"):
         if required in fields and fields[required] is None:
             fields.pop(required)
+    if "project_id" in fields:
+        if not fields["project_id"]:
+            raise HTTPException(400, "project_id cannot be null — every expense belongs to a project")
+        target = await store.get_project(_config, user.id, fields["project_id"])
+        if target is None:
+            raise HTTPException(404, "project not found")
     if not fields:
         logger.warning(
             "[route:budgets] PATCH expense id=%s user=%s -> 400 no fields to update",
@@ -392,6 +403,32 @@ async def delete_expense_route(
         )
         raise HTTPException(status_code=404, detail="expense not found")
     return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Inbox suggestions
+# ---------------------------------------------------------------------------
+
+
+@router.post("/inbox/suggestions")
+async def inbox_suggestions_route(
+    body: InboxSuggestionsBody, user: User = Depends(get_current_user),
+):
+    gen = await store.get_project_by_name(_config, user.id, store.GENERAL_PROJECT_NAME)
+    if gen is None:
+        return {"suggestions": [], "skipped": 0}
+    expenses = await store.list_expenses(_config, user.id, project_id=gen["id"])
+    # An explicit `expense_ids: []` means "suggest for NONE of them" — it must
+    # NOT be treated the same as an absent/omitted field (which means ALL).
+    if body.expense_ids is not None:
+        wanted = set(body.expense_ids)
+        expenses = [e for e in expenses if e["id"] in wanted]
+    skipped = max(0, len(expenses) - 10)
+    expenses = expenses[:10]
+
+    projects = await store.list_projects(_config, user.id)
+    suggestions = await inbox_suggest.suggest_for_expenses(_config, user.id, expenses, projects)
+    return {"suggestions": suggestions, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

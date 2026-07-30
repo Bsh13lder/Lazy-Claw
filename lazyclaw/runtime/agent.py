@@ -969,12 +969,14 @@ _BUDGET_KEYWORDS = frozenset({
     "how much have i spent", "how much did i spend", "how much spent",
     "recurring expense", "recurring charge", "monthly cost",
     "expense report", "spending report", "set budget",
+    "top up", "top-up", "topup", "inbox", "assign",
 })
 
 _BUDGET_TOOL_NAMES = frozenset({
     "set_project_budget", "add_project_budget", "add_expense",
     "list_expenses", "expense_report", "add_recurring_expense",
     "set_default_expense_project",
+    "move_expense", "auto_assign_inbox", "list_projects", "list_budget_topups",
 })
 
 # Budget WRITES are quick single-shot ops (one DB row + a fire-and-forget
@@ -986,6 +988,7 @@ _BUDGET_TOOL_NAMES = frozenset({
 _QUICK_INLINE_BUDGET_WRITES = frozenset({
     "add_expense", "set_project_budget", "add_project_budget",
     "add_recurring_expense", "set_default_expense_project",
+    "move_expense", "auto_assign_inbox",
 })
 
 # Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job.
@@ -1354,6 +1357,7 @@ def _is_readonly_inspection(name: str) -> bool:
         # AUTO-PROMOTE'd to a Telegram-bound background task.
         "list_expenses",
         "expense_report",
+        "list_budget_topups",
         "list_projects",
         "get_project",
     }:

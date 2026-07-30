@@ -20,6 +20,7 @@ from lazyclaw.skills.builtin.budget_manager import (
     ListBudgetTopupsSkill,
     ListExpensesSkill,
     ListProjectsSkill,
+    MoveExpenseSkill,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -95,3 +96,55 @@ async def test_expense_report_shows_inbox_line(cfg):
 async def test_add_expense_fallback_mentions_inbox(cfg):
     msg = await AddExpenseSkill(cfg).execute("u1", {"amount": 3, "description": "gum"})
     assert "📥 Inbox" in msg
+
+
+async def test_move_expense_from_inbox_to_project(cfg):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "ClubBay", budget=100)
+    await store.create_expense(cfg, "u1", g["id"], amount=12, description="coffee beans")
+
+    msg = await MoveExpenseSkill(cfg).execute("u1", {"query": "coffee", "project": "ClubBay"})
+    assert "Moved" in msg and "ClubBay" in msg
+    club = await store.get_project_by_name(cfg, "u1", "ClubBay")
+    moved = await store.list_expenses(cfg, "u1", project_id=club["id"])
+    assert len(moved) == 1 and moved[0]["description"] == "coffee beans"
+    assert await store.list_expenses(cfg, "u1", project_id=g["id"]) == []
+
+
+async def test_move_expense_ambiguous_query_asks(cfg):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "ClubBay")
+    await store.create_expense(cfg, "u1", g["id"], amount=5, description="coffee small")
+    await store.create_expense(cfg, "u1", g["id"], amount=9, description="coffee large")
+
+    msg = await MoveExpenseSkill(cfg).execute("u1", {"query": "coffee", "project": "ClubBay"})
+    assert "coffee small" in msg and "coffee large" in msg
+    assert "No expense was moved" in msg
+    assert len(await store.list_expenses(cfg, "u1", project_id=g["id"])) == 2
+
+
+async def test_move_expense_all_inbox_bulk(cfg):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "Nima")
+    for d in ("a", "b", "c"):
+        await store.create_expense(cfg, "u1", g["id"], amount=1, description=d)
+
+    msg = await MoveExpenseSkill(cfg).execute("u1", {"project": "Nima", "all_inbox": True})
+    assert "3" in msg and "Nima" in msg
+    assert await store.list_expenses(cfg, "u1", project_id=g["id"]) == []
+
+
+async def test_move_expense_with_task_attach(cfg):
+    from lazyclaw.tasks.store import create_task
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "ClubBay")
+    await create_task(cfg, "u1", "Merchandise", category="ClubBay")
+    await store.create_expense(cfg, "u1", g["id"], amount=30, description="tshirts")
+
+    msg = await MoveExpenseSkill(cfg).execute(
+        "u1", {"query": "tshirts", "project": "ClubBay", "task_name": "Merch"},
+    )
+    assert "Merchandise" in msg
+    club = await store.get_project_by_name(cfg, "u1", "ClubBay")
+    moved = await store.list_expenses(cfg, "u1", project_id=club["id"])
+    assert moved[0]["task_id"] is not None

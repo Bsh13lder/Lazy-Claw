@@ -231,7 +231,7 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.budget_manager import (
             AddExpenseSkill, AddProjectBudgetSkill, AddRecurringExpenseSkill,
             CreateProjectSkill, ExpenseReportSkill, ListBudgetTopupsSkill,
-            ListExpensesSkill, ListProjectsSkill,
+            ListExpensesSkill, ListProjectsSkill, MoveExpenseSkill,
             SetDefaultExpenseProjectSkill, SetProjectBudgetSkill,
         )
         self.register(CreateProjectSkill(config=config))
@@ -241,6 +241,7 @@ class SkillRegistry:
         self.register(ListExpensesSkill(config=config))
         self.register(ExpenseReportSkill(config=config))
         self.register(AddRecurringExpenseSkill(config=config))
+        self.register(MoveExpenseSkill(config=config))
         self.register(SetDefaultExpenseProjectSkill(config=config))
         self.register(ListProjectsSkill(config=config))
         self.register(ListBudgetTopupsSkill(config=config))

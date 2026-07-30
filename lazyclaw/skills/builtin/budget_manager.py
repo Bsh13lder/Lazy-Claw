@@ -933,20 +933,49 @@ class MoveExpenseSkill(BaseSkill):
                 )
             moving = matches
 
+        # update_expense returns False (no exception) when the row no longer
+        # matches — e.g. it was deleted/changed elsewhere between our
+        # list_expenses read and this write. Track which moves actually
+        # landed so we never report "Moved" for a silent no-op.
+        moved_ok: list[dict] = []
         for e in moving:
-            await store.update_expense(
+            ok = await store.update_expense(
                 self._config, user_id, e["id"], project_id=target["id"], task_id=task_id,
             )
+            if ok:
+                moved_ok.append(e)
+        failed_count = len(moving) - len(moved_ok)
         left = await store.list_expenses(self._config, user_id, project_id=source["id"])
+
+        if not moved_ok:
+            if len(moving) == 1:
+                e = moving[0]
+                return (
+                    f"Couldn't move {_fmt_money(e.get('amount'), e.get('currency'))} "
+                    f"({e.get('description') or e.get('vendor') or 'expense'}) — it "
+                    "could no longer be found (it may have just been changed or "
+                    "deleted elsewhere). Nothing moved."
+                )
+            return (
+                f"Couldn't move any of the {len(moving)} matched expenses — they "
+                "could no longer be found (changed or deleted meanwhile). Nothing moved."
+            )
+
         if len(moving) == 1:
-            e = moving[0]
+            e = moved_ok[0]
             head = (
                 f"Moved {_fmt_money(e.get('amount'), e.get('currency'))} "
                 f"({e.get('description') or e.get('vendor') or 'expense'}) → "
                 f"**{target['name']}**{task_note}."
             )
+        elif failed_count:
+            head = (
+                f"Moved {len(moved_ok)} of {len(moving)} expenses → "
+                f"**{target['name']}**{task_note} — {failed_count} could not be "
+                "moved (changed or deleted meanwhile)."
+            )
         else:
-            head = f"Moved {len(moving)} expenses → **{target['name']}**{task_note}."
+            head = f"Moved {len(moved_ok)} expenses → **{target['name']}**{task_note}."
         inbox_note = (
             f" 📥 Inbox now has {len(left)} unassigned."
             if source.get("name_key") == "general" else ""

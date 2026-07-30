@@ -148,3 +148,56 @@ async def test_move_expense_with_task_attach(cfg):
     club = await store.get_project_by_name(cfg, "u1", "ClubBay")
     moved = await store.list_expenses(cfg, "u1", project_id=club["id"])
     assert moved[0]["task_id"] is not None
+
+
+async def test_move_expense_partial_failure_reports_actual_count(cfg, monkeypatch):
+    """store.update_expense returns False (no exception) when a row no
+    longer matches — e.g. deleted/changed elsewhere between our
+    list_expenses read and the write. The skill must report the REAL count
+    of what moved, never blindly report success for every matched row."""
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "Nima")
+    e1 = await store.create_expense(cfg, "u1", g["id"], amount=1, description="a")
+    e2 = await store.create_expense(cfg, "u1", g["id"], amount=1, description="b")
+    e3 = await store.create_expense(cfg, "u1", g["id"], amount=1, description="c")
+    failing_id = e2["id"]
+    real_update = store.update_expense
+
+    async def flaky_update(config, user_id, expense_id, **fields):
+        if expense_id == failing_id:
+            return False
+        return await real_update(config, user_id, expense_id, **fields)
+
+    # The skill does `from lazyclaw.budgets import store` INSIDE execute, so
+    # both it and this test reference the same module object — patching the
+    # attribute here is visible there too.
+    monkeypatch.setattr(store, "update_expense", flaky_update)
+
+    msg = await MoveExpenseSkill(cfg).execute("u1", {"project": "Nima", "all_inbox": True})
+    assert "2 of 3" in msg
+    assert "could not be moved" in msg
+
+    nima = await store.get_project_by_name(cfg, "u1", "Nima")
+    moved = await store.list_expenses(cfg, "u1", project_id=nima["id"])
+    assert len(moved) == 2
+    left = await store.list_expenses(cfg, "u1", project_id=g["id"])
+    assert len(left) == 1 and left[0]["id"] == failing_id
+    assert {e1["id"], e3["id"]} == {m["id"] for m in moved}
+
+
+async def test_move_expense_single_failure_reports_nothing_moved(cfg, monkeypatch):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "ClubBay")
+    await store.create_expense(cfg, "u1", g["id"], amount=12, description="coffee beans")
+
+    async def always_false(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(store, "update_expense", always_false)
+
+    msg = await MoveExpenseSkill(cfg).execute("u1", {"query": "coffee", "project": "ClubBay"})
+    assert "Moved" not in msg
+    assert "couldn't move" in msg.lower() or "could no longer be found" in msg.lower()
+    assert len(await store.list_expenses(cfg, "u1", project_id=g["id"])) == 1
+    club = await store.get_project_by_name(cfg, "u1", "ClubBay")
+    assert await store.list_expenses(cfg, "u1", project_id=club["id"]) == []

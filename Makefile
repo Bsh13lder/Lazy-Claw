@@ -1,7 +1,8 @@
 .PHONY: claude-login claude-status up down rebuild logs \
         host-bridge host-bridge-uninstall host-bridge-status host-bridge-restart \
         host-stt host-stt-uninstall host-stt-status host-stt-restart \
-        awake-bridge awake-bridge-uninstall awake-bridge-status awake-bridge-restart
+        awake-bridge awake-bridge-uninstall awake-bridge-status awake-bridge-restart \
+        funnel-watchdog funnel-watchdog-uninstall funnel-watchdog-status
 
 up:
 	docker compose up -d
@@ -163,3 +164,24 @@ awake-bridge-status:
 awake-bridge-restart:
 	@sudo launchctl kickstart -k "system/sh.lazyclaw.awake-bridge" \
 	    && echo "Awake bridge restarted via launchd."
+
+# `make funnel-watchdog` installs a user LaunchAgent that curls the PUBLIC
+# Tailscale Funnel URL every 3 min and re-registers the funnel when it has
+# silently wedged (the LAN-IP-change failure no local tailscale signal
+# reports — 2026-07-30 outage). Config: ~/.lazyclaw/funnel-watchdog.env.
+funnel-watchdog:
+	@bash scripts/install-funnel-watchdog.sh
+
+funnel-watchdog-uninstall:
+	@launchctl bootout "gui/$$(id -u)" "$$HOME/Library/LaunchAgents/sh.lazyclaw.funnel-watchdog.plist" 2>/dev/null || true
+	@rm -f "$$HOME/Library/LaunchAgents/sh.lazyclaw.funnel-watchdog.plist" "$$HOME/.lazyclaw/funnel-watchdog.sh"
+	@echo "Funnel watchdog removed (env + log kept in ~/.lazyclaw)."
+
+funnel-watchdog-status:
+	@if [ -f "$$HOME/Library/LaunchAgents/sh.lazyclaw.funnel-watchdog.plist" ]; then \
+	    echo "launchd plist:  installed"; \
+	    launchctl print "gui/$$(id -u)/sh.lazyclaw.funnel-watchdog" 2>/dev/null | grep -E "state|last exit" | sed 's/^/  /'; \
+	else \
+	    echo "launchd plist:  NOT installed (run: make funnel-watchdog)"; \
+	fi
+	@tail -n 5 "$$HOME/.lazyclaw/funnel-watchdog.log" 2>/dev/null || echo "(no log yet)"

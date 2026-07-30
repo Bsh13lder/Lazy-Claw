@@ -146,3 +146,28 @@ async def test_patch_expense_rejects_bad_project(client) -> None:
     assert tc.patch(
         f"/api/budgets/expenses/{e['id']}", json={"project_id": None}
     ).status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_inbox_suggestions_endpoint(client, monkeypatch) -> None:
+    tc = client
+    tc.post("/api/budgets/projects", json={"name": "General"})
+    club = tc.post("/api/budgets/projects", json={"name": "ClubBay"}).json()["project"]
+    gen = next(p for p in tc.get("/api/budgets/projects").json()["projects"]
+               if p["name_key"] == "general")
+    e = tc.post(f"/api/budgets/projects/{gen['id']}/expenses",
+                json={"amount": 50, "description": "venue deposit"}).json()["expense"]
+
+    from lazyclaw.budgets.inbox_suggest import ExpenseSuggestion
+    import lazyclaw.gateway.routes.budgets as routes_mod
+
+    async def fake_suggest(config, user_id, **kw):
+        return ExpenseSuggestion("ClubBay", "high", "club spend", "llm")
+    monkeypatch.setattr(routes_mod.inbox_suggest, "suggest_expense_project", fake_suggest)
+
+    r = tc.post("/api/budgets/inbox/suggestions", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["suggestions"] == [{
+        "expense_id": e["id"], "project_id": club["id"], "project_name": "ClubBay",
+        "confidence": "high", "reason": "club spend",
+    }]

@@ -87,6 +87,11 @@ BUDGET_ENTRY_SELECT = ", ".join(BUDGET_ENTRY_COLUMNS)
 # ---------------------------------------------------------------------------
 
 
+# Catch-all/Inbox project for expenses captured with no project named. Shared
+# by skills, routes and clients; detect via name_key == "general".
+GENERAL_PROJECT_NAME = "General"
+
+
 def _name_key(name: str) -> str:
     """Casefold + collapse whitespace so a project resolves consistently and
     matches ``tasks.category`` regardless of casing."""

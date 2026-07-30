@@ -8,13 +8,14 @@ that wikilinks back to its project page.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from lazyclaw.budgets import store
+from lazyclaw.budgets import inbox_suggest, store
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
 
@@ -100,6 +101,10 @@ class UpdateExpenseBody(BaseModel):
     # Per-expense favorite flag (star). None = leave unchanged (dropped by the
     # route's None-filter); True/False set it — powers the "starred only" overview.
     is_favorite: bool | None = None
+
+
+class InboxSuggestionsBody(BaseModel):
+    expense_ids: list[str] | None = None
 
 
 class CreateRecurringBody(BaseModel):
@@ -399,6 +404,47 @@ async def delete_expense_route(
         )
         raise HTTPException(status_code=404, detail="expense not found")
     return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Inbox suggestions
+# ---------------------------------------------------------------------------
+
+
+@router.post("/inbox/suggestions")
+async def inbox_suggestions_route(
+    body: InboxSuggestionsBody, user: User = Depends(get_current_user),
+):
+    gen = await store.get_project_by_name(_config, user.id, store.GENERAL_PROJECT_NAME)
+    if gen is None:
+        return {"suggestions": [], "skipped": 0}
+    expenses = await store.list_expenses(_config, user.id, project_id=gen["id"])
+    if body.expense_ids:
+        wanted = set(body.expense_ids)
+        expenses = [e for e in expenses if e["id"] in wanted]
+    skipped = max(0, len(expenses) - 10)
+    expenses = expenses[:10]
+
+    projects = await store.list_projects(_config, user.id)
+    id_by_name = {p["name"]: p["id"] for p in projects}
+
+    async def one(e: dict) -> dict:
+        s = await inbox_suggest.suggest_expense_project(
+            _config, user.id,
+            description=e.get("description"), vendor=e.get("vendor"),
+            amount=float(e.get("amount") or 0),
+            currency=e.get("currency") or "EUR",
+        )
+        return {
+            "expense_id": e["id"],
+            "project_id": id_by_name.get(s.project_name) if s.project_name else None,
+            "project_name": s.project_name,
+            "confidence": s.confidence,
+            "reason": s.reason,
+        }
+
+    suggestions = list(await asyncio.gather(*(one(e) for e in expenses)))
+    return {"suggestions": suggestions, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

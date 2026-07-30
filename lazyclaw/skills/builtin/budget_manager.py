@@ -11,14 +11,10 @@ from __future__ import annotations
 
 import logging
 
+from lazyclaw.budgets.store import GENERAL_PROJECT_NAME
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
-
-# Catch-all project for expenses captured with no project named and no default
-# configured (e.g. "spent 12 on coffee"). Idempotent by name_key — every
-# unrouted expense lands here instead of stalling the capture with an ask-back.
-GENERAL_PROJECT_NAME = "General"
 
 
 def _fmt_money(amount, currency: str | None) -> str:

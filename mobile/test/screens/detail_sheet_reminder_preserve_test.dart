@@ -269,7 +269,7 @@ void main() {
 
     await save(tester);
 
-    // kDefaultReminderLead is 30 min → 17:00 − 0:30.
-    expect(stub.updateCalls.single['reminderAt'], '2026-06-10T16:30:00');
+    // kDefaultReminderLead is "At time" → the reminder fires AT 17:00.
+    expect(stub.updateCalls.single['reminderAt'], '2026-06-10T17:00:00');
   });
 }

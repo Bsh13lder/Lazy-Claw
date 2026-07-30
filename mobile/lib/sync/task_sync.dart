@@ -52,13 +52,30 @@ class TaskSync {
   final TaskDao _dao;
   final TasksRepository _repo;
 
+  /// Invoked (best-effort) AFTER a server tombstone is applied for a task id,
+  /// so the caller can cancel the task's scheduled local reminder alarms.
+  ///
+  /// WHY: a remote delete is the ONLY delete path that never passes through
+  /// `TasksNotifier.deleteTask` (which cancels alarms itself), and the
+  /// reconcile sweep (`TaskReminderService.syncAll`) only cancels ids inside
+  /// the reserved ranges of tasks still returned by `dao.list()` — deleted
+  /// rows are excluded, so without this hook the orphaned alarms kept firing.
+  /// Null = no-op (tests / callers without notification wiring). Production
+  /// wires `cancelTaskReminderAlarms`, which sweeps the task's FULL reserved
+  /// notification-id range.
+  final Future<void> Function(String taskId)? _onTaskTombstoned;
+
   /// A retryable (5xx) item is dead-lettered after this many failed attempts so
   /// one poison row can't wedge the whole queue forever.
   static const int kMaxPushAttempts = 5;
 
   bool _running = false;
 
-  TaskSync(this._dao, this._repo);
+  TaskSync(
+    this._dao,
+    this._repo, {
+    Future<void> Function(String taskId)? onTaskTombstoned,
+  }) : _onTaskTombstoned = onTaskTombstoned;
 
   bool get isRunning => _running;
 
@@ -451,6 +468,7 @@ class TaskSync {
       final logged = await _applyServerTombstone(id, syncedAt: nowIso);
       if (logged) conflicts++;
       deletedApplied++;
+      await _cancelRemindersForTombstone(id);
     }
     debugPrint(
       'TaskSync.pull: applied — merged=$pulled deleted=$deletedApplied '
@@ -497,6 +515,22 @@ class TaskSync {
       if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
     }
     return best.isEmpty ? null : best;
+  }
+
+  /// Best-effort: cancel the local reminder alarms of a freshly tombstoned
+  /// task via the injected [_onTaskTombstoned] hook. A cancel failure must
+  /// never fail the pull — the tombstone itself is already applied.
+  Future<void> _cancelRemindersForTombstone(String id) async {
+    final hook = _onTaskTombstoned;
+    if (hook == null) return;
+    try {
+      await hook(id);
+    } catch (e) {
+      debugPrint(
+        'TaskSync.pull: reminder cancel failed for tombstoned id=$id '
+        '(non-fatal): $e',
+      );
+    }
   }
 
   /// Apply a server tombstone with H1 safety: if the local row has an UNSYNCED

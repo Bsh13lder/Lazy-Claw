@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
@@ -38,6 +39,36 @@ int nextNotificationId() {
   // Guarantee strict positivity: a 0 clock-component AND a 0 counter is
   // astronomically unlikely, but the id must never collapse to 0.
   return id == 0 ? 1 : id;
+}
+
+/// Build a FIXED-OFFSET [tz.Location] from a raw UTC [offset] (e.g. the
+/// device's `DateTime.now().timeZoneOffset`) — the scheduling fallback when the
+/// device's NAMED IANA zone can't be resolved.
+///
+/// NEVER fall back to UTC instead: [FlutterLocalNotificationsSink.schedule]
+/// builds `tz.TZDateTime(tz.local, <local wall-clock components>)`, so a UTC
+/// `tz.local` re-interprets an 18:00-Madrid reminder as the 18:00-UTC instant —
+/// every alarm fires 2h late. Worse, the 30-min WorkManager headless pass runs
+/// in a FRESH isolate (per-isolate statics), so a single failing tz lookup
+/// there would silently REWRITE every alarm 2h late on each pass. The device's
+/// current offset is always right for near-term alarms even when the name is
+/// unresolvable (no DST transitions, but strictly better than a
+/// guaranteed-wrong UTC).
+///
+/// Pure + top-level (mirrors [nextNotificationId]) so the construction is
+/// unit-testable without a plugin or the bundled tz database.
+tz.Location fixedOffsetLocation(Duration offset) {
+  final minutes = offset.inMinutes;
+  final sign = minutes < 0 ? '-' : '+';
+  final abs = minutes.abs();
+  final hh = (abs ~/ 60).toString().padLeft(2, '0');
+  final mm = (abs % 60).toString().padLeft(2, '0');
+  final name = 'UTC$sign$hh:$mm';
+  final zone =
+      tz.TimeZone(offset.inMilliseconds, isDst: false, abbreviation: name);
+  // Single zone, in effect since the beginning of time — same shape the
+  // timezone package itself uses for its built-in UTC location.
+  return tz.Location(name, [tz.minTime], [0], [zone]);
 }
 
 /// Outcome of [LocalNotifications.scheduleTestReminder]: a [fire] time (+ whether
@@ -134,8 +165,10 @@ class LocalNotifications {
   }
 
   /// Prime the IANA timezone database and set the device-local location so
-  /// `tz.TZDateTime` resolves correctly. Falls back to UTC if the device zone
-  /// can't be resolved. Idempotent.
+  /// `tz.TZDateTime` resolves correctly. Falls back to a FIXED-OFFSET location
+  /// built from the device's current UTC offset if the named zone can't be
+  /// resolved — never to UTC, which would silently shift every alarm by the
+  /// device offset (see [fixedOffsetLocation]). Idempotent.
   static Future<void> _initTimezone() async {
     if (_tzReady) return;
     try {
@@ -143,15 +176,26 @@ class LocalNotifications {
       final name = await FlutterTimezone.getLocalTimezone();
       tz.setLocalLocation(tz.getLocation(name));
       _tzReady = true;
-    } catch (_) {
-      // Could not resolve the device zone — fall back to UTC so scheduling
-      // still works (times will be interpreted as UTC rather than crashing).
+    } catch (e) {
+      // Could not resolve the NAMED device zone. Fall back to a fixed-offset
+      // location from the device clock — correct for near-term alarms even
+      // when the IANA name / tz database is unavailable.
       try {
-        tz.setLocalLocation(tz.getLocation('UTC'));
+        final offset = DateTime.now().timeZoneOffset;
+        tz.setLocalLocation(fixedOffsetLocation(offset));
         _tzReady = true;
-      } catch (_) {
-        // timezone db unavailable entirely — leave _tzReady false; callers
-        // that depend on it will skip scheduling rather than throw.
+        debugPrint(
+          'LocalNotifications: timezone name lookup failed ($e) — scheduling '
+          'with fixed device offset $offset instead',
+        );
+      } catch (e2) {
+        // Even the fixed-offset fallback failed — leave _tzReady false so
+        // callers SKIP scheduling (the existing fail-safe branch) rather than
+        // arm silently-wrong alarms.
+        debugPrint(
+          'LocalNotifications: timezone unavailable ($e / $e2) — scheduled '
+          'reminders disabled for this isolate',
+        );
       }
     }
   }

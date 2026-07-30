@@ -23,8 +23,12 @@ const String _kNotificationsSeenIds = 'notifications.seen_ids';
 const String _kNotificationChannel = 'notifications.channel';
 
 /// The lead applied to a new/edited task that GAINS a due time without an
-/// explicit reminder. "30 min before" by default.
-const ReminderLead kDefaultReminderLead = ReminderLead.min30;
+/// explicit reminder. "At time" by default — the reminder fires AT the moment
+/// the user set, so the server nag ladder can't start 30 minutes early (the
+/// old `min30` default was a top source of "notifications don't match the time
+/// I set"). NOT [ReminderLead.none] — that would schedule no reminder at all.
+/// An explicitly chosen lead always overrides this default.
+const ReminderLead kDefaultReminderLead = ReminderLead.atTime;
 
 /// Time-of-day (minutes-from-midnight) at which a DATE-ONLY task ("due
 /// tomorrow", no clock time) fires its local reminder. 540 = 09:00.

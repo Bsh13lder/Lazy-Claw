@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/core/notifications/task_reminder_service.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:lazyclaw_mobile/notifications/notification_actions.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -795,6 +797,63 @@ void main() {
       expect((await dao.list()).map((e) => e.id), isNot(contains('gone')));
     });
 
+    test(
+        'a server tombstone cancels the task\'s FULL reserved local alarm '
+        'range via the onTaskTombstoned hook', () async {
+      final dao = await _freshDao();
+      await dao.upsertFromServer(
+        Task.fromJson(_serverTaskJson(id: 'gone', title: 'Doomed')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final sink = _RecordingSink();
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': ['gone'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      // Same sweep production wires (cancelTaskReminderAlarms), against a
+      // recording sink — proves the WHOLE reserved notification-id range is
+      // cancelled, not just the primary id. Without the hook these alarms were
+      // ORPHANED: syncAll only sweeps ids of tasks still in dao.list(), which
+      // excludes deleted rows.
+      final sync = TaskSync(
+        dao,
+        TasksRepository(transport),
+        onTaskTombstoned: (id) => cancelTaskReminderAlarms(id, sink: sink),
+      );
+
+      final result = await sync.pull();
+
+      expect(result.deletedApplied, 1);
+      expect(sink.cancelled.toSet(), reservedReminderIds('gone').toSet());
+      expect((await dao.list()).map((e) => e.id), isNot(contains('gone')));
+    });
+
+    test('a throwing onTaskTombstoned hook never fails the pull', () async {
+      final dao = await _freshDao();
+      await dao.upsertFromServer(
+        Task.fromJson(_serverTaskJson(id: 'gone', title: 'Doomed')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': ['gone'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final sync = TaskSync(
+        dao,
+        TasksRepository(transport),
+        onTaskTombstoned: (_) async => throw StateError('cancel blew up'),
+      );
+
+      final result = await sync.pull();
+
+      // The tombstone still lands and the pull still succeeds.
+      expect(result.deletedApplied, 1);
+      expect(result.pullFailed, isFalse);
+      expect((await dao.list()).map((e) => e.id), isNot(contains('gone')));
+    });
+
     test('pull network failure leaves the cursor untouched', () async {
       final dao = await _freshDao();
       await dao.setCursor('2026-06-05T09:00:00Z');
@@ -1026,4 +1085,26 @@ class _FailingGetTransport implements TasksTransport {
       {};
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async => {};
+}
+
+/// Recording [ReminderSink]: captures every cancelled notification id so the
+/// tombstone tests can assert the full reserved range was swept. Mirrors the
+/// production contract — every method is a non-throwing no-op.
+class _RecordingSink implements ReminderSink {
+  final List<int> cancelled = [];
+
+  @override
+  Future<void> cancel(int id) async => cancelled.add(id);
+
+  @override
+  Future<List<int>> pendingIds() async => const [];
+
+  @override
+  Future<void> schedule({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime fire,
+    required String payload,
+  }) async {}
 }

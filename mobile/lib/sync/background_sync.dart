@@ -12,6 +12,7 @@ import '../local/document_cache_dao.dart';
 import '../local/note_dao.dart';
 import '../local/task_dao.dart';
 import '../notifications/local_notifications.dart';
+import '../notifications/notification_actions.dart';
 import '../notifications/notifications_service.dart';
 import '../repositories/budgets_repository.dart';
 import '../repositories/documents_repository.dart';
@@ -80,6 +81,10 @@ Future<void> runHeadlessSync() async {
       await TaskSync(
         TaskDao(db),
         TasksRepository(DioTasksTransport(client)),
+        // Cancel a remotely-deleted task's local alarms at tombstone time —
+        // the reconcile at the end of this pass only sweeps ids of tasks
+        // still in the cache list, so orphans would otherwise survive.
+        onTaskTombstoned: cancelTaskReminderAlarms,
       ).sync();
     } catch (e) {
       // Task sync failure is non-fatal — continue with remaining domains.

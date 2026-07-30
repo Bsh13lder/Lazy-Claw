@@ -3,6 +3,11 @@ import '../repositories/notifications_repository.dart';
 import '../screens/settings/settings_prefs.dart';
 import 'local_notifications.dart';
 
+/// Maximum age a feed row may have and still surface as an OS pop. Anything
+/// older (a long offline gap, a server backfill) stays in the in-app
+/// Notification Center only — popping day-old rows reads as noise, not news.
+const Duration kMaxNotificationPopAge = Duration(hours: 24);
+
 /// Pure selector: given the [fetched] feed and the set of already-[seenIds],
 /// return only the notifications that are NEW — id not previously seen — also
 /// de-duplicated within the batch, preserving the server's order.
@@ -25,8 +30,35 @@ List<ServerNotification> selectNewNotifications(
   return result;
 }
 
-/// Pulls the server notification feed, surfaces only the NEW items as local
-/// notifications, and advances the stored `since` cursor.
+/// Pure OS-pop policy: whether a NEW (never-seen) notification should ALSO pop
+/// as an OS notification, given the current [now]. Suppressed rows stay in the
+/// in-app Notification Center (that screen fetches independently) — this gates
+/// only the OS banner:
+///   * a row already read on another surface (web / Telegram) never pops;
+///   * a task-occurrence row (`deep_link.type == 'task'` — server heartbeat
+///     pre-reminders / nags) never pops: the task's own local alarms plus
+///     Telegram already cover it, so an OS pop would be triple delivery;
+///   * a row older than [maxAge] never pops (see [kMaxNotificationPopAge]);
+///   * an unparseable `createdAt` is treated as OLD — never as fresh.
+///
+/// Kept as a free function with no IO so the policy is trivially unit-testable.
+bool shouldPopNotification(
+  ServerNotification n, {
+  required DateTime now,
+  Duration maxAge = kMaxNotificationPopAge,
+}) {
+  if (!n.isUnread) return false;
+  final linkType = (n.deepLink?['type'] ?? '').toString();
+  if (linkType == 'task') return false;
+  final created = DateTime.tryParse(n.createdAt);
+  if (created == null) return false; // defensive: unknown age → don't pop
+  return now.difference(created) <= maxAge;
+}
+
+/// Pulls the server notification feed, surfaces only the NEW items that pass
+/// the OS-pop policy ([shouldPopNotification]) as local notifications, and
+/// advances the stored `since` cursor. The very first pull (no stored cursor)
+/// is always silent — it only seeds the cursor + seen ring.
 ///
 /// Every dependency is injected so the whole flow runs in a background isolate
 /// (no Riverpod scope) AND is unit-testable with fakes. [pullOnce] never throws
@@ -41,13 +73,15 @@ class NotificationsFeedService {
     required Future<List<String>> Function() loadSeenIds,
     required Future<void> Function(List<String>) saveSeenIds,
     int maxSeenIds = 200,
+    DateTime Function()? now,
   })  : _repo = repo,
         _show = show,
         _loadSince = loadSince,
         _saveSince = saveSince,
         _loadSeenIds = loadSeenIds,
         _saveSeenIds = saveSeenIds,
-        _maxSeenIds = maxSeenIds;
+        _maxSeenIds = maxSeenIds,
+        _now = now ?? DateTime.now;
 
   final NotificationsRepository _repo;
   final Future<void> Function(ServerNotification) _show;
@@ -57,6 +91,9 @@ class NotificationsFeedService {
   final Future<void> Function(List<String>) _saveSeenIds;
   final int _maxSeenIds;
 
+  /// Injectable clock for [shouldPopNotification]'s age cap (tests pin it).
+  final DateTime Function() _now;
+
   /// Run one catch-up pass. Returns the number of NEW notifications shown.
   Future<int> pullOnce() async {
     try {
@@ -65,7 +102,18 @@ class NotificationsFeedService {
       final seen = (await _loadSeenIds()).toSet();
 
       final fresh = selectNewNotifications(feed.notifications, seen);
-      for (final n in fresh) {
+
+      // First contact (no stored cursor): the server returned its FULL history
+      // (`/api/notifications` with no `since`), not a delta — pop NOTHING and
+      // only seed the cursor + seen ring below so the next pass has a real
+      // window. A fresh install / cleared prefs must never replay the whole
+      // backlog as OS notifications.
+      final firstContact = since == null || since.isEmpty;
+      final now = _now();
+      final toShow = firstContact
+          ? const <ServerNotification>[]
+          : fresh.where((n) => shouldPopNotification(n, now: now)).toList();
+      for (final n in toShow) {
         await _show(n);
       }
 
@@ -75,9 +123,10 @@ class NotificationsFeedService {
         await _saveSince(feed.now);
       }
 
-      // Persist a bounded ring of recently-shown ids so an inclusive `since`
-      // boundary (server returning an item whose timestamp == cursor) can't
-      // re-notify the same item next pass.
+      // Persist a bounded ring of EVERY fetched id — including rows the pop
+      // policy suppressed — so an inclusive `since` boundary (server returning
+      // an item whose timestamp == cursor) can't re-notify the same item next
+      // pass, and a suppressed row can never pop later.
       if (fresh.isNotEmpty) {
         final merged = <String>[...seen, ...fresh.map((n) => n.id)];
         final bounded = merged.length > _maxSeenIds
@@ -86,7 +135,7 @@ class NotificationsFeedService {
         await _saveSeenIds(bounded);
       }
 
-      return fresh.length;
+      return toShow.length;
     } catch (_) {
       // Offline / transient backend error — never propagate. The next trigger
       // (resume / WS-connect / headless pass) retries the same window.

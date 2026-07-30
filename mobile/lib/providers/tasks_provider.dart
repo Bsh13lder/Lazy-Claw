@@ -11,6 +11,7 @@ import '../local/task_dao.dart';
 import '../models/subtask.dart';
 import '../models/task.dart';
 import '../notifications/local_notifications.dart';
+import '../notifications/notification_actions.dart';
 import '../repositories/tasks_repository.dart';
 import '../screens/settings/settings_prefs.dart';
 import '../sync/reachability.dart';
@@ -47,6 +48,11 @@ final taskSyncProvider = Provider<TaskSync>((ref) {
   return TaskSync(
     ref.watch(taskDaoProvider),
     ref.watch(tasksRepositoryProvider),
+    // A server tombstone is the only delete that never passes through
+    // deleteTask (which cancels alarms itself) — sweep the task's full
+    // reserved notification-id range so a remotely-deleted task's local
+    // alarms can't keep firing.
+    onTaskTombstoned: cancelTaskReminderAlarms,
   );
 });
 

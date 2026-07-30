@@ -2,6 +2,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/notifications/notifications_service.dart';
 import 'package:lazyclaw_mobile/repositories/notifications_repository.dart';
 
+// ── Fixed clock ───────────────────────────────────────────────────────────────
+
+/// Pinned "now" injected into the service so the 24h OS-pop age cap is
+/// deterministic.
+final DateTime tNow = DateTime.utc(2026, 7, 30, 12);
+
+/// A createdAt comfortably inside the pop window (1h before [tNow]).
+const String kFreshCreatedAt = '2026-07-30T11:00:00Z';
+
+/// A createdAt outside the pop window (25h before [tNow]).
+const String kStaleCreatedAt = '2026-07-29T11:00:00Z';
+
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 
 /// A repository whose transport returns scripted feeds (one per pull). Throws
@@ -33,6 +45,8 @@ class _FakeRepoTransport implements NotificationsTransport {
             'title': n.title,
             'body': n.body,
             'created_at': n.createdAt,
+            if (n.readAt != null) 'read_at': n.readAt,
+            if (n.deepLink != null) 'deep_link': n.deepLink,
           },
       ],
       'now': f.now,
@@ -45,9 +59,23 @@ class _FakeRepoTransport implements NotificationsTransport {
       {};
 }
 
-ServerNotification _n(String id, {String title = 't', String body = 'b'}) =>
+ServerNotification _n(
+  String id, {
+  String title = 't',
+  String body = 'b',
+  String createdAt = kFreshCreatedAt,
+  String? readAt,
+  Map<String, dynamic>? deepLink,
+}) =>
     ServerNotification(
-        id: id, kind: 'k', title: title, body: body, createdAt: '');
+      id: id,
+      kind: 'k',
+      title: title,
+      body: body,
+      createdAt: createdAt,
+      readAt: readAt,
+      deepLink: deepLink,
+    );
 
 /// In-memory cursor + seen-ids store mirroring the SettingsPrefs static API.
 class _FakeStore {
@@ -75,6 +103,7 @@ NotificationsFeedService _service(
       loadSeenIds: store.loadSeen,
       saveSeenIds: store.saveSeen,
       maxSeenIds: maxSeenIds,
+      now: () => tNow,
     );
 
 void main() {
@@ -104,11 +133,66 @@ void main() {
     });
   });
 
+  // ── Pure OS-pop policy ─────────────────────────────────────────────────────
+  group('shouldPopNotification', () {
+    test('a fresh unread row pops', () {
+      expect(shouldPopNotification(_n('a'), now: tNow), isTrue);
+    });
+
+    test('a row already read elsewhere does not pop', () {
+      final read = _n('a', readAt: '2026-07-30T11:30:00Z');
+      expect(shouldPopNotification(read, now: tNow), isFalse);
+    });
+
+    test('a task-occurrence row (deep_link.type == task) does not pop', () {
+      final task = _n('a', deepLink: {'type': 'task', 'id': 't1'});
+      expect(shouldPopNotification(task, now: tNow), isFalse);
+    });
+
+    test('a non-task deep_link still pops', () {
+      final thread = _n('a', deepLink: {'type': 'thread', 'id': 'th1'});
+      expect(shouldPopNotification(thread, now: tNow), isTrue);
+    });
+
+    test('a row older than 24h does not pop', () {
+      expect(
+        shouldPopNotification(_n('a', createdAt: kStaleCreatedAt), now: tNow),
+        isFalse,
+      );
+    });
+
+    test('an unparseable createdAt is treated as old — no pop', () {
+      expect(shouldPopNotification(_n('a', createdAt: ''), now: tNow), isFalse);
+      expect(
+        shouldPopNotification(_n('a', createdAt: 'not-a-date'), now: tNow),
+        isFalse,
+      );
+    });
+  });
+
   // ── Service ─────────────────────────────────────────────────────────────────
   group('NotificationsFeedService.pullOnce', () {
-    test('shows all items on the first pull and advances the cursor to now',
-        () async {
-      final store = _FakeStore();
+    test(
+        'FIRST CONTACT is silent: full-history pull shows nothing but seeds '
+        'the cursor and the seen ring', () async {
+      final store = _FakeStore(); // since == null → first contact
+      final transport = _FakeRepoTransport([
+        NotificationFeed(
+          notifications: [_n('a'), _n('b')],
+          now: 'T1',
+        ),
+      ]);
+
+      final count = await _service(store, transport).pullOnce();
+
+      expect(count, 0);
+      expect(store.shown, isEmpty);
+      expect(store.since, 'T1'); // cursor still advances
+      expect(store.seen, ['a', 'b']); // ids still recorded
+    });
+
+    test('shows new items on a delta pull and advances the cursor', () async {
+      final store = _FakeStore()..since = 'T0';
       final transport = _FakeRepoTransport([
         NotificationFeed(
           notifications: [_n('a'), _n('b')],
@@ -126,7 +210,7 @@ void main() {
 
     test('does not re-show ids carried in the seen ring across pulls',
         () async {
-      final store = _FakeStore();
+      final store = _FakeStore()..since = 'T0';
       final transport = _FakeRepoTransport([
         NotificationFeed(notifications: [_n('a'), _n('b')], now: 'T1'),
         // Second pull: the boundary item 'b' reappears (inclusive cursor) plus a
@@ -140,6 +224,102 @@ void main() {
 
       expect(count2, 1);
       expect(store.shown.map((e) => e.id), ['a', 'b', 'c']);
+      expect(store.since, 'T2');
+    });
+
+    test('skips rows already read elsewhere but still records their ids',
+        () async {
+      final store = _FakeStore()..since = 'T0';
+      final transport = _FakeRepoTransport([
+        NotificationFeed(
+          notifications: [
+            _n('read', readAt: '2026-07-30T11:30:00Z'),
+            _n('unread'),
+          ],
+          now: 'T1',
+        ),
+      ]);
+
+      final count = await _service(store, transport).pullOnce();
+
+      expect(count, 1);
+      expect(store.shown.map((e) => e.id), ['unread']);
+      // The suppressed row is still bookkept so it can never pop later.
+      expect(store.seen, ['read', 'unread']);
+      expect(store.since, 'T1');
+    });
+
+    test(
+        'skips task-occurrence rows (deep_link.type == task) but records '
+        'their ids', () async {
+      final store = _FakeStore()..since = 'T0';
+      final transport = _FakeRepoTransport([
+        NotificationFeed(
+          notifications: [
+            _n('nag', deepLink: {'type': 'task', 'id': 't1'}),
+            _n('watcher', deepLink: {'type': 'watcher'}),
+          ],
+          now: 'T1',
+        ),
+      ]);
+
+      final count = await _service(store, transport).pullOnce();
+
+      expect(count, 1);
+      expect(store.shown.map((e) => e.id), ['watcher']);
+      expect(store.seen, ['nag', 'watcher']);
+    });
+
+    test('skips rows older than 24h and rows with unparseable createdAt',
+        () async {
+      final store = _FakeStore()..since = 'T0';
+      final transport = _FakeRepoTransport([
+        NotificationFeed(
+          notifications: [
+            _n('stale', createdAt: kStaleCreatedAt),
+            _n('undated', createdAt: ''),
+            _n('fresh'),
+          ],
+          now: 'T1',
+        ),
+      ]);
+
+      final count = await _service(store, transport).pullOnce();
+
+      expect(count, 1);
+      expect(store.shown.map((e) => e.id), ['fresh']);
+      expect(store.seen, ['stale', 'undated', 'fresh']);
+    });
+
+    test(
+        'suppressed rows can never pop later: ids are in the seen ring and the '
+        'cursor advanced', () async {
+      final store = _FakeStore()..since = 'T0';
+      final transport = _FakeRepoTransport([
+        // First pull: everything is suppressed by the policy.
+        NotificationFeed(
+          notifications: [
+            _n('x', readAt: '2026-07-30T11:30:00Z'),
+            _n('y', deepLink: {'type': 'task'}),
+          ],
+          now: 'T1',
+        ),
+        // Second pull: the SAME ids come back in a now-poppable shape (unread,
+        // fresh, no task link) — they must stay silent because they were seen.
+        NotificationFeed(
+          notifications: [_n('x'), _n('y')],
+          now: 'T2',
+        ),
+      ]);
+      final service = _service(store, transport);
+
+      final count1 = await service.pullOnce();
+      final count2 = await service.pullOnce();
+
+      expect(count1, 0);
+      expect(count2, 0);
+      expect(store.shown, isEmpty);
+      expect(store.seen, ['x', 'y']);
       expect(store.since, 'T2');
     });
 
@@ -176,7 +356,7 @@ void main() {
 
     test('bounds the seen ring to maxSeenIds (keeps the most recent)',
         () async {
-      final store = _FakeStore();
+      final store = _FakeStore()..since = 'T0';
       final transport = _FakeRepoTransport([
         NotificationFeed(
           notifications: [_n('a'), _n('b'), _n('c')],

@@ -912,7 +912,33 @@ async def update_expense(
             params,
         )
         await db.commit()
-        return result.rowcount > 0
+        moved = result.rowcount > 0
+
+    # Re-point the LazyBrain note if the project changed (best-effort, never fails).
+    if moved and "project_id" in fields:
+        try:
+            rows = await list_expenses(config, user_id, project_id=fields["project_id"])
+            exp = next((r for r in rows if r["id"] == expense_id), None)
+            proj = await get_project(config, user_id, fields["project_id"])
+            if exp and proj:
+                await _delete_note(config, user_id, exp.get("lazybrain_note_id"))
+                note_id = await _write_expense_note(
+                    config, user_id,
+                    project_name=proj["name"], amount=float(exp["amount"] or 0),
+                    currency=exp.get("currency") or proj.get("currency") or "EUR",
+                    description=exp.get("description"), vendor=exp.get("vendor"),
+                    spent_at=exp.get("spent_at"), task_title=None,
+                )
+                async with db_session(config) as db:
+                    await db.execute(
+                        "UPDATE project_expenses SET lazybrain_note_id = ? WHERE id = ? AND user_id = ?",
+                        (note_id, expense_id, user_id),
+                    )
+                    await db.commit()
+        except Exception:
+            logger.warning("expense note re-point failed (%s)", expense_id, exc_info=True)
+
+    return moved
 
 
 async def delete_expense(config: Config, user_id: str, expense_id: str) -> bool:

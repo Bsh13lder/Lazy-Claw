@@ -220,3 +220,24 @@ def test_budgets_category_is_allowed_by_default():
 
     assert DEFAULT_CATEGORY_PERMISSIONS.get("budgets") == ALLOW
 
+
+async def test_move_expense_repoints_note(cfg, monkeypatch):
+    a = await store.create_project(cfg, "u1", "General")
+    b = await store.create_project(cfg, "u1", "ClubBay")
+    e = await store.create_expense(cfg, "u1", a["id"], amount=9, description="domain")
+
+    calls = {}
+    async def fake_write(config, user_id, **kw):
+        calls["project_name"] = kw["project_name"]
+        return "note-new"
+    async def fake_delete(config, user_id, note_id):
+        calls["deleted"] = note_id
+    monkeypatch.setattr(store, "_write_expense_note", fake_write)
+    monkeypatch.setattr(store, "_delete_note", fake_delete)
+
+    ok = await store.update_expense(cfg, "u1", e["id"], project_id=b["id"])
+    assert ok
+    assert calls["project_name"] == "ClubBay"
+    rows = await store.list_expenses(cfg, "u1", project_id=b["id"])
+    assert rows[0]["lazybrain_note_id"] == "note-new"
+

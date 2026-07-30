@@ -15,7 +15,10 @@ from lazyclaw.budgets import store
 from lazyclaw.config import Config
 from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.skills.builtin.budget_manager import (
+    AddExpenseSkill,
+    ExpenseReportSkill,
     ListBudgetTopupsSkill,
+    ListExpensesSkill,
     ListProjectsSkill,
 )
 
@@ -62,3 +65,33 @@ async def test_list_budget_topups_empty(cfg):
     await store.create_project(cfg, "u1", "Nima", budget=50)
     msg = await ListBudgetTopupsSkill(cfg).execute("u1", {})
     assert "no top-ups" in msg.lower()
+
+
+async def test_list_expenses_cross_project_shows_project_names(cfg):
+    a = await store.create_project(cfg, "u1", "ClubBay")
+    b = await store.create_project(cfg, "u1", "Nima")
+    await store.create_expense(cfg, "u1", a["id"], amount=10, description="merch")
+    await store.create_expense(cfg, "u1", b["id"], amount=20, description="ads")
+
+    msg = await ListExpensesSkill(cfg).execute("u1", {})
+    assert "ClubBay" in msg and "Nima" in msg
+    assert "merch" in msg and "ads" in msg
+
+
+async def test_list_expenses_inbox_alias(cfg):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_expense(cfg, "u1", g["id"], amount=7, description="coffee")
+    msg = await ListExpensesSkill(cfg).execute("u1", {"project": "inbox"})
+    assert "coffee" in msg
+
+
+async def test_expense_report_shows_inbox_line(cfg):
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_expense(cfg, "u1", g["id"], amount=7, description="coffee")
+    msg = await ExpenseReportSkill(cfg).execute("u1", {})
+    assert "📥 Inbox: 1 unassigned" in msg
+
+
+async def test_add_expense_fallback_mentions_inbox(cfg):
+    msg = await AddExpenseSkill(cfg).execute("u1", {"amount": 3, "description": "gum"})
+    assert "📥 Inbox" in msg

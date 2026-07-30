@@ -403,7 +403,7 @@ class AddExpenseSkill(BaseSkill):
             proj = await store.create_project(
                 self._config, user_id, GENERAL_PROJECT_NAME,
             )
-            match_note = f" (logged to **{proj['name']}**)"
+            match_note = f" (logged to 📥 Inbox/**{proj['name']}** — tell me a project anytime to file it)"
 
         # ── Resolve the task (optional) ────────────────────────────────
         task_id: str | None = None
@@ -573,6 +573,8 @@ class ListExpensesSkill(BaseSkill):
     def description(self) -> str:
         return (
             "List the logged expenses for a project (e.g. 'show nima "
+            "expenses'), for the inbox ('show unassigned expenses'), or "
+            "across ALL projects when no project is given (e.g. 'show my "
             "expenses'). Read-only."
         )
 
@@ -591,19 +593,35 @@ class ListExpensesSkill(BaseSkill):
             "properties": {
                 "project": {
                     "type": "string",
-                    "description": "Project name to list expenses for, e.g. 'nima'",
+                    "description": "Project name, 'inbox' for unassigned, or omit for ALL projects",
                 },
             },
-            "required": ["project"],
+            "required": [],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
         from lazyclaw.budgets import store
 
-        project = (params.get("project") or "").strip()
-        proj = await store.get_project_by_name(self._config, user_id, project)
+        query = (params.get("project") or "").strip()
+        if query.casefold() in {"inbox", "general"}:
+            query = GENERAL_PROJECT_NAME
+        if not query:
+            expenses = await store.list_all_expenses(self._config, user_id)
+            if not expenses:
+                return "No expenses logged yet."
+            lines = [
+                f"• **{e.get('project_name') or '(unknown)'}** — "
+                f"{_fmt_money(e.get('amount'), e.get('currency'))} "
+                f"{e.get('description') or e.get('vendor') or 'expense'} "
+                f"({(e.get('spent_at') or '')[:10]})"
+                for e in expenses[:30]
+            ]
+            more = "" if len(expenses) <= 30 else f"\n(+{len(expenses) - 30} older)"
+            return "\n".join(lines) + more
+
+        proj = await store.get_project_by_name(self._config, user_id, query)
         if proj is None:
-            return f"No project named '{project}' found."
+            return f"No project named '{query}' found."
         expenses = await store.list_expenses(self._config, user_id, project_id=proj["id"])
         if not expenses:
             return f"No expenses logged on **{proj['name']}** yet."
@@ -684,6 +702,16 @@ class ExpenseReportSkill(BaseSkill):
                 f"\nTotal: {_fmt_money(report['total_spent'], 'EUR')} spent / "
                 f"{_fmt_money(report['total_budget'], 'EUR')} budgeted."
             )
+            gen = await store.get_project_by_name(self._config, user_id, GENERAL_PROJECT_NAME)
+            if gen:
+                inbox = await store.list_expenses(self._config, user_id, project_id=gen["id"])
+                if inbox:
+                    inbox_total = sum(float(e.get("amount") or 0) for e in inbox)
+                    lines.append(
+                        f"\n📥 Inbox: {len(inbox)} unassigned "
+                        f"({_fmt_money(inbox_total, gen.get('currency'))}) — "
+                        "say 'assign …' or use auto_assign_inbox to file them."
+                    )
         return "\n".join(lines)
 
 

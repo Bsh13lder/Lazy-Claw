@@ -16,6 +16,7 @@ from lazyclaw.config import Config
 from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.skills.builtin.budget_manager import (
     AddExpenseSkill,
+    AutoAssignInboxSkill,
     ExpenseReportSkill,
     ListBudgetTopupsSkill,
     ListExpensesSkill,
@@ -201,3 +202,35 @@ async def test_move_expense_single_failure_reports_nothing_moved(cfg, monkeypatc
     assert len(await store.list_expenses(cfg, "u1", project_id=g["id"])) == 1
     club = await store.get_project_by_name(cfg, "u1", "ClubBay")
     assert await store.list_expenses(cfg, "u1", project_id=club["id"]) == []
+
+
+async def test_auto_assign_applies_confident_only(cfg, monkeypatch):
+    """Test that auto_assign_inbox applies only high/medium confidence suggestions
+    and lists uncertain ones for manual filing."""
+    from lazyclaw.budgets import inbox_suggest
+    from lazyclaw.budgets.inbox_suggest import ExpenseSuggestion
+
+    g = await store.create_project(cfg, "u1", "General")
+    await store.create_project(cfg, "u1", "ClubBay")
+    e1 = await store.create_expense(cfg, "u1", g["id"], amount=50, description="venue deposit")
+    e2 = await store.create_expense(cfg, "u1", g["id"], amount=3, description="mystery")
+
+    async def fake_suggest(config, user_id, *, description, **kw):
+        if description == "venue deposit":
+            return ExpenseSuggestion("ClubBay", "high", "club spend", "llm")
+        return ExpenseSuggestion(None, "none", None, "none")
+    monkeypatch.setattr(inbox_suggest, "suggest_expense_project", fake_suggest)
+
+    msg = await AutoAssignInboxSkill(cfg).execute("u1", {})
+    assert "venue deposit" in msg and "ClubBay" in msg
+    assert "mystery" in msg  # surfaced as needs-you
+
+    club = await store.get_project_by_name(cfg, "u1", "ClubBay")
+    assert [x["id"] for x in await store.list_expenses(cfg, "u1", project_id=club["id"])] == [e1["id"]]
+    assert [x["id"] for x in await store.list_expenses(cfg, "u1", project_id=g["id"])] == [e2["id"]]
+
+
+async def test_auto_assign_empty_inbox(cfg):
+    """Test that auto_assign_inbox gracefully handles empty inbox."""
+    msg = await AutoAssignInboxSkill(cfg).execute("u1", {})
+    assert "empty" in msg.lower() or "no unassigned" in msg.lower()

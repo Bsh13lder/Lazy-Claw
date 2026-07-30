@@ -1040,6 +1040,86 @@ class ListProjectsSkill(BaseSkill):
         return "\n".join(lines)
 
 
+class AutoAssignInboxSkill(BaseSkill):
+    """AI-file inbox expenses into projects (worker LLM, confidence-gated)."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "auto_assign_inbox"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Automatically assign unassigned 📥 Inbox expenses to matching "
+            "projects using AI suggestions — 'sort my inbox', 'auto assign my "
+            "expenses'. Applies only confident matches; uncertain ones are "
+            "listed for the user to decide (use move_expense for those)."
+        )
+
+    @property
+    def category(self) -> str:
+        return "budgets"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        import asyncio
+
+        from lazyclaw.budgets import inbox_suggest, store
+
+        gen = await store.get_project_by_name(self._config, user_id, GENERAL_PROJECT_NAME)
+        inbox = (
+            await store.list_expenses(self._config, user_id, project_id=gen["id"])
+            if gen else []
+        )
+        if not inbox:
+            return "📥 Inbox is empty — no unassigned expenses."
+        batch, overflow = inbox[:10], max(0, len(inbox) - 10)
+
+        projects = await store.list_projects(self._config, user_id)
+        id_by_name = {p["name"]: p["id"] for p in projects}
+
+        suggestions = await asyncio.gather(*(
+            inbox_suggest.suggest_expense_project(
+                self._config, user_id,
+                description=e.get("description"), vendor=e.get("vendor"),
+                amount=float(e.get("amount") or 0),
+                currency=e.get("currency") or "EUR",
+            )
+            for e in batch
+        ))
+
+        applied, unsure = [], []
+        for e, s in zip(batch, suggestions):
+            label = e.get("description") or e.get("vendor") or "expense"
+            target_id = id_by_name.get(s.project_name) if s.project_name else None
+            if target_id and s.confidence in {"high", "medium"}:
+                ok = await store.update_expense(
+                    self._config, user_id, e["id"], project_id=target_id,
+                )
+                if ok:
+                    applied.append(f"  ✓ {label} → **{s.project_name}**")
+            else:
+                unsure.append(f"  ? {label} ({_fmt_money(e.get('amount'), e.get('currency'))})")
+
+        parts = []
+        if applied:
+            parts.append(f"Auto-assigned {len(applied)}:\n" + "\n".join(applied))
+        if unsure:
+            parts.append(
+                f"Needs you ({len(unsure)}):\n" + "\n".join(unsure)
+                + "\nUse move_expense to file these."
+            )
+        if overflow:
+            parts.append(f"({overflow} more in the inbox — run auto_assign_inbox again.)")
+        return "\n\n".join(parts) or "Nothing to do."
+
+
 class ListBudgetTopupsSkill(BaseSkill):
     """Read the budget top-up ledger (budget_entries) — the money-IN side."""
 

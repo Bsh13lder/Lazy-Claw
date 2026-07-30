@@ -230,9 +230,9 @@ class SkillRegistry:
         # categories tasks already use.
         from lazyclaw.skills.builtin.budget_manager import (
             AddExpenseSkill, AddProjectBudgetSkill, AddRecurringExpenseSkill,
-            CreateProjectSkill, ExpenseReportSkill, ListBudgetTopupsSkill,
-            ListExpensesSkill, ListProjectsSkill, MoveExpenseSkill,
-            SetDefaultExpenseProjectSkill, SetProjectBudgetSkill,
+            AutoAssignInboxSkill, CreateProjectSkill, ExpenseReportSkill,
+            ListBudgetTopupsSkill, ListExpensesSkill, ListProjectsSkill,
+            MoveExpenseSkill, SetDefaultExpenseProjectSkill, SetProjectBudgetSkill,
         )
         self.register(CreateProjectSkill(config=config))
         self.register(SetProjectBudgetSkill(config=config))
@@ -245,6 +245,7 @@ class SkillRegistry:
         self.register(SetDefaultExpenseProjectSkill(config=config))
         self.register(ListProjectsSkill(config=config))
         self.register(ListBudgetTopupsSkill(config=config))
+        self.register(AutoAssignInboxSkill(config=config))
 
         # Sheets — private encrypted spreadsheets (Univer web editor +
         # agent-editable). Same local-encrypted-store profile as budgets/tasks.

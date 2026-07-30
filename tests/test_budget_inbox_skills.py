@@ -6,6 +6,7 @@ and listing budget top-ups (the money-IN ledger side) with source tracking.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -234,6 +235,36 @@ async def test_auto_assign_empty_inbox(cfg):
     """Test that auto_assign_inbox gracefully handles empty inbox."""
     msg = await AutoAssignInboxSkill(cfg).execute("u1", {})
     assert "empty" in msg.lower() or "no unassigned" in msg.lower()
+
+
+async def test_auto_assign_bounds_suggester_concurrency(cfg, monkeypatch):
+    """The default HYBRID worker is local Ollama, which serializes chat
+    calls. An unbounded fan-out over up to 10 inbox items queues calls
+    2..10 behind the same independent 3s timeout and they all return
+    empty. The batch fan-out must cap live concurrent suggester calls at 2
+    (a semaphore), regardless of how many expenses are in the inbox."""
+    from lazyclaw.budgets import inbox_suggest
+    from lazyclaw.budgets.inbox_suggest import ExpenseSuggestion
+
+    g = await store.create_project(cfg, "u1", "General")
+    for i in range(6):
+        await store.create_expense(cfg, "u1", g["id"], amount=1, description=f"item{i}")
+
+    live = 0
+    high_water = 0
+
+    async def fake_suggest(config, user_id, *, description, **kw):
+        nonlocal live, high_water
+        live += 1
+        high_water = max(high_water, live)
+        await asyncio.sleep(0)  # yield, giving other queued calls a chance to overlap
+        live -= 1
+        return ExpenseSuggestion(None, "none", None, "none")
+
+    monkeypatch.setattr(inbox_suggest, "suggest_expense_project", fake_suggest)
+
+    await AutoAssignInboxSkill(cfg).execute("u1", {})
+    assert high_water <= 2
 
 
 def test_tasks_specialist_allowlists_new_budget_skills():

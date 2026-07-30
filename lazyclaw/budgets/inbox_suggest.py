@@ -130,3 +130,51 @@ async def suggest_expense_project(
     except Exception:
         logger.debug("inbox_suggest failed", exc_info=True)
         return _empty()
+
+
+async def suggest_for_expenses(
+    config: Config,
+    user_id: str,
+    expenses: list[dict],
+    projects: list[dict],
+) -> list[dict]:
+    """Bounded-concurrency batch fan-out over ``suggest_expense_project``.
+
+    WHY: the default HYBRID-mode worker is local Ollama, which serves chat
+    calls SERIALLY. An unbounded ``asyncio.gather`` over up to 10 inbox
+    items fires 10 concurrent calls, each racing its own independent 3s
+    ``asyncio.wait_for`` — calls 2..10 sit queued behind the first and burn
+    their whole clock before the worker ever gets to them, so they all come
+    back empty. Capping live concurrency at 2 (a semaphore) turns the batch
+    into ceil(N/2) serial waves instead; a longer 6s per-call timeout for
+    batches >2 gives each wave room to actually complete on the serial
+    worker (worst case ~ceil(10/2)*6s = 30s for a full 10-item batch).
+
+    Shared by the ``/api/budgets/inbox/suggestions`` route and
+    ``AutoAssignInboxSkill`` so the concurrency bound lives in one place.
+    """
+    id_by_name = {p["name"]: p["id"] for p in projects}
+    timeout_s = 6.0 if len(expenses) > 2 else 3.0
+    semaphore = asyncio.Semaphore(2)
+
+    async def one(e: dict) -> dict:
+        # Acquire INSIDE the per-item coroutine (not around the gather) so
+        # asyncio.gather still schedules and collects every item — the
+        # semaphore only throttles how many are actually IN FLIGHT at once.
+        async with semaphore:
+            s = await suggest_expense_project(
+                config, user_id,
+                description=e.get("description"), vendor=e.get("vendor"),
+                amount=float(e.get("amount") or 0),
+                currency=e.get("currency") or "EUR",
+                timeout_s=timeout_s,
+            )
+        return {
+            "expense_id": e["id"],
+            "project_id": id_by_name.get(s.project_name) if s.project_name else None,
+            "project_name": s.project_name,
+            "confidence": s.confidence,
+            "reason": s.reason,
+        }
+
+    return list(await asyncio.gather(*(one(e) for e in expenses)))

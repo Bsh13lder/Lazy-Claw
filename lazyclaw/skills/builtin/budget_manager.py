@@ -1068,8 +1068,6 @@ class AutoAssignInboxSkill(BaseSkill):
         return {"type": "object", "properties": {}}
 
     async def execute(self, user_id: str, params: dict) -> str:
-        import asyncio
-
         from lazyclaw.budgets import inbox_suggest, store
 
         gen = await store.get_project_by_name(self._config, user_id, GENERAL_PROJECT_NAME)
@@ -1082,28 +1080,25 @@ class AutoAssignInboxSkill(BaseSkill):
         batch, overflow = inbox[:10], max(0, len(inbox) - 10)
 
         projects = await store.list_projects(self._config, user_id)
-        id_by_name = {p["name"]: p["id"] for p in projects}
-
-        suggestions = await asyncio.gather(*(
-            inbox_suggest.suggest_expense_project(
-                self._config, user_id,
-                description=e.get("description"), vendor=e.get("vendor"),
-                amount=float(e.get("amount") or 0),
-                currency=e.get("currency") or "EUR",
-            )
-            for e in batch
-        ))
+        # suggest_for_expenses bounds concurrency (semaphore(2)) — the
+        # default HYBRID worker is local Ollama and serializes chat calls,
+        # so an unbounded fan-out over up to 10 items would queue calls
+        # 2..10 behind independent 3s timeouts and they'd all come back
+        # empty. Shared with the /api/budgets/inbox/suggestions route.
+        suggestions = await inbox_suggest.suggest_for_expenses(
+            self._config, user_id, batch, projects,
+        )
 
         applied, unsure = [], []
         for e, s in zip(batch, suggestions):
             label = e.get("description") or e.get("vendor") or "expense"
-            target_id = id_by_name.get(s.project_name) if s.project_name else None
-            if target_id and s.confidence in {"high", "medium"}:
+            target_id = s["project_id"]
+            if target_id and s["confidence"] in {"high", "medium"}:
                 ok = await store.update_expense(
                     self._config, user_id, e["id"], project_id=target_id,
                 )
                 if ok:
-                    applied.append(f"  ✓ {label} → **{s.project_name}**")
+                    applied.append(f"  ✓ {label} → **{s['project_name']}**")
             else:
                 unsure.append(f"  ? {label} ({_fmt_money(e.get('amount'), e.get('currency'))})")
 
@@ -1134,10 +1129,10 @@ class ListBudgetTopupsSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Show budget top-ups (top up / topup history): the ledger of money "
-            "ADDED to project budgets — when, how much, and the source (who/why). "
-            "Answers 'show my top-ups', 'budget history', 'where did the budget "
-            "come from', 'money added to X'. Omit project for all projects. "
-            "Read-only."
+            "ADDED to project budgets (funding history) — when, how much, and "
+            "the source (who/why). Answers 'show my top-ups', 'budget history', "
+            "'where did the budget come from', 'money added to X'. Omit project "
+            "for all projects. Read-only."
         )
 
     @property

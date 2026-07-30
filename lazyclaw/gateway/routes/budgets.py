@@ -8,7 +8,6 @@ that wikilinks back to its project page.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Literal
 
@@ -419,31 +418,16 @@ async def inbox_suggestions_route(
     if gen is None:
         return {"suggestions": [], "skipped": 0}
     expenses = await store.list_expenses(_config, user.id, project_id=gen["id"])
-    if body.expense_ids:
+    # An explicit `expense_ids: []` means "suggest for NONE of them" — it must
+    # NOT be treated the same as an absent/omitted field (which means ALL).
+    if body.expense_ids is not None:
         wanted = set(body.expense_ids)
         expenses = [e for e in expenses if e["id"] in wanted]
     skipped = max(0, len(expenses) - 10)
     expenses = expenses[:10]
 
     projects = await store.list_projects(_config, user.id)
-    id_by_name = {p["name"]: p["id"] for p in projects}
-
-    async def one(e: dict) -> dict:
-        s = await inbox_suggest.suggest_expense_project(
-            _config, user.id,
-            description=e.get("description"), vendor=e.get("vendor"),
-            amount=float(e.get("amount") or 0),
-            currency=e.get("currency") or "EUR",
-        )
-        return {
-            "expense_id": e["id"],
-            "project_id": id_by_name.get(s.project_name) if s.project_name else None,
-            "project_name": s.project_name,
-            "confidence": s.confidence,
-            "reason": s.reason,
-        }
-
-    suggestions = list(await asyncio.gather(*(one(e) for e in expenses)))
+    suggestions = await inbox_suggest.suggest_for_expenses(_config, user.id, expenses, projects)
     return {"suggestions": suggestions, "skipped": skipped}
 
 

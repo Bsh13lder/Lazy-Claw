@@ -1,3 +1,5 @@
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -34,6 +36,12 @@ const String _kUncategorizedFilter = '__uncategorized__';
 /// Sentinel filter value scoping the ledger to the starred (favorite)
 /// projects — the same set the Home dashboard and the Overview tab lead with.
 const String _kFavoritesFilter = '__favorites__';
+
+/// Extra bottom padding reserved for the Ledger's scroll content while the
+/// pinned bulk-action bar is showing (see `_LedgerTabState.build`), so the
+/// bottom-anchored overlay can never cover the last list row or the balance /
+/// connect-hint footer beneath it.
+const double _kBulkBarReserve = 88;
 
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
@@ -738,20 +746,30 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     setState(() => _bulkBusy = true);
     final ids = _selected.isEmpty ? null : _selected.toList();
     ({List<InboxSuggestion> suggestions, int skipped})? result;
+    var failureMessage = 'Auto-assign needs a connection. Try again online.';
     try {
       result = await ref
           .read(budgetsRepositoryProvider)
           .getInboxSuggestions(expenseIds: ids);
-    } catch (_) {
+    } on DioException catch (_) {
+      // The expected offline/API-failure shape (wraps ApiError) — the plain
+      // "needs a connection" hint below covers it.
       result = null;
+    } catch (e) {
+      // Anything else is unexpected: surface loudly in debug so it can't hide
+      // behind a generic snackbar, but fail soft in release — same
+      // log-and-fall-back idiom as `budget_log_sheet._friendly` /
+      // `ChatScreen._connect`.
+      if (kDebugMode) rethrow;
+      debugPrint('Auto-assign suggestions failed: $e');
+      result = null;
+      failureMessage = 'Something went wrong. Try again.';
     }
     if (!mounted) return;
     setState(() => _bulkBusy = false);
     if (result == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Auto-assign needs a connection. Try again online.'),
-        ),
+        SnackBar(content: Text(failureMessage)),
       );
       return;
     }
@@ -1152,90 +1170,110 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
 
     final showBulkBar = _selectionMode && inboxFilterActive;
 
-    return LzRefresh(
-      onRefresh: _handleRefresh,
-      child: CustomScrollView(
-        slivers: [
-          SliverToBoxAdapter(child: controls),
-          if (items.isEmpty)
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: LzEmptyState(
-                icon: Icons.filter_alt_off_outlined,
-                title: 'No expenses match',
-                hint: 'Try a different project or time range.',
-              ),
-            )
-          else ...[
-            if (_sort == _LedgerSort.amount)
-              _amountSliver(items, inboxFilterActive: inboxFilterActive)
-            else
-              _dateGroupedSliver(
-                items,
-                newestFirst: _sort == _LedgerSort.newest,
-                inboxFilterActive: inboxFilterActive,
-              ),
-            // Bulk action bar — pinned above the footer sliver. Always present
-            // as a sliver (so entering/leaving selection mode never reflows
-            // the rest of the list); an AnimatedSwitcher cross-fades between
-            // hidden and shown using AppMotion's standard transition, per the
-            // plan's requirement to respect AppMotion durations for the bar's
-            // appearance.
-            SliverToBoxAdapter(
-              child: AnimatedSwitcher(
-                duration: AppMotion.base,
-                switchInCurve: AppMotion.curve,
-                switchOutCurve: AppMotion.curve,
-                child: showBulkBar
-                    ? Padding(
-                        key: const ValueKey('bulk-bar'),
-                        padding: const EdgeInsets.fromLTRB(
-                          AppSpacing.lg,
-                          AppSpacing.md,
-                          AppSpacing.lg,
-                          0,
-                        ),
-                        child: BulkActionBar(
-                          count: _selected.length,
-                          busy: _bulkBusy,
-                          onAssign: _selected.isEmpty
-                              ? null
-                              : () => _openAssignSheet(
-                                    state.projects,
-                                    inboxProject.id,
-                                  ),
-                          onAuto: _openAutoAssign,
-                          onCancel: _cancelSelection,
-                        ),
-                      )
-                    : const SizedBox.shrink(key: ValueKey('bulk-bar-hidden')),
-              ),
-            ),
-            // Footer: the running balance (once credits loaded) and/or the
-            // offline hint. Always present so it also carries the bottom scroll
-            // room (the content slivers no longer pad the bottom).
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.md,
-                  AppSpacing.lg,
-                  AppSpacing.xxxl,
+    // The bulk bar is a screen-pinned overlay (bottom-anchored in a Stack)
+    // rather than a sliver living inside the scroll content. It used to render
+    // as the final sliver above the footer, which on a long inbox sat below
+    // the fold — a long-press appeared to do nothing until the user scrolled
+    // all the way down. Pinning it here means it's ALWAYS visible the instant
+    // selection mode is entered, regardless of scroll position. The scroll
+    // content reserves [_kBulkBarReserve] of extra bottom padding whenever the
+    // bar is shown so the overlay can never cover the last list row or the
+    // balance/connect-hint footer beneath it.
+    return Stack(
+      children: [
+        LzRefresh(
+          onRefresh: _handleRefresh,
+          child: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(child: controls),
+              if (items.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: LzEmptyState(
+                    icon: Icons.filter_alt_off_outlined,
+                    title: 'No expenses match',
+                    hint: 'Try a different project or time range.',
+                  ),
+                )
+              else ...[
+                if (_sort == _LedgerSort.amount)
+                  _amountSliver(items, inboxFilterActive: inboxFilterActive)
+                else
+                  _dateGroupedSliver(
+                    items,
+                    newestFirst: _sort == _LedgerSort.newest,
+                    inboxFilterActive: inboxFilterActive,
+                  ),
+                // Footer: the running balance (once credits loaded) and/or the
+                // offline hint. Always present so it also carries the bottom
+                // scroll room; its bottom padding grows by [_kBulkBarReserve]
+                // while the pinned bulk bar is showing so the overlay never
+                // covers it.
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      AppSpacing.lg,
+                      AppSpacing.md,
+                      AppSpacing.lg,
+                      AppSpacing.xxxl + (showBulkBar ? _kBulkBarReserve : 0),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (balance != null)
+                          _LedgerBalanceBar(
+                              balance: balance, currency: currency),
+                        if (!entriesLoaded && !_entriesLoading)
+                          const _LedgerConnectHint(),
+                      ],
+                    ),
+                  ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (balance != null)
-                      _LedgerBalanceBar(balance: balance, currency: currency),
-                    if (!entriesLoaded && !_entriesLoading)
-                      const _LedgerConnectHint(),
-                  ],
-                ),
-              ),
+              ],
+            ],
+          ),
+        ),
+        // Pinned bulk-action bar — bottom-anchored above the scroll view so it
+        // stays on screen in selection mode no matter how far the list is
+        // scrolled. Same AnimatedSwitcher + AppMotion cross-fade the old
+        // sliver placement used.
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: SafeArea(
+            top: false,
+            child: AnimatedSwitcher(
+              duration: AppMotion.base,
+              switchInCurve: AppMotion.curve,
+              switchOutCurve: AppMotion.curve,
+              child: showBulkBar
+                  ? Padding(
+                      key: const ValueKey('bulk-bar'),
+                      padding: const EdgeInsets.fromLTRB(
+                        AppSpacing.lg,
+                        0,
+                        AppSpacing.lg,
+                        AppSpacing.md,
+                      ),
+                      child: BulkActionBar(
+                        count: _selected.length,
+                        busy: _bulkBusy,
+                        onAssign: _selected.isEmpty
+                            ? null
+                            : () => _openAssignSheet(
+                                  state.projects,
+                                  inboxProject.id,
+                                ),
+                        onAuto: _openAutoAssign,
+                        onCancel: _cancelSelection,
+                      ),
+                    )
+                  : const SizedBox.shrink(key: ValueKey('bulk-bar-hidden')),
             ),
-          ],
-        ],
-      ),
+          ),
+        ),
+      ],
     );
   }
 

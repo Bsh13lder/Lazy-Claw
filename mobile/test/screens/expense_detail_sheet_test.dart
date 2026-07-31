@@ -358,6 +358,39 @@ void main() {
     );
   });
 
+  testWidgets(
+      'renders safely (falls back to "(no task)") when the linked task no '
+      'longer exists', (tester) async {
+    final stub = _stub();
+    // The expense still references a task id that isn't in the current
+    // tasks list (e.g. the task was since deleted) — the picker must fall
+    // back to the "(no task)" guard state rather than hit the
+    // DropdownButton assert that a stale, absent value would trigger.
+    const withGhostTask = Expense(
+      id: 'exp-80',
+      projectId: 'proj-1',
+      taskId: 'ghost-task',
+      amount: 5,
+      currency: 'USD',
+      description: 'Snack',
+      status: 'posted',
+    );
+    await openSheet(
+      tester,
+      stub,
+      tasks: [_task('t1', 'Book flights', category: 'Marketing')],
+      expense: withGhostTask,
+    );
+
+    expect(
+      tester
+          .widget<DropdownButton<String>>(find.byKey(const Key('expense-detail-task')))
+          .value,
+      isNull,
+    );
+    expect(find.text('(no task)'), findsOneWidget);
+  });
+
   testWidgets('Delete asks to confirm then invokes removeExpense',
       (tester) async {
     final stub = _stub();

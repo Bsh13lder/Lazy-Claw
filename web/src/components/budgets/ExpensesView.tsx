@@ -28,6 +28,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   const [addProject, setAddProject] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [starredOnly, setStarredOnly] = useState(false);
+  const [inboxOnly, setInboxOnly] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -75,9 +76,34 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     return m;
   }, [projects]);
 
+  // Inbox = the catch-all "General" project. Detected by name_key, never the
+  // (renameable) display name.
+  const inboxProject = useMemo(
+    () => projects.find((p) => p.name_key === "general"),
+    [projects],
+  );
+  const inboxCount = useMemo(
+    () => (expenses || []).filter((e) => e.project_id === inboxProject?.id).length,
+    [expenses, inboxProject],
+  );
+
+  // Auto-reset the filter once its own result set empties out (last inbox
+  // expense got assigned or deleted elsewhere) — otherwise the user is
+  // stranded looking at an empty list with no visible way out. Adjusted
+  // synchronously during render (React's documented pattern for resetting
+  // state in response to a state change) rather than in a useEffect, which
+  // would cause an extra committed render just to flip the filter back off.
+  const [prevInboxCount, setPrevInboxCount] = useState(inboxCount);
+  if (inboxCount !== prevInboxCount) {
+    setPrevInboxCount(inboxCount);
+    if (inboxOnly && inboxCount === 0) setInboxOnly(false);
+  }
+
   const groups = useMemo<Group[]>(() => {
     if (!expenses) return [];
-    const src = starredOnly ? expenses.filter((e) => e.is_favorite) : expenses;
+    const src = expenses.filter((e) =>
+      (!starredOnly || e.is_favorite) &&
+      (!inboxOnly || e.project_id === inboxProject?.id));
     const byId = new Map<string, Group>();
     for (const e of src) {
       const pid = e.project_id;
@@ -95,22 +121,32 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
       g.rows.push(e);
       g.subtotal += e.amount || 0;
     }
-    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [expenses, currencyByProject, starredOnly]);
+    const list = Array.from(byId.values());
+    list.sort((a, b) => {
+      // Pin the inbox (General) group first, unfiltered only — filtered views
+      // already show a single group, so pinning would be a no-op there.
+      if (!inboxOnly && inboxProject) {
+        if (a.projectId === inboxProject.id) return -1;
+        if (b.projectId === inboxProject.id) return 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+    return list;
+  }, [expenses, currencyByProject, starredOnly, inboxOnly, inboxProject]);
 
-  // Total of the currently-shown set (all, or starred-only when filtered), split
+  // Total of the currently-shown set (starred/inbox filters applied), split
   // per currency — no FX conversion (matches spending report).
   const totalsByCurrency = useMemo(() => {
-    const src = starredOnly
-      ? (expenses || []).filter((e) => e.is_favorite)
-      : expenses || [];
+    const src = (expenses || []).filter((e) =>
+      (!starredOnly || e.is_favorite) &&
+      (!inboxOnly || e.project_id === inboxProject?.id));
     const m = new Map<string, number>();
     for (const e of src) {
       const c = e.currency || "EUR";
       m.set(c, (m.get(c) || 0) + (e.amount || 0));
     }
     return Array.from(m.entries());
-  }, [expenses, starredOnly]);
+  }, [expenses, starredOnly, inboxOnly, inboxProject]);
 
   // Always-visible starred subtotal, so the "★" total shows even without the
   // filter on — this is the "starred only" overview number the user wanted.
@@ -170,6 +206,19 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
         >
           {starredOnly ? "★ Starred only" : "☆ Starred only"}
         </button>
+        {inboxProject && inboxCount > 0 && (
+          <button
+            onClick={() => setInboxOnly((v) => !v)}
+            title="Show only unassigned (General) expenses"
+            className={`text-[12px] px-3 py-1.5 rounded-lg border ${
+              inboxOnly
+                ? "border-accent/40 bg-accent-soft text-accent"
+                : "border-border/60 text-text-secondary hover:text-amber-300"
+            }`}
+          >
+            📥 Inbox ({inboxCount})
+          </button>
+        )}
         <span className="ml-auto text-[12px] text-text-secondary">
           {starredTotalsByCurrency.length > 0 && !starredOnly && (
             <span className="mr-3 text-amber-300/90">
@@ -207,8 +256,12 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
 
       {groups.length === 0 ? (
         <p className="text-sm text-text-muted">
-          {starredOnly
+          {inboxOnly && starredOnly
+            ? "No starred expenses in the inbox."
+            : starredOnly
             ? "No starred expenses yet. Tap the ☆ on an expense to star it."
+            : inboxOnly
+            ? "Inbox is empty."
             : 'No expenses yet. Add one above, or just say "spent 12 on coffee" in chat — it lands under General.'}
         </p>
       ) : (

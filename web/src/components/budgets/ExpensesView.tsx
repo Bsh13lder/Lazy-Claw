@@ -93,10 +93,20 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   // synchronously during render (React's documented pattern for resetting
   // state in response to a state change) rather than in a useEffect, which
   // would cause an extra committed render just to flip the filter back off.
+  //
+  // Gated on `expenses.length > 0`: the refetch's `.catch` (above) sets
+  // `expenses` to `[]` on ANY fetch error, which would otherwise make
+  // `inboxCount === 0` look like a genuinely emptied inbox and silently
+  // clear the user's filter choice on a transient network blip — only to
+  // have the data (and their still-active filter intent) reappear on the
+  // next successful poll, with no error ever surfaced. A non-empty expense
+  // list proves the fetch actually succeeded, so a true 0 here is trustworthy.
+  // (A brand-new user with zero expenses everywhere can't have `inboxOnly`
+  // true in the first place — the chip only renders once `inboxCount > 0`.)
   const [prevInboxCount, setPrevInboxCount] = useState(inboxCount);
   if (inboxCount !== prevInboxCount) {
     setPrevInboxCount(inboxCount);
-    if (inboxOnly && inboxCount === 0) setInboxOnly(false);
+    if (inboxOnly && (expenses?.length ?? 0) > 0 && inboxCount === 0) setInboxOnly(false);
   }
 
   const groups = useMemo<Group[]>(() => {

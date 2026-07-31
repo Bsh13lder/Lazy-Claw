@@ -43,6 +43,7 @@ Expense _serverExpense({
   String projectId = 'p1',
   double amount = 50.0,
   String description = 'Server expense',
+  String? taskId,
 }) =>
     Expense(
       id: id,
@@ -51,6 +52,7 @@ Expense _serverExpense({
       currency: 'USD',
       description: description,
       status: 'posted',
+      taskId: taskId,
     );
 
 BudgetEntry _serverBudgetEntry({
@@ -260,6 +262,74 @@ void main() {
       expect(await dao.applyLocalProjectUpdate('nope', name: 'x'), isNull);
       expect(await dao.applyLocalProjectDelete('nope'), isFalse);
       expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+  });
+
+  // ── Expense update: taskId (null-vs-absent is load-bearing) ────────────────
+
+  group('BudgetsDao expense update taskId', () {
+    test('taskIdSet:true writes task_id into the cache row + outbox payload',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(_serverExpense(id: 'e-task'));
+
+      final updated = await dao.applyLocalExpenseUpdate('e-task',
+          taskId: 't1', taskIdSet: true);
+      expect(updated!.taskId, 't1');
+
+      final row = await dao.getExpenseRow('e-task');
+      expect(row?['task_id'], 't1');
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      expect(updateItem.payload['task_id'], 't1');
+    });
+
+    test(
+        'explicit clear: taskId:null + taskIdSet:true keeps the task_id key '
+        'present (JSON null) in both the cache write and the outbox payload',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-clear', taskId: 't0'));
+
+      final updated = await dao.applyLocalExpenseUpdate('e-clear',
+          taskId: null, taskIdSet: true);
+      expect(updated!.taskId, isNull);
+
+      final row = await dao.getExpenseRow('e-clear');
+      expect(row?['task_id'], isNull);
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      // The key must be PRESENT (mapping to JSON null on replay), not merely
+      // absent-and-therefore-null — that's what tells the server's
+      // exclude_unset PATCH handler to actually clear the link.
+      expect(updateItem.payload.containsKey('task_id'), isTrue);
+      expect(updateItem.payload['task_id'], isNull);
+    });
+
+    test(
+        'no taskIdSet: task_id key is absent from the outbox payload and the '
+        'cached task_id is left untouched',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-untouched', taskId: 't0'));
+
+      final updated =
+          await dao.applyLocalExpenseUpdate('e-untouched', description: 'x');
+      expect(updated!.taskId, 't0');
+
+      final row = await dao.getExpenseRow('e-untouched');
+      expect(row?['task_id'], 't0');
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      expect(updateItem.payload.containsKey('task_id'), isFalse);
     });
   });
 

@@ -75,6 +75,8 @@ class _StubBudgetsNotifier extends BudgetsNotifier {
     String? description,
     String? vendor,
     String? projectId,
+    String? taskId,
+    bool taskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -84,6 +86,8 @@ class _StubBudgetsNotifier extends BudgetsNotifier {
       'description': description,
       'vendor': vendor,
       'projectId': projectId,
+      'taskId': taskId,
+      'taskIdSet': taskIdSet,
       'notes': notes,
       'spentAt': spentAt,
     });

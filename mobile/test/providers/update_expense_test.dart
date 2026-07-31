@@ -66,6 +66,8 @@ class _RecordingDao extends BudgetsDao {
     String? description,
     String? vendor,
     String? projectId,
+    String? taskId,
+    bool taskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -75,6 +77,8 @@ class _RecordingDao extends BudgetsDao {
       'description': description,
       'vendor': vendor,
       'projectId': projectId,
+      'taskId': taskId,
+      'taskIdSet': taskIdSet,
       'notes': notes,
       'spentAt': spentAt,
     });
@@ -174,6 +178,51 @@ void main() {
 
       expect(n.state.error, isNotNull);
       expect(n.state.error, contains('db boom'));
+    });
+
+    // ── taskId / taskIdSet (null-vs-absent is load-bearing) ─────────────────
+
+    test('(a) passes taskId + taskIdSet:true through when assigning a task',
+        () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-4', taskId: 't1', taskIdSet: true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['taskId'], 't1');
+      expect(call['taskIdSet'], isTrue);
+    });
+
+    test(
+        '(b) passes taskId:null + taskIdSet:true through for an explicit clear',
+        () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-5', taskId: null, taskIdSet: true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['taskId'], isNull);
+      expect(call['taskIdSet'], isTrue);
+    });
+
+    test('(c) defaults taskIdSet:false when no task args are passed',
+        () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-6', description: 'x');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['taskIdSet'], isFalse);
+      expect(call['taskId'], isNull);
     });
   });
 }

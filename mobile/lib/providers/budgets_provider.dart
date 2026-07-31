@@ -347,16 +347,25 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
-  /// Patch an existing expense locally (amount/description/vendor/project/notes/
-  /// date). Only the supplied fields change; the rest are preserved. Lands
-  /// optimistically in the cache + outbox, then best-effort syncs. Returns true
-  /// on success, false (with `state.error` set) when the local write throws.
+  /// Patch an existing expense locally (amount/description/vendor/project/
+  /// task/notes/date). Only the supplied fields change; the rest are
+  /// preserved. Lands optimistically in the cache + outbox, then best-effort
+  /// syncs. Returns true on success, false (with `state.error` set) when the
+  /// local write throws.
+  ///
+  /// `taskId`/`taskIdSet` are a null-vs-absent pair (see
+  /// [BudgetsDao.applyLocalExpenseUpdate] for the full rationale): pass
+  /// `taskIdSet: true` to make the task link an explicit part of this patch
+  /// (including clearing it via `taskId: null`); leave `taskIdSet` at its
+  /// default `false` to leave the existing task link untouched.
   Future<bool> updateExpense(
     String id, {
     double? amount,
     String? description,
     String? vendor,
     String? projectId,
+    String? taskId,
+    bool taskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -368,6 +377,8 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
         description: description,
         vendor: vendor,
         projectId: projectId,
+        taskId: taskId,
+        taskIdSet: taskIdSet,
         notes: notes,
         spentAt: spentAt,
       );

@@ -636,18 +636,34 @@ class BudgetsDao {
     return (await getExpense(expenseId))!;
   }
 
-  /// Patch an existing expense locally (amount/description/vendor/project/notes/
-  /// date). Only the supplied fields change; the rest are preserved. Bumps
-  /// updated_at + dirty and enqueues an `update`. Returns the patched Expense
-  /// (or null when the id is unknown). When the project changes we clear the
-  /// cached `project_name` so the ledger row falls back to the live project list
-  /// (which carries the correct current name) until the next pull re-stamps it.
+  /// Patch an existing expense locally (amount/description/vendor/project/
+  /// task/notes/date). Only the supplied fields change; the rest are
+  /// preserved. Bumps updated_at + dirty and enqueues an `update`. Returns the
+  /// patched Expense (or null when the id is unknown). When the project
+  /// changes we clear the cached `project_name` so the ledger row falls back
+  /// to the live project list (which carries the correct current name) until
+  /// the next pull re-stamps it.
+  ///
+  /// `taskId`/`taskIdSet` follow null-vs-absent semantics (load-bearing, see
+  /// `feedback_patch_null_vs_absent`): most fields use the `?value`
+  /// null-aware map-entry syntax, which omits the key whenever the value is
+  /// null — fine for fields that are never explicitly cleared to null via
+  /// this call. `task_id` is different: callers (the task picker) need to be
+  /// able to clear a task link by passing `taskId: null`. So `taskIdSet`
+  /// carries that intent explicitly — when false (the default; every
+  /// existing caller — favorite toggles, plain field edits — never sets it),
+  /// the `task_id` key is omitted entirely so the task link is left
+  /// untouched; when true, the key is always included (even when `taskId` is
+  /// null) so it rides through as a real JSON `null` on the wire and the
+  /// server's `exclude_unset` PATCH handler clears the link.
   Future<Expense?> applyLocalExpenseUpdate(
     String id, {
     double? amount,
     String? description,
     String? vendor,
     String? projectId,
+    String? taskId,
+    bool taskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -663,6 +679,7 @@ class BudgetsDao {
       'description': ?description,
       'vendor': ?vendor,
       'project_id': ?projectId,
+      if (taskIdSet) 'task_id': taskId,
       'notes': ?notes,
       'spent_at': ?spentAt,
     };

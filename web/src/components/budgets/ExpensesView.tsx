@@ -64,7 +64,9 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     Promise.all([
       api.listAllExpenses(),
       api.listProjects("all"),
-      api.listTasks({ owner: "all", status: "all", bucket: "all" }),
+      // Tasks are auxiliary (assign-dropdown only) — degrade independently so
+      // a `/api/tasks` failure can't blank the whole ledger via the shared catch below.
+      api.listTasks({ owner: "all", status: "all", bucket: "all" }).catch((): TaskItem[] => []),
     ])
       .then(([ex, ps, ts]) => { if (alive) { setExpenses(ex); setProjects(ps); setTasks(ts); } })
       .catch(() => { if (alive) { setExpenses([]); setProjects([]); setTasks([]); } });
@@ -219,22 +221,28 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   // specific id rather than an unordered Promise.allSettled dump.
   const runBulkAssign = async () => {
     if (anyBulkBusy || selected.size === 0 || !bulkTargetProjectId) return;
-    setBulkAssignBusy(true);
-    setBulkAssignResult(null);
-    const ids = Array.from(selected);
-    const failures: string[] = [];
-    let moved = 0;
-    for (const id of ids) {
-      try {
-        await api.updateExpense(id, { project_id: bulkTargetProjectId });
-        moved++;
-      } catch (e) {
-        failures.push(`${expenseLabel(id)}: ${e instanceof Error ? e.message : String(e)}`);
+    try {
+      setBulkAssignBusy(true);
+      setBulkAssignResult(null);
+      const ids = Array.from(selected);
+      const failures: string[] = [];
+      let moved = 0;
+      for (const id of ids) {
+        try {
+          // Clear task_id too: a moved expense's old General-category task
+          // can't belong to the new project — same semantics as the agent's
+          // move_expense and the single-row assign path above.
+          await api.updateExpense(id, { project_id: bulkTargetProjectId, task_id: null });
+          moved++;
+        } catch (e) {
+          failures.push(`${expenseLabel(id)}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
+      refresh();
+      setBulkAssignResult({ total: ids.length, moved, failures });
+    } finally {
+      setBulkAssignBusy(false);
     }
-    refresh();
-    setBulkAssignResult({ total: ids.length, moved, failures });
-    setBulkAssignBusy(false);
   };
 
   // Auto-assign: fetch AI suggestions for the selection (or, with nothing
@@ -269,30 +277,34 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   const applySuggestions = async (items: InboxSuggestion[]) => {
     const applicable = items.filter((s) => s.project_id);
     if (applicable.length === 0 || anyBulkBusy) return;
-    setApplyBusy(true);
-    setApplyResult(null);
-    setApplyingIds(new Set(applicable.map((s) => s.expense_id)));
-    const failures: string[] = [];
-    let moved = 0;
-    for (const s of applicable) {
-      try {
-        await api.updateExpense(s.expense_id, { project_id: s.project_id as string });
-        moved++;
-        // Drop it immediately so a re-render before the refetch lands can't
-        // show an already-applied suggestion as still actionable.
-        setSuggestions((prev) => {
-          const next = new Map(prev);
-          next.delete(s.expense_id);
-          return next;
-        });
-      } catch (e) {
-        failures.push(`${expenseLabel(s.expense_id)}: ${e instanceof Error ? e.message : String(e)}`);
+    try {
+      setApplyBusy(true);
+      setApplyResult(null);
+      setApplyingIds(new Set(applicable.map((s) => s.expense_id)));
+      const failures: string[] = [];
+      let moved = 0;
+      for (const s of applicable) {
+        try {
+          // Clear task_id too — see comment in runBulkAssign.
+          await api.updateExpense(s.expense_id, { project_id: s.project_id as string, task_id: null });
+          moved++;
+          // Drop it immediately so a re-render before the refetch lands can't
+          // show an already-applied suggestion as still actionable.
+          setSuggestions((prev) => {
+            const next = new Map(prev);
+            next.delete(s.expense_id);
+            return next;
+          });
+        } catch (e) {
+          failures.push(`${expenseLabel(s.expense_id)}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
+      refresh();
+      setApplyResult({ total: applicable.length, moved, failures });
+      setApplyingIds(new Set());
+    } finally {
+      setApplyBusy(false);
     }
-    refresh();
-    setApplyResult({ total: applicable.length, moved, failures });
-    setApplyingIds(new Set());
-    setApplyBusy(false);
   };
 
   // Auto-reset the filter once its own result set empties out (last inbox

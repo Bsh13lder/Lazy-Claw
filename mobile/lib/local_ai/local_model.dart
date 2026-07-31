@@ -67,6 +67,22 @@ const List<LocalModel> kLocalModels = [
     fileName: 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf',
     recommended: true,
   ),
+  // Gemma 4 E2B: ~4.65B params total but only ~2B active per token, so it
+  // generates faster than a dense 4B. Q4_0 rather than a K-quant on purpose —
+  // it is the only quant `ggml-org` publishes for this model, AND it is the
+  // quant llama.cpp's Adreno OpenCL kernels are tuned for.
+  //
+  // Needs no llamadart upgrade: the `gemma4` architecture landed upstream at
+  // tag b8637, and llamadart 0.8.5 bundles b9744.
+  LocalModel(
+    id: 'gemma-4-e2b-it-q4_0',
+    displayName: 'Gemma 4 E2B Instruct',
+    license: 'Apache-2.0',
+    sizeBytesApprox: 2841481184, // ~2.65 GB (verified via the HF API)
+    url:
+        'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf',
+    fileName: 'gemma-4-E2B-it-Q4_0.gguf',
+  ),
   LocalModel(
     id: 'phi-4-mini-instruct-q4_k_m',
     displayName: 'Phi-4 mini Instruct',

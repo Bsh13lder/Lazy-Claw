@@ -22,6 +22,7 @@ import 'expenses/expense_detail_sheet.dart';
 import 'expenses/expense_row.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_card.dart';
+import 'expenses/selection_mode.dart';
 import 'storage_banners.dart';
 
 /// Sort order for the expense ledger.
@@ -1039,18 +1040,30 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     if (_projectFilter == _kFavoritesFilter && favoriteIds.isEmpty) {
       _projectFilter = null;
     }
+    final inboxFilterActive =
+        inboxProject != null && _projectFilter == inboxProject.id;
     // Bulk selection / AI suggestions only make sense while filtered to the
     // inbox — clear them the moment the filter lands anywhere else (project
     // deleted, favorites collapse, a manual filter change that somehow
     // skipped the onProjectChanged reset below), so a stale selection can
     // never survive into a different project's view.
-    if (_selectionMode && _projectFilter != inboxProject?.id) {
+    //
+    // Uses `shouldExitSelection` rather than comparing
+    // `_projectFilter != inboxProject?.id` directly: that direct comparison
+    // null-collapses when the inbox project is deleted — `_projectFilter`
+    // resets to null (the stale-filter guard just above) AND `inboxProject`
+    // is ALSO null, so `null != null` is false and the reset never fires.
+    // That left every row across the whole Ledger stuck in selection mode
+    // with no bulk bar (and no ✕ cancel) left to escape through.
+    if (shouldExitSelection(
+      selectionMode: _selectionMode,
+      projectFilter: _projectFilter,
+      inboxProjectId: inboxProject?.id,
+    )) {
       _selectionMode = false;
       _selected = {};
       _suggestions = {};
     }
-    final inboxFilterActive =
-        inboxProject != null && _projectFilter == inboxProject.id;
 
     // Scope to the active time window first (offline, in-memory), then compose
     // with the project filter. Sort happens in the sliver builders below.
@@ -1118,8 +1131,16 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
       onProjectChanged: (id) => setState(() {
         _projectFilter = id;
         // Leaving the inbox filter exits bulk-selection entirely — it has no
-        // meaning against a different project's rows.
-        if (id != inboxProject?.id) {
+        // meaning against a different project's rows. Same
+        // `shouldExitSelection` helper as the build-time guard above, for the
+        // same null-collapsing reason (a direct `id != inboxProject?.id`
+        // comparison would silently do nothing if this ever fires with both
+        // sides null).
+        if (shouldExitSelection(
+          selectionMode: _selectionMode,
+          projectFilter: id,
+          inboxProjectId: inboxProject?.id,
+        )) {
           _selectionMode = false;
           _selected = {};
           _suggestions = {};
@@ -1155,31 +1176,42 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
                 newestFirst: _sort == _LedgerSort.newest,
                 inboxFilterActive: inboxFilterActive,
               ),
-            // Bulk action bar — pinned above the footer sliver, only while
-            // bulk-selection mode is active against the inbox filter.
-            if (showBulkBar)
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    AppSpacing.lg,
-                    AppSpacing.md,
-                    AppSpacing.lg,
-                    0,
-                  ),
-                  child: _BulkActionBar(
-                    count: _selected.length,
-                    busy: _bulkBusy,
-                    onAssign: _selected.isEmpty
-                        ? null
-                        : () => _openAssignSheet(
-                              state.projects,
-                              inboxProject.id,
-                            ),
-                    onAuto: _openAutoAssign,
-                    onCancel: _cancelSelection,
-                  ),
-                ),
+            // Bulk action bar — pinned above the footer sliver. Always present
+            // as a sliver (so entering/leaving selection mode never reflows
+            // the rest of the list); an AnimatedSwitcher cross-fades between
+            // hidden and shown using AppMotion's standard transition, per the
+            // plan's requirement to respect AppMotion durations for the bar's
+            // appearance.
+            SliverToBoxAdapter(
+              child: AnimatedSwitcher(
+                duration: AppMotion.base,
+                switchInCurve: AppMotion.curve,
+                switchOutCurve: AppMotion.curve,
+                child: showBulkBar
+                    ? Padding(
+                        key: const ValueKey('bulk-bar'),
+                        padding: const EdgeInsets.fromLTRB(
+                          AppSpacing.lg,
+                          AppSpacing.md,
+                          AppSpacing.lg,
+                          0,
+                        ),
+                        child: _BulkActionBar(
+                          count: _selected.length,
+                          busy: _bulkBusy,
+                          onAssign: _selected.isEmpty
+                              ? null
+                              : () => _openAssignSheet(
+                                    state.projects,
+                                    inboxProject.id,
+                                  ),
+                          onAuto: _openAutoAssign,
+                          onCancel: _cancelSelection,
+                        ),
+                      )
+                    : const SizedBox.shrink(key: ValueKey('bulk-bar-hidden')),
               ),
+            ),
             // Footer: the running balance (once credits loaded) and/or the
             // offline hint. Always present so it also carries the bottom scroll
             // room (the content slivers no longer pad the bottom).

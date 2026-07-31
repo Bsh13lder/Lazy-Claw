@@ -1,17 +1,42 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import * as api from "../../api";
-import type { Expense } from "../../api";
+import type { Expense, Project, TaskItem } from "../../api";
 import { fmtMoney } from "./money";
 
 /**
  * One expense line in a ledger — date, description, amount, delete. Shared by
  * the per-project ExpenseLog and the global (grouped) Expenses view. Deleting
  * calls the parent's ``onChanged`` so both the list and any budget bar refresh.
+ *
+ * Inbox rows (the catch-all "General" project) additionally get an "Assign"
+ * affordance — a compact inline panel to move the expense onto a real project
+ * (and optionally one of that project's tasks). The parent only passes
+ * ``assignable``/``onAssign`` for General-group rows.
  */
 export function ExpenseRow({
-  date, expense, onChanged,
-}: { date: string; expense: Expense; onChanged: () => void }) {
+  date, expense, onChanged, assignable, onAssign, assignProjects, assignTasks,
+}: {
+  date: string;
+  expense: Expense;
+  onChanged: () => void;
+  /** True only for rows the parent has decided are eligible to leave the
+   *  General inbox. */
+  assignable?: boolean;
+  /** Commits the pick. The parent PATCHes the expense, refetches, and calls
+   *  onChanged — this row disappears from the inbox group once it succeeds. */
+  onAssign?: (projectId: string, taskId: string | null) => void;
+  /** Target projects for the picker (every project except General). */
+  assignProjects?: Project[];
+  /** Every task, so the panel can narrow to the picked project's tasks by
+   *  category (casefold-equal to the project's name_key — the same join the
+   *  server uses). */
+  assignTasks?: TaskItem[];
+}) {
   const [busy, setBusy] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [pickedProjectId, setPickedProjectId] = useState("");
+  const [pickedTaskId, setPickedTaskId] = useState("");
+
   const remove = async () => {
     setBusy(true);
     try { await api.deleteExpense(expense.id); onChanged(); }
@@ -22,26 +47,122 @@ export function ExpenseRow({
     try { await api.setExpenseFavorite(expense.id, !expense.is_favorite); onChanged(); }
     finally { setBusy(false); }
   };
+
+  const pickedProject = (assignProjects || []).find((p) => p.id === pickedProjectId) ?? null;
+
+  // Same join the server uses: task.category casefold-equal to the target
+  // project's name_key.
+  const tasksForPickedProject = useMemo(() => {
+    if (!pickedProject) return [];
+    const key = pickedProject.name_key;
+    return (assignTasks || []).filter(
+      (t) => (t.category || "").trim().toLowerCase() === key,
+    );
+  }, [assignTasks, pickedProject]);
+
+  const openAssign = () => {
+    setPickedProjectId(assignProjects?.[0]?.id || "");
+    setPickedTaskId("");
+    setAssignOpen(true);
+  };
+
+  // Re-entrancy guard: `disabled={busy}` already keeps a second click from
+  // firing while the request is in flight, but this belt-and-braces check
+  // covers a stray Enter-key submit racing the click handler.
+  const confirmAssign = async () => {
+    if (busy || !onAssign || !pickedProjectId) return;
+    setBusy(true);
+    try {
+      await onAssign(pickedProjectId, pickedTaskId || null);
+      setAssignOpen(false);
+    } catch {
+      // The parent already surfaced the failure (e.g. a 404 when the target
+      // project was deleted elsewhere) in its own error banner. Leave the
+      // panel open so the user can pick a different target instead of
+      // silently losing their in-progress pick.
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="flex items-center gap-2 text-[11px] text-text-secondary px-2 py-1 rounded bg-bg-tertiary/40">
-      <button
-        onClick={() => void toggleStar()}
-        className={expense.is_favorite ? "text-amber-400" : "text-text-muted hover:text-amber-400"}
-        title={expense.is_favorite ? "Un-star expense" : "Star expense"}
-        disabled={busy}
-      >{expense.is_favorite ? "★" : "☆"}</button>
-      <span className="text-text-muted w-20 shrink-0">{date}</span>
-      <span className="flex-1 truncate">
-        {expense.description || expense.vendor || "expense"}
-        {expense.recurring_expense_id && <span className="text-accent/60"> · recurring</span>}
-      </span>
-      <span>− {fmtMoney(expense.amount, expense.currency)}</span>
-      <button
-        onClick={() => void remove()}
-        className="text-text-muted hover:text-rose-400"
-        title="Delete expense"
-        disabled={busy}
-      >×</button>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 text-[11px] text-text-secondary px-2 py-1 rounded bg-bg-tertiary/40">
+        <button
+          onClick={() => void toggleStar()}
+          className={expense.is_favorite ? "text-amber-400" : "text-text-muted hover:text-amber-400"}
+          title={expense.is_favorite ? "Un-star expense" : "Star expense"}
+          disabled={busy}
+        >{expense.is_favorite ? "★" : "☆"}</button>
+        <span className="text-text-muted w-20 shrink-0">{date}</span>
+        <span className="flex-1 truncate">
+          {expense.description || expense.vendor || "expense"}
+          {expense.recurring_expense_id && <span className="text-accent/60"> · recurring</span>}
+        </span>
+        <span>− {fmtMoney(expense.amount, expense.currency)}</span>
+        {assignable && onAssign && (
+          <button
+            onClick={() => (assignOpen ? setAssignOpen(false) : openAssign())}
+            className={assignOpen ? "text-accent" : "text-text-muted hover:text-accent"}
+            title="Assign to a project"
+            disabled={busy}
+          >
+            Assign
+          </button>
+        )}
+        <button
+          onClick={() => void remove()}
+          className="text-text-muted hover:text-rose-400"
+          title="Delete expense"
+          disabled={busy}
+        >×</button>
+      </div>
+
+      {assignable && onAssign && assignOpen && (
+        <div className="flex items-center gap-2 pl-2 pr-2 pb-1 text-[11px] flex-wrap">
+          {(assignProjects || []).length === 0 ? (
+            <span className="text-text-muted">No other projects yet — create one to assign this expense.</span>
+          ) : (
+            <>
+              <select
+                value={pickedProjectId}
+                onChange={(e) => { setPickedProjectId(e.target.value); setPickedTaskId(""); }}
+                disabled={busy}
+                className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
+              >
+                {(assignProjects || []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <select
+                value={pickedTaskId}
+                onChange={(e) => setPickedTaskId(e.target.value)}
+                disabled={busy || !pickedProjectId}
+                className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
+              >
+                <option value="">(no task)</option>
+                {tasksForPickedProject.map((t) => (
+                  <option key={t.id} value={t.id}>{t.title}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => void confirmAssign()}
+                disabled={busy || !pickedProjectId}
+                className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
+              >
+                {busy ? "Assigning…" : "Confirm"}
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => setAssignOpen(false)}
+            disabled={busy}
+            className="text-text-muted hover:text-text-primary"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }

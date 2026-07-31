@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../../api";
-import type { Expense, Project } from "../../api";
+import type { Expense, Project, TaskItem } from "../../api";
 import { fmtMoney } from "./money";
 import { ExpenseRow } from "./ExpenseRow";
 import { ProjectExpenseAdder } from "./ExpenseAdder";
@@ -23,18 +23,30 @@ interface Group {
 export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [tick, setTick] = useState(0);
   const [adding, setAdding] = useState(false);
   const [addProject, setAddProject] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [starredOnly, setStarredOnly] = useState(false);
   const [inboxOnly, setInboxOnly] = useState(false);
+  // Surfaced near the totals block below — a failed assign (e.g. the target
+  // project got deleted elsewhere) must never be swallowed silently.
+  const [assignError, setAssignError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([api.listAllExpenses(), api.listProjects("all")])
-      .then(([ex, ps]) => { if (alive) { setExpenses(ex); setProjects(ps); } })
-      .catch(() => { if (alive) { setExpenses([]); setProjects([]); } });
+    // Tasks are fetched unfiltered (every owner/status/bucket) so the assign
+    // panel's task dropdown can match ANY task by category, not just the
+    // current user's open todos — mirrors the same `listTasks` call other
+    // budget surfaces already make, just with wider filters.
+    Promise.all([
+      api.listAllExpenses(),
+      api.listProjects("all"),
+      api.listTasks({ owner: "all", status: "all", bucket: "all" }),
+    ])
+      .then(([ex, ps, ts]) => { if (alive) { setExpenses(ex); setProjects(ps); setTasks(ts); } })
+      .catch(() => { if (alive) { setExpenses([]); setProjects([]); setTasks([]); } });
     return () => { alive = false; };
   }, [tick]);
 
@@ -86,6 +98,27 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     () => (expenses || []).filter((e) => e.project_id === inboxProject?.id).length,
     [expenses, inboxProject],
   );
+
+  // Assign targets: every real project, General excluded — you can't assign
+  // an inbox expense back into the inbox.
+  const assignableProjects = useMemo(
+    () => projects.filter((p) => p.id !== inboxProject?.id),
+    [projects, inboxProject],
+  );
+
+  // Single-expense assign, wired per-row below (General group only).
+  // Rethrows after recording the error so ExpenseRow's own busy/panel state
+  // knows the attempt failed and keeps the picker open for a retry.
+  const assignExpense = async (expenseId: string, projectId: string, taskId: string | null) => {
+    setAssignError(null);
+    try {
+      await api.updateExpense(expenseId, { project_id: projectId, task_id: taskId });
+      refresh();
+    } catch (e) {
+      setAssignError(e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+  };
 
   // Auto-reset the filter once its own result set empties out (last inbox
   // expense got assigned or deleted elsewhere) — otherwise the user is
@@ -244,6 +277,10 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
         </span>
       </div>
 
+      {assignError && (
+        <div className="text-[11px] text-rose-400">Couldn't assign: {assignError}</div>
+      )}
+
       {adding && (
         <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-bg-secondary/40 p-2.5">
           <label className="text-[11px] text-text-secondary flex items-center gap-2">
@@ -297,14 +334,26 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
               </button>
               {open && (
                 <div className="px-2 pb-2 flex flex-col gap-1">
-                  {g.rows.map((e) => (
-                    <ExpenseRow
-                      key={e.id}
-                      date={e.spent_at || ""}
-                      expense={e}
-                      onChanged={refresh}
-                    />
-                  ))}
+                  {g.rows.map((e) => {
+                    const isInboxGroup = !!inboxProject && g.projectId === inboxProject.id;
+                    return (
+                      <ExpenseRow
+                        key={e.id}
+                        date={e.spent_at || ""}
+                        expense={e}
+                        onChanged={refresh}
+                        {...(isInboxGroup
+                          ? {
+                              assignable: true,
+                              onAssign: (projectId: string, taskId: string | null) =>
+                                assignExpense(e.id, projectId, taskId),
+                              assignProjects: assignableProjects,
+                              assignTasks: tasks,
+                            }
+                          : {})}
+                      />
+                    );
+                  })}
                 </div>
               )}
             </div>

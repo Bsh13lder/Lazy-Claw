@@ -4,7 +4,10 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/expense.dart';
 import '../../models/project.dart';
+import '../../models/task.dart';
+import '../../models/task_project_link.dart';
 import '../../providers/budgets_provider.dart';
+import '../../providers/tasks_provider.dart';
 import 'money_helpers.dart';
 
 /// An expense detail/edit bottom sheet. Pre-fills every field from [expense] and
@@ -26,6 +29,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
   late final TextEditingController _descController;
   late final TextEditingController _vendorController;
   late String? _projectId;
+  late String? _taskId;
   String? _spentAt;
   bool _saving = false;
   bool _deleting = false;
@@ -39,6 +43,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
     _descController = TextEditingController(text: e.description ?? '');
     _vendorController = TextEditingController(text: e.vendor ?? '');
     _projectId = e.projectId.isEmpty ? null : e.projectId;
+    _taskId = e.taskId;
     _spentAt = _dateOnly(e.spentAt);
   }
 
@@ -84,6 +89,8 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           description: desc,
           vendor: vendor.isEmpty ? null : vendor,
           projectId: _projectId,
+          taskId: _taskId,
+          taskIdSet: true,
           spentAt: _spentAt,
         );
 
@@ -109,9 +116,22 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
     Navigator.of(context).pop();
   }
 
+  /// The tasks selectable for the currently-picked project — empty when no
+  /// project is selected (or it matches no live project, e.g. it was
+  /// deleted). A plain loop stands in for `firstWhereOrNull` — `collection`
+  /// is only a transitive dep here, not one this app declares directly.
+  List<Task> _tasksForCurrentProject(List<Project> projects, List<Task> all) {
+    for (final p in projects) {
+      if (p.id == _projectId) return tasksForProject(all, p);
+    }
+    return const [];
+  }
+
   @override
   Widget build(BuildContext context) {
     final projects = ref.watch(budgetsProvider).projects;
+    final allTasks = ref.watch(tasksProvider).tasks;
+    final availableTasks = _tasksForCurrentProject(projects, allTasks);
 
     return SingleChildScrollView(
       child: Column(
@@ -164,7 +184,22 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           _ProjectPicker(
             projects: projects,
             selectedId: _projectId,
-            onChanged: (id) => setState(() => _projectId = id),
+            // A task belongs to one project, so switching the expense's
+            // project invalidates whatever task was linked — reset it rather
+            // than carry a task from the old project forward.
+            onChanged: (id) => setState(() {
+              _projectId = id;
+              _taskId = null;
+            }),
+          ),
+
+          const SizedBox(height: AppSpacing.lg),
+
+          // ── Task picker (optional) ─────────────────────────────────────
+          _TaskPicker(
+            tasks: availableTasks,
+            selectedId: _taskId,
+            onChanged: (id) => setState(() => _taskId = id),
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -361,6 +396,7 @@ class _ProjectPicker extends StatelessWidget {
           ),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<String>(
+              key: const Key('expense-detail-project'),
               value: value,
               isExpanded: true,
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
@@ -382,6 +418,83 @@ class _ProjectPicker extends StatelessWidget {
                     ),
                   )
                   .toList(),
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A token-styled dropdown task picker — links this expense to one of the
+/// tasks in its (already-selected) project. "(no task)" is always the first
+/// option and represents an explicit clear, not "leave unchanged" (the sheet
+/// always saves with `taskIdSet: true`). Visually mirrors [_ProjectPicker] so
+/// the two feel like one family.
+class _TaskPicker extends StatelessWidget {
+  const _TaskPicker({
+    required this.tasks,
+    required this.selectedId,
+    required this.onChanged,
+  });
+
+  final List<Task> tasks;
+  final String? selectedId;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    // Guard against a stale selectedId that isn't among the current options
+    // (e.g. its task was deleted, or the project changed since) so the
+    // DropdownButton's assert doesn't fire — mirrors _ProjectPicker's guard.
+    final hasSelected = tasks.any((t) => t.id == selectedId);
+    final value = hasSelected ? selectedId : null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Task (optional)',
+          style: AppText.label.copyWith(color: AppColors.textSecondary),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rMd,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              key: const Key('expense-detail-task'),
+              value: value,
+              isExpanded: true,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              dropdownColor: AppColors.bgSurfaceElevated,
+              style: AppText.body,
+              icon: const Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: AppColors.textMuted,
+              ),
+              items: [
+                DropdownMenuItem<String>(
+                  value: null,
+                  child: Text(
+                    '(no task)',
+                    style: AppText.body.copyWith(color: AppColors.textMuted),
+                  ),
+                ),
+                for (final t in tasks)
+                  DropdownMenuItem<String>(
+                    value: t.id,
+                    child: Text(
+                      t.title,
+                      style: AppText.body,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
               onChanged: onChanged,
             ),
           ),

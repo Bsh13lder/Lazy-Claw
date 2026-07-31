@@ -79,11 +79,17 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   Future<void> askForTest(String text) => _ask(text);
   // Tests read the current state via the inherited StateNotifier.debugState.
 
+  /// The length ceiling is stated FIRST and as a number: "concise" is not a
+  /// budget, and a small model weights the last instruction it read most. Length
+  /// is then enforced in three independent layers — this prompt, the token cap
+  /// in [LocalGenOptions.voice], and its stop sequences.
   static const String _system =
-      'You are Lazy, a helpful voice assistant. Give a direct, useful, concise answer '
-      'that sounds natural read aloud. Do NOT use emojis, asterisks, stage directions '
-      '(like *smiles*), markdown, headings or bullet lists — just say the answer plainly. '
-      'Reply in the same language as the user.';
+      'You are Lazy, a voice assistant. You are being read aloud.\n'
+      'Answer in ONE or TWO short sentences. Never more.\n'
+      'Plain speech only: no markdown, no asterisks, no emoji, no bullet points, '
+      'no headings, no stage directions.\n'
+      'If you do not know, say so in one sentence.\n'
+      "Reply in the user's language.";
 
   /// Strips roleplay actions (*smiles*), emojis and markdown so the spoken (and
   /// shown) reply is clean text — not "asterisk smiles asterisk".
@@ -364,6 +370,7 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     await for (final tok in _engine.generate(
       [LocalLlmMessage.user(prompt)],
       systemPrompt: _system,
+      options: LocalGenOptions.voice,
     )) {
       buf.write(tok);
       state = AssistantState(

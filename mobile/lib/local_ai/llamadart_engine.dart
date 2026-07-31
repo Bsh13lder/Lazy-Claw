@@ -25,8 +25,6 @@ class LlamadartEngine implements LocalLlmEngine {
   /// well under its theoretical max, and a smaller KV cache saves RAM.
   static const int _contextSize = 4096;
 
-  /// Cap per reply so a runaway generation can't pin the CPU indefinitely.
-  static const int _maxTokens = 1024;
 
   @override
   bool get isLoaded => _engine != null && _loadedModelId != null;
@@ -68,6 +66,7 @@ class LlamadartEngine implements LocalLlmEngine {
   Stream<String> generate(
     List<LocalLlmMessage> messages, {
     String? systemPrompt,
+    LocalGenOptions options = const LocalGenOptions(),
   }) async* {
     final engine = _engine;
     if (engine == null) {
@@ -82,7 +81,20 @@ class LlamadartEngine implements LocalLlmEngine {
     try {
       await for (final chunk in engine.create(
         llamaMessages,
-        params: const GenerationParams(maxTokens: _maxTokens, temp: 0.7),
+        // enableThinking defaults to TRUE in llamadart; templates that support a
+        // reasoning channel (Gemma 4) would otherwise open every reply with a
+        // think block — which a spoken answer must never contain.
+        enableThinking: options.enableThinking,
+        params: GenerationParams(
+          maxTokens: options.maxTokens,
+          temp: options.temperature,
+          topP: options.topP,
+          topK: options.topK,
+          minP: options.minP,
+          penalty: options.repeatPenalty,
+          stopSequences: options.stopSequences,
+          streamBatchTokenThreshold: options.streamBatchTokens,
+        ),
       )) {
         if (chunk.choices.isEmpty) continue;
         final delta = chunk.choices.first.delta.content;
@@ -91,6 +103,15 @@ class LlamadartEngine implements LocalLlmEngine {
     } catch (e) {
       throw LocalLlmException('Generation failed', e);
     }
+  }
+
+  @override
+  Future<void> cancel() async {
+    // Best-effort: a cancel racing a finished generation is a no-op, and must
+    // never surface as an error on the barge-in path.
+    try {
+      _engine?.cancelGeneration();
+    } catch (_) {}
   }
 
   @override

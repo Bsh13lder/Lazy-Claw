@@ -7,6 +7,12 @@ import 'package:lazyclaw_mobile/local_ai/local_llm_engine.dart';
 class _FakeEngine implements LocalLlmEngine {
   _FakeEngine(this._reply);
   final String _reply;
+
+  /// Options the controller actually asked for — asserted by the voice-params
+  /// test so a regression that shortens local CHAT can't pass unnoticed.
+  LocalGenOptions? lastOptions;
+  int cancelCount = 0;
+
   @override
   bool get isLoaded => true;
   @override
@@ -16,7 +22,14 @@ class _FakeEngine implements LocalLlmEngine {
   @override
   Future<void> unload() async {}
   @override
-  Stream<String> generate(List<LocalLlmMessage> m, {String? systemPrompt}) async* {
+  Future<void> cancel() async => cancelCount++;
+  @override
+  Stream<String> generate(
+    List<LocalLlmMessage> m, {
+    String? systemPrompt,
+    LocalGenOptions options = const LocalGenOptions(),
+  }) async* {
+    lastOptions = options;
     yield _reply;
   }
 }

@@ -1,3 +1,5 @@
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -6,8 +8,6 @@ import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/inbox_suggestion.dart';
 import '../models/project.dart';
-import '../models/task.dart';
-import '../models/task_project_link.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart'
     show reachableProvider, dbHealthProvider, tasksProvider;
@@ -16,6 +16,7 @@ import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_log_sheet.dart';
 import 'expenses/budget_math.dart';
 import 'expenses/budget_summary_card.dart';
+import 'expenses/bulk_assign.dart';
 import 'expenses/credit_row.dart';
 import 'expenses/edit_project_sheet.dart';
 import 'expenses/expense_detail_sheet.dart';
@@ -36,6 +37,12 @@ const String _kUncategorizedFilter = '__uncategorized__';
 /// projects — the same set the Home dashboard and the Overview tab lead with.
 const String _kFavoritesFilter = '__favorites__';
 
+/// Extra bottom padding reserved for the Ledger's scroll content while the
+/// pinned bulk-action bar is showing (see `_LedgerTabState.build`), so the
+/// bottom-anchored overlay can never cover the last list row or the balance /
+/// connect-hint footer beneath it.
+const double _kBulkBarReserve = 88;
+
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
 
@@ -48,6 +55,15 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
   late final TabController _tabController;
   String? _lastSelectedProjectId;
 
+  /// Whether the Ledger's pinned bulk-action bar is currently showing.
+  /// Reported up by `_LedgerTab` (see `onBulkBarVisibleChanged`) since the
+  /// FAB is owned here but the selection-mode state lives in the tab's own
+  /// state. The FAB sits bottom-right — exactly where the pinned bar's
+  /// trailing controls (Auto, Cancel) live — so it must hide while the bar
+  /// is on screen, or it visually covers those controls AND intercepts
+  /// their taps.
+  bool _bulkBarVisible = false;
+
   @override
   void initState() {
     super.initState();
@@ -56,6 +72,15 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
     // NOTE: the cold-start deep-link replay lives in [build] via
     // [drainPendingAction] (not a one-shot here) so it survives whichever frame
     // this screen first becomes visible on.
+  }
+
+  /// Callback handed to `_LedgerTab`; called (post-frame, from the tab's own
+  /// build) whenever its pinned bulk-bar visibility changes. No-ops when the
+  /// value hasn't actually changed so it doesn't schedule a needless rebuild
+  /// of this whole screen on every Ledger tab build.
+  void _handleBulkBarVisibleChanged(bool visible) {
+    if (visible == _bulkBarVisible) return;
+    setState(() => _bulkBarVisible = visible);
   }
 
   /// The deep-link actions this screen owns.
@@ -204,7 +229,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           Expanded(child: _buildBody(state)),
         ],
       ),
-      floatingActionButton: _buildFAB(state),
+      floatingActionButton: _bulkBarVisible ? null : _buildFAB(state),
     );
   }
 
@@ -320,6 +345,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           onToggleExpenseFavorite: (id) =>
               ref.read(budgetsProvider.notifier).toggleExpenseFavorite(id),
           onRefresh: _refresh,
+          onBulkBarVisibleChanged: _handleBulkBarVisibleChanged,
         ),
       ],
     );
@@ -560,6 +586,7 @@ class _LedgerTab extends ConsumerStatefulWidget {
     required this.onTapExpense,
     required this.onToggleExpenseFavorite,
     required this.onRefresh,
+    required this.onBulkBarVisibleChanged,
   });
 
   final BudgetsState state;
@@ -567,6 +594,11 @@ class _LedgerTab extends ConsumerStatefulWidget {
   final void Function(Expense expense) onTapExpense;
   final void Function(String id) onToggleExpenseFavorite;
   final Future<void> Function() onRefresh;
+
+  /// Reports whenever the pinned bulk-action bar's visibility changes, so
+  /// the parent `ExpensesScreen` (which owns the FAB) can hide it while the
+  /// bar is on screen — see `_ExpensesScreenState._handleBulkBarVisibleChanged`.
+  final ValueChanged<bool> onBulkBarVisibleChanged;
 
   @override
   ConsumerState<_LedgerTab> createState() => _LedgerTabState();
@@ -687,7 +719,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
       context,
       title:
           'Assign ${_selected.length} expense${_selected.length == 1 ? '' : 's'}',
-      builder: (_) => _BulkAssignSheet(projects: assignable, allTasks: allTasks),
+      builder: (_) => BulkAssignSheet(projects: assignable, allTasks: allTasks),
     );
     if (result == null || !mounted) return;
     await _runBulkAssign(result.$1, result.$2);
@@ -739,20 +771,30 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     setState(() => _bulkBusy = true);
     final ids = _selected.isEmpty ? null : _selected.toList();
     ({List<InboxSuggestion> suggestions, int skipped})? result;
+    var failureMessage = 'Auto-assign needs a connection. Try again online.';
     try {
       result = await ref
           .read(budgetsRepositoryProvider)
           .getInboxSuggestions(expenseIds: ids);
-    } catch (_) {
+    } on DioException catch (_) {
+      // The expected offline/API-failure shape (wraps ApiError) — the plain
+      // "needs a connection" hint below covers it.
       result = null;
+    } catch (e) {
+      // Anything else is unexpected: surface loudly in debug so it can't hide
+      // behind a generic snackbar, but fail soft in release — same
+      // log-and-fall-back idiom as `budget_log_sheet._friendly` /
+      // `ChatScreen._connect`.
+      if (kDebugMode) rethrow;
+      debugPrint('Auto-assign suggestions failed: $e');
+      result = null;
+      failureMessage = 'Something went wrong. Try again.';
     }
     if (!mounted) return;
     setState(() => _bulkBusy = false);
     if (result == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Auto-assign needs a connection. Try again online.'),
-        ),
+        SnackBar(content: Text(failureMessage)),
       );
       return;
     }
@@ -763,7 +805,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     final apply = await LzBottomSheet.show<bool>(
       context,
       title: 'Auto-assign suggestions',
-      builder: (_) => _AutoPreviewSheet(
+      builder: (_) => AutoPreviewSheet(
         suggestions: suggestions,
         skipped: result!.skipped,
         labelFor: _expenseLabel,
@@ -1153,90 +1195,121 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
 
     final showBulkBar = _selectionMode && inboxFilterActive;
 
-    return LzRefresh(
-      onRefresh: _handleRefresh,
-      child: CustomScrollView(
-        slivers: [
-          SliverToBoxAdapter(child: controls),
-          if (items.isEmpty)
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: LzEmptyState(
-                icon: Icons.filter_alt_off_outlined,
-                title: 'No expenses match',
-                hint: 'Try a different project or time range.',
-              ),
-            )
-          else ...[
-            if (_sort == _LedgerSort.amount)
-              _amountSliver(items, inboxFilterActive: inboxFilterActive)
-            else
-              _dateGroupedSliver(
-                items,
-                newestFirst: _sort == _LedgerSort.newest,
-                inboxFilterActive: inboxFilterActive,
-              ),
-            // Bulk action bar — pinned above the footer sliver. Always present
-            // as a sliver (so entering/leaving selection mode never reflows
-            // the rest of the list); an AnimatedSwitcher cross-fades between
-            // hidden and shown using AppMotion's standard transition, per the
-            // plan's requirement to respect AppMotion durations for the bar's
-            // appearance.
-            SliverToBoxAdapter(
-              child: AnimatedSwitcher(
-                duration: AppMotion.base,
-                switchInCurve: AppMotion.curve,
-                switchOutCurve: AppMotion.curve,
-                child: showBulkBar
-                    ? Padding(
-                        key: const ValueKey('bulk-bar'),
-                        padding: const EdgeInsets.fromLTRB(
-                          AppSpacing.lg,
-                          AppSpacing.md,
-                          AppSpacing.lg,
-                          0,
-                        ),
-                        child: _BulkActionBar(
-                          count: _selected.length,
-                          busy: _bulkBusy,
-                          onAssign: _selected.isEmpty
-                              ? null
-                              : () => _openAssignSheet(
-                                    state.projects,
-                                    inboxProject.id,
-                                  ),
-                          onAuto: _openAutoAssign,
-                          onCancel: _cancelSelection,
-                        ),
-                      )
-                    : const SizedBox.shrink(key: ValueKey('bulk-bar-hidden')),
-              ),
-            ),
-            // Footer: the running balance (once credits loaded) and/or the
-            // offline hint. Always present so it also carries the bottom scroll
-            // room (the content slivers no longer pad the bottom).
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.md,
-                  AppSpacing.lg,
-                  AppSpacing.xxxl,
+    // Tell the screen whether the pinned bar is showing so it can hide its
+    // FloatingActionButton — the FAB docks bottom-right, exactly where the
+    // bar's trailing controls (Auto, Cancel) sit, and would otherwise cover
+    // them and steal their taps. Deferred to a post-frame callback: this
+    // notifies a DIFFERENT widget's state (`_ExpensesScreenState`), and
+    // calling its `setState` synchronously mid-build would hit "setState()
+    // or markNeedsBuild() called during build".
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onBulkBarVisibleChanged(showBulkBar);
+    });
+
+    // The bulk bar is a screen-pinned overlay (bottom-anchored in a Stack)
+    // rather than a sliver living inside the scroll content. It used to render
+    // as the final sliver above the footer, which on a long inbox sat below
+    // the fold — a long-press appeared to do nothing until the user scrolled
+    // all the way down. Pinning it here means it's ALWAYS visible the instant
+    // selection mode is entered, regardless of scroll position. The scroll
+    // content reserves [_kBulkBarReserve] of extra bottom padding whenever the
+    // bar is shown so the overlay can never cover the last list row or the
+    // balance/connect-hint footer beneath it.
+    return Stack(
+      children: [
+        LzRefresh(
+          onRefresh: _handleRefresh,
+          child: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(child: controls),
+              if (items.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: LzEmptyState(
+                    icon: Icons.filter_alt_off_outlined,
+                    title: 'No expenses match',
+                    hint: 'Try a different project or time range.',
+                  ),
+                )
+              else ...[
+                if (_sort == _LedgerSort.amount)
+                  _amountSliver(items, inboxFilterActive: inboxFilterActive)
+                else
+                  _dateGroupedSliver(
+                    items,
+                    newestFirst: _sort == _LedgerSort.newest,
+                    inboxFilterActive: inboxFilterActive,
+                  ),
+                // Footer: the running balance (once credits loaded) and/or the
+                // offline hint. Always present so it also carries the bottom
+                // scroll room; its bottom padding grows by [_kBulkBarReserve]
+                // while the pinned bulk bar is showing so the overlay never
+                // covers it.
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      AppSpacing.lg,
+                      AppSpacing.md,
+                      AppSpacing.lg,
+                      AppSpacing.xxxl + (showBulkBar ? _kBulkBarReserve : 0),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (balance != null)
+                          _LedgerBalanceBar(
+                              balance: balance, currency: currency),
+                        if (!entriesLoaded && !_entriesLoading)
+                          const _LedgerConnectHint(),
+                      ],
+                    ),
+                  ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (balance != null)
-                      _LedgerBalanceBar(balance: balance, currency: currency),
-                    if (!entriesLoaded && !_entriesLoading)
-                      const _LedgerConnectHint(),
-                  ],
-                ),
-              ),
+              ],
+            ],
+          ),
+        ),
+        // Pinned bulk-action bar — bottom-anchored above the scroll view so it
+        // stays on screen in selection mode no matter how far the list is
+        // scrolled. Same AnimatedSwitcher + AppMotion cross-fade the old
+        // sliver placement used.
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: SafeArea(
+            top: false,
+            child: AnimatedSwitcher(
+              duration: AppMotion.base,
+              switchInCurve: AppMotion.curve,
+              switchOutCurve: AppMotion.curve,
+              child: showBulkBar
+                  ? Padding(
+                      key: const ValueKey('bulk-bar'),
+                      padding: const EdgeInsets.fromLTRB(
+                        AppSpacing.lg,
+                        0,
+                        AppSpacing.lg,
+                        AppSpacing.md,
+                      ),
+                      child: BulkActionBar(
+                        count: _selected.length,
+                        busy: _bulkBusy,
+                        onAssign: _selected.isEmpty
+                            ? null
+                            : () => _openAssignSheet(
+                                  state.projects,
+                                  inboxProject.id,
+                                ),
+                        onAuto: _openAutoAssign,
+                        onCancel: _cancelSelection,
+                      ),
+                    )
+                  : const SizedBox.shrink(key: ValueKey('bulk-bar-hidden')),
             ),
-          ],
-        ],
-      ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1464,320 +1537,6 @@ class _LedgerConnectHint extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-// ── Inbox bulk-select UI (Task 5) ───────────────────────────────────────────
-
-/// The Ledger's inbox bulk-action bar: a selected count, Assign/Auto actions,
-/// and a cancel — all gated on the SAME [busy] flag (the shared bulk-mutation
-/// lock in `_LedgerTabState`) so every entry point disables together while any
-/// one bulk operation is in flight.
-class _BulkActionBar extends StatelessWidget {
-  const _BulkActionBar({
-    required this.count,
-    required this.busy,
-    required this.onAssign,
-    required this.onAuto,
-    required this.onCancel,
-  });
-
-  final int count;
-  final bool busy;
-  final VoidCallback? onAssign;
-  final VoidCallback? onAuto;
-  final VoidCallback onCancel;
-
-  @override
-  Widget build(BuildContext context) {
-    return LzCard(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.md,
-        vertical: AppSpacing.sm,
-      ),
-      child: Row(
-        children: [
-          if (busy) ...[
-            const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: AppColors.accent,
-              ),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-          ],
-          Text(
-            '$count selected',
-            style: AppText.label.copyWith(
-              color: AppColors.textPrimary,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const Spacer(),
-          _BarAction(label: 'Assign', onTap: busy ? null : onAssign),
-          const SizedBox(width: AppSpacing.md),
-          _BarAction(label: '✨ Auto', onTap: busy ? null : onAuto),
-          const SizedBox(width: AppSpacing.md),
-          LzIconButton(
-            icon: Icons.close_rounded,
-            tooltip: 'Cancel selection',
-            size: 18,
-            color: AppColors.textMuted,
-            onPressed: busy ? null : onCancel,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A small text action used inside [_BulkActionBar]. Dims and stops
-/// responding to taps when [onTap] is null (busy or not yet actionable).
-class _BarAction extends StatelessWidget {
-  const _BarAction({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: AppRadii.rMd,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.sm,
-          vertical: AppSpacing.xs,
-        ),
-        child: Text(
-          label,
-          style: AppText.label.copyWith(
-            color: enabled ? AppColors.accent : AppColors.textMuted,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The bulk "Assign to project" sheet: a project picker (inbox already
-/// excluded by the caller) + an optional task picker scoped to the chosen
-/// project — mirrors `_ProjectPicker`/`_TaskPicker`'s dropdown idiom in
-/// `expense_detail_sheet.dart`. Pops `(projectId, taskId)` on Assign.
-class _BulkAssignSheet extends StatefulWidget {
-  const _BulkAssignSheet({required this.projects, required this.allTasks});
-
-  /// Assignable projects — the inbox project is already excluded.
-  final List<Project> projects;
-  final List<Task> allTasks;
-
-  @override
-  State<_BulkAssignSheet> createState() => _BulkAssignSheetState();
-}
-
-class _BulkAssignSheetState extends State<_BulkAssignSheet> {
-  String? _projectId;
-  String? _taskId;
-
-  @override
-  void initState() {
-    super.initState();
-    _projectId = widget.projects.isNotEmpty ? widget.projects.first.id : null;
-  }
-
-  /// Tasks selectable for the currently-picked project — empty when nothing
-  /// is picked (shouldn't happen once a project list is non-empty, but stays
-  /// safe if it ever is).
-  List<Task> get _availableTasks {
-    for (final p in widget.projects) {
-      if (p.id == _projectId) return tasksForProject(widget.allTasks, p);
-    }
-    return const [];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final tasks = _availableTasks;
-    final hasTaskSelected = tasks.any((t) => t.id == _taskId);
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text('Project', style: AppText.label.copyWith(color: AppColors.textSecondary)),
-        const SizedBox(height: AppSpacing.sm),
-        Container(
-          decoration: BoxDecoration(
-            color: AppColors.bgSurfaceElevated,
-            borderRadius: AppRadii.rMd,
-            border: Border.all(color: AppColors.borderDefault),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              key: const Key('bulk-assign-project'),
-              value: widget.projects.any((p) => p.id == _projectId)
-                  ? _projectId
-                  : null,
-              isExpanded: true,
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-              dropdownColor: AppColors.bgSurfaceElevated,
-              style: AppText.body,
-              icon: const Icon(Icons.keyboard_arrow_down_rounded,
-                  color: AppColors.textMuted),
-              items: [
-                for (final p in widget.projects)
-                  DropdownMenuItem<String>(
-                    value: p.id,
-                    child: Text(p.name, style: AppText.body),
-                  ),
-              ],
-              onChanged: (id) => setState(() {
-                _projectId = id;
-                // A task belongs to one project — reset it on project change,
-                // same as the single-expense detail sheet.
-                _taskId = null;
-              }),
-            ),
-          ),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        Text('Task (optional)',
-            style: AppText.label.copyWith(color: AppColors.textSecondary)),
-        const SizedBox(height: AppSpacing.sm),
-        Container(
-          decoration: BoxDecoration(
-            color: AppColors.bgSurfaceElevated,
-            borderRadius: AppRadii.rMd,
-            border: Border.all(color: AppColors.borderDefault),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              key: const Key('bulk-assign-task'),
-              value: hasTaskSelected ? _taskId : null,
-              isExpanded: true,
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-              dropdownColor: AppColors.bgSurfaceElevated,
-              style: AppText.body,
-              icon: const Icon(Icons.keyboard_arrow_down_rounded,
-                  color: AppColors.textMuted),
-              items: [
-                DropdownMenuItem<String>(
-                  value: null,
-                  child: Text(
-                    '(no task)',
-                    style: AppText.body.copyWith(color: AppColors.textMuted),
-                  ),
-                ),
-                for (final t in tasks)
-                  DropdownMenuItem<String>(
-                    value: t.id,
-                    child: Text(t.title,
-                        style: AppText.body, overflow: TextOverflow.ellipsis),
-                  ),
-              ],
-              onChanged: (id) => setState(() => _taskId = id),
-            ),
-          ),
-        ),
-        const SizedBox(height: AppSpacing.xl),
-        LzButton.primary(
-          key: const Key('bulk-assign-submit'),
-          label: 'Assign',
-          icon: Icons.check,
-          expand: true,
-          onPressed: _projectId == null
-              ? null
-              : () => Navigator.of(context).pop((_projectId!, _taskId)),
-        ),
-      ],
-    );
-  }
-}
-
-/// The Auto-assign preview sheet: lists every suggestion the server returned
-/// (`description → projectName (confidence)`, "no match" rows dimmed), plus
-/// the skipped-count hint, plus an "Apply N confident" button that pops
-/// `true` to tell the caller to run the apply loop.
-class _AutoPreviewSheet extends StatelessWidget {
-  const _AutoPreviewSheet({
-    required this.suggestions,
-    required this.skipped,
-    required this.labelFor,
-  });
-
-  final List<InboxSuggestion> suggestions;
-  final int skipped;
-
-  /// Resolves an expense id to a display label (description/vendor/amount).
-  final String Function(String expenseId) labelFor;
-
-  @override
-  Widget build(BuildContext context) {
-    final confident = confidentSuggestions(suggestions);
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (suggestions.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
-            child: Text(
-              'No suggestions yet — try again once the inbox has some context to match on.',
-              style: AppText.body.copyWith(color: AppColors.textMuted),
-            ),
-          )
-        else
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.4,
-            ),
-            child: ListView.separated(
-              shrinkWrap: true,
-              itemCount: suggestions.length,
-              separatorBuilder: (_, _) =>
-                  Divider(height: 1, color: AppColors.borderSubtle),
-              itemBuilder: (_, i) {
-                final s = suggestions[i];
-                final matched = s.projectId != null;
-                final text = matched
-                    ? '${labelFor(s.expenseId)} → ${s.projectName ?? "?"} (${s.confidence})'
-                    : '${labelFor(s.expenseId)} — no match';
-                return Opacity(
-                  opacity: matched ? 1.0 : 0.5,
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(vertical: AppSpacing.sm),
-                    child: Text(text, style: AppText.body),
-                  ),
-                );
-              },
-            ),
-          ),
-        if (skipped > 0) ...[
-          const SizedBox(height: AppSpacing.sm),
-          Text(
-            '$skipped more not analyzed — run again.',
-            style: AppText.caption.copyWith(color: AppColors.textMuted),
-          ),
-        ],
-        const SizedBox(height: AppSpacing.lg),
-        LzButton.primary(
-          key: const Key('auto-preview-apply'),
-          label: confident.isEmpty
-              ? 'No confident matches'
-              : 'Apply ${confident.length} confident',
-          icon: Icons.check,
-          expand: true,
-          onPressed:
-              confident.isEmpty ? null : () => Navigator.of(context).pop(true),
-        ),
-      ],
     );
   }
 }

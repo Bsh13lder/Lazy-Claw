@@ -19,7 +19,7 @@ import { fmtMoney } from "./money";
  * suggestion (`suggestion`/`onApplySuggestion`) for this row's own id.
  */
 export function ExpenseRow({
-  date, expense, onChanged, assignable, onAssign, assignProjects, assignTasks,
+  date, expense, onChanged, assignable, onAssign, assignProjects, assignTasks, bulkLocked,
   selectable, selected, onToggleSelect,
   suggestion, onApplySuggestion, suggestionBusy, suggestionLocked,
 }: {
@@ -38,6 +38,11 @@ export function ExpenseRow({
    *  category (casefold-equal to the project's name_key — the same join the
    *  server uses). */
   assignTasks?: TaskItem[];
+  /** True while a bulk-family write (bulk-assign, auto-assign fetch, or
+   *  apply/apply-all) is running elsewhere in the parent. Those loops PATCH
+   *  the same inbox rows, so the single-row Assign affordance must lock out
+   *  too — otherwise a concurrent single-row PATCH races the bulk loop. */
+  bulkLocked?: boolean;
   /** True only while the parent's bulk-select mode (inboxOnly) is active. */
   selectable?: boolean;
   /** Whether this row's id is in the parent's selection Set. */
@@ -91,11 +96,12 @@ export function ExpenseRow({
     setAssignOpen(true);
   };
 
-  // Re-entrancy guard: `disabled={busy}` already keeps a second click from
-  // firing while the request is in flight, but this belt-and-braces check
-  // covers a stray Enter-key submit racing the click handler.
+  // Re-entrancy guard: `disabled={busy || bulkLocked}` already keeps a
+  // second click from firing while a request is in flight (this row's own,
+  // or the parent's bulk family), but this belt-and-braces check covers a
+  // stray Enter-key submit racing the click handler.
   const confirmAssign = async () => {
-    if (busy || !onAssign || !pickedProjectId) return;
+    if (busy || bulkLocked || !onAssign || !pickedProjectId) return;
     setBusy(true);
     try {
       await onAssign(pickedProjectId, pickedTaskId || null);
@@ -139,8 +145,8 @@ export function ExpenseRow({
           <button
             onClick={() => (assignOpen ? setAssignOpen(false) : openAssign())}
             className={assignOpen ? "text-accent" : "text-text-muted hover:text-accent"}
-            title="Assign to a project"
-            disabled={busy}
+            title={bulkLocked ? "A bulk operation is running — wait for it to finish" : "Assign to a project"}
+            disabled={busy || bulkLocked}
           >
             Assign
           </button>
@@ -162,7 +168,7 @@ export function ExpenseRow({
               <select
                 value={pickedProjectId}
                 onChange={(e) => { setPickedProjectId(e.target.value); setPickedTaskId(""); }}
-                disabled={busy}
+                disabled={busy || bulkLocked}
                 className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
               >
                 {(assignProjects || []).map((p) => (
@@ -172,7 +178,7 @@ export function ExpenseRow({
               <select
                 value={pickedTaskId}
                 onChange={(e) => setPickedTaskId(e.target.value)}
-                disabled={busy || !pickedProjectId}
+                disabled={busy || bulkLocked || !pickedProjectId}
                 className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
               >
                 <option value="">(no task)</option>
@@ -182,7 +188,7 @@ export function ExpenseRow({
               </select>
               <button
                 onClick={() => void confirmAssign()}
-                disabled={busy || !pickedProjectId}
+                disabled={busy || bulkLocked || !pickedProjectId}
                 className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
               >
                 {busy ? "Assigning…" : "Confirm"}

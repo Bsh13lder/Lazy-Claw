@@ -177,10 +177,32 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     }
   }, [inboxOnly]);
 
-  // Single-expense assign, wired per-row below (General group only).
-  // Rethrows after recording the error so ExpenseRow's own busy/panel state
-  // knows the attempt failed and keeps the picker open for a retry.
+  // ONE shared mutation lock for the whole bulk family (bulk-assign, the
+  // suggestion fetch, and apply/apply-all) plus the single-row Assign path —
+  // all of them can PATCH the same inbox rows, so only one may run at a
+  // time. Individual flags (`bulkAssignBusy`/`suggestBusy`/`applyBusy`) are
+  // kept for per-button spinner labels, but every guard clause and every
+  // disabled= below must check `anyBulkBusy`, never its own flag alone.
+  const anyBulkBusy = bulkAssignBusy || suggestBusy || applyBusy;
+
+  // Failure summaries need to name WHICH expense failed, or two failures
+  // render as identical strings ("Network error", "Network error", …).
+  const expenseLabel = (id: string): string => {
+    const e = (expenses || []).find((x) => x.id === id);
+    if (!e) return id;
+    return e.description || e.vendor || fmtMoney(e.amount, e.currency);
+  };
+
+  // Single-expense assign, wired per-row below (General group only). Guarded
+  // on `anyBulkBusy` too — a bulk write in flight touches the same rows, so
+  // a concurrent single-row PATCH would race it just like two bulk loops
+  // would. Rethrows after recording the error so ExpenseRow's own
+  // busy/panel state knows the attempt failed and keeps the picker open.
   const assignExpense = async (expenseId: string, projectId: string, taskId: string | null) => {
+    if (anyBulkBusy) {
+      setAssignError("A bulk operation is running — wait for it to finish and try again.");
+      throw new Error("bulk operation in progress");
+    }
     setAssignError(null);
     try {
       await api.updateExpense(expenseId, { project_id: projectId, task_id: taskId });
@@ -196,7 +218,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   // most a few dozen and sequential keeps a failure attributable to a
   // specific id rather than an unordered Promise.allSettled dump.
   const runBulkAssign = async () => {
-    if (bulkAssignBusy || selected.size === 0 || !bulkTargetProjectId) return;
+    if (anyBulkBusy || selected.size === 0 || !bulkTargetProjectId) return;
     setBulkAssignBusy(true);
     setBulkAssignResult(null);
     const ids = Array.from(selected);
@@ -207,7 +229,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
         await api.updateExpense(id, { project_id: bulkTargetProjectId });
         moved++;
       } catch (e) {
-        failures.push(e instanceof Error ? e.message : String(e));
+        failures.push(`${expenseLabel(id)}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     refresh();
@@ -217,9 +239,11 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
 
   // Auto-assign: fetch AI suggestions for the selection (or, with nothing
   // selected, the whole inbox — capped at 10 server-side). Suggestions render
-  // per-row via the `suggestions` map; nothing is applied here.
+  // per-row via the `suggestions` map; nothing is applied here. Still gated
+  // on `anyBulkBusy` — a bulk-assign or apply loop in flight can move the
+  // very rows a suggestion fetch is about to describe.
   const runAutoAssign = async () => {
-    if (suggestBusy) return;
+    if (anyBulkBusy) return;
     setSuggestBusy(true);
     setSuggestError(null);
     try {
@@ -238,12 +262,13 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
 
   // Shared apply path for both the per-row "Apply" button (a single-item
   // array) and "Apply all confident" (every high/medium suggestion with a
-  // non-null project_id). `applyBusy` is a single global lock — not per-row —
-  // so a per-row Apply and "Apply all confident" can never race the same
-  // suggestion set from two directions at once.
+  // non-null project_id). Guarded on `anyBulkBusy` (not just `applyBusy`) so
+  // a per-row Apply, "Apply all confident", a running bulk-assign, and an
+  // in-flight suggestion fetch can never race the same rows from two
+  // directions at once.
   const applySuggestions = async (items: InboxSuggestion[]) => {
     const applicable = items.filter((s) => s.project_id);
-    if (applicable.length === 0 || applyBusy) return;
+    if (applicable.length === 0 || anyBulkBusy) return;
     setApplyBusy(true);
     setApplyResult(null);
     setApplyingIds(new Set(applicable.map((s) => s.expense_id)));
@@ -261,7 +286,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
           return next;
         });
       } catch (e) {
-        failures.push(e instanceof Error ? e.message : String(e));
+        failures.push(`${expenseLabel(s.expense_id)}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     refresh();
@@ -484,7 +509,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
             <select
               value={bulkTargetProjectId}
               onChange={(e) => setBulkTargetProjectId(e.target.value)}
-              disabled={bulkAssignBusy || assignableProjects.length === 0}
+              disabled={anyBulkBusy || assignableProjects.length === 0}
               className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
             >
               <option value="">Assign to…</option>
@@ -494,14 +519,14 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
             </select>
             <button
               onClick={() => void runBulkAssign()}
-              disabled={bulkAssignBusy || selected.size === 0 || !bulkTargetProjectId}
+              disabled={anyBulkBusy || selected.size === 0 || !bulkTargetProjectId}
               className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
             >
               {bulkAssignBusy ? "Assigning…" : "✓ Assign"}
             </button>
             <button
               onClick={() => void runAutoAssign()}
-              disabled={suggestBusy}
+              disabled={anyBulkBusy}
               className="px-2.5 py-1 rounded border border-accent/40 bg-accent-soft text-accent hover:bg-accent/20 disabled:opacity-40"
             >
               {suggestBusy ? "Analyzing…" : "✨ Auto-assign"}
@@ -509,7 +534,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
             {confidentSuggestions.length > 0 && (
               <button
                 onClick={() => void applySuggestions(confidentSuggestions)}
-                disabled={applyBusy}
+                disabled={anyBulkBusy}
                 className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
               >
                 {applyBusy ? "Applying…" : `Apply all confident (${confidentSuggestions.length})`}
@@ -612,6 +637,10 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
                                 assignExpense(e.id, projectId, taskId),
                               assignProjects: assignableProjects,
                               assignTasks: tasks,
+                              // A bulk write (assign/apply/suggestion-fetch)
+                              // touches the same rows — lock the single-row
+                              // Assign affordance out from under it too.
+                              bulkLocked: anyBulkBusy,
                             }
                           : {})}
                         {...(isInboxGroup && inboxOnly
@@ -624,7 +653,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
                                 ? () => applySuggestions([suggestion])
                                 : undefined,
                               suggestionBusy: applyingIds.has(e.id),
-                              suggestionLocked: applyBusy && !applyingIds.has(e.id),
+                              suggestionLocked: anyBulkBusy && !applyingIds.has(e.id),
                             }
                           : {})}
                       />

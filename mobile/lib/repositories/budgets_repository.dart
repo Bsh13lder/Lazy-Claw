@@ -1,6 +1,7 @@
 import '../core/api/api_client.dart';
 import '../models/budget_entry.dart';
 import '../models/expense.dart';
+import '../models/inbox_suggestion.dart';
 import '../models/project.dart';
 
 /// Testable seam — mirrors the TasksTransport pattern.
@@ -274,6 +275,28 @@ class BudgetsRepository {
   /// tombstoned-but-unsynced (re-appearing on the next full pull).
   Future<void> deleteProject(String id) async {
     await _t.deleteJson('/api/budgets/projects/$id?cascade=true');
+  }
+
+  /// Get AI-suggested project assignments for inbox expenses. Optional
+  /// [expenseIds] filters the suggestion scope: null (default) = all inbox
+  /// expenses (capped 10 server-side), [] = none (dry-run), [exp1, exp2...] =
+  /// specific expenses. Maps `POST /api/budgets/inbox/suggestions` →
+  /// `{suggestions: [...], skipped: N}`.
+  ///
+  /// CRITICAL: never coerce null ↔ []. Send JSON `null` for all-inbox,
+  /// send JSON `[]` for none. This is a distinct signal.
+  Future<({List<InboxSuggestion> suggestions, int skipped})>
+      getInboxSuggestions({List<String>? expenseIds}) async {
+    final json = await _t.postJson(
+      '/api/budgets/inbox/suggestions',
+      {'expense_ids': expenseIds},
+    );
+    final rawList = json['suggestions'] as List? ?? [];
+    final suggestions = rawList
+        .map((e) => InboxSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+    final skipped = (json['skipped'] as num?)?.toInt() ?? 0;
+    return (suggestions: suggestions, skipped: skipped);
   }
 
   // ── Budget ledger (online-only — no offline cache) ─────────────────────────

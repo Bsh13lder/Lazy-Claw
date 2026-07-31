@@ -61,6 +61,12 @@ class Project {
 
   bool get isArchived => status == 'archived';
 
+  /// Whether this is the auto-created "Inbox" project that uncategorized
+  /// expenses land in. Keyed on `nameKey` (the stable, locale-independent
+  /// slug), falling back to a case-insensitive name match for legacy cached
+  /// rows written before `nameKey` existed.
+  bool get isInbox => (nameKey ?? name.toLowerCase()) == 'general';
+
   /// Traffic-light color for the budget bar:
   ///   <70 % → green, 70–90 % → amber, >90 % → red.
   Color get budgetBarColor {

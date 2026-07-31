@@ -168,6 +168,27 @@ void main() {
       expect(renamed.startDate, '2026-08-01');
       expect(renamed.dueDate, '2026-09-15');
     });
+
+    // ── isInbox (the auto-created "Inbox" / general project) ────────────────
+
+    test('isInbox is true when name_key is "general"', () {
+      final p = Project.fromJson(
+          {'id': 'gen1', 'name': 'Anything', 'name_key': 'general'});
+      expect(p.isInbox, isTrue);
+    });
+
+    test('isInbox falls back to a case-insensitive name match when '
+        'name_key is absent (legacy cached rows)', () {
+      final p = Project.fromJson({'id': 'gen2', 'name': 'General'});
+      expect(p.nameKey, isNull);
+      expect(p.isInbox, isTrue);
+    });
+
+    test('isInbox is false for a regular project', () {
+      final p = Project.fromJson(
+          {'id': 'proj-clubbay', 'name': 'Clubbay', 'name_key': 'clubbay'});
+      expect(p.isInbox, isFalse);
+    });
   });
 
   // ── Expense.fromJson ──────────────────────────────────────────────────────

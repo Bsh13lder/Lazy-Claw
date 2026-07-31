@@ -607,6 +607,16 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
   bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
       visible.any((e) => !liveIds.contains(e.projectId));
 
+  /// The auto-created "Inbox" project (`Project.isInbox`), or null if none
+  /// exists yet. A plain loop stands in for `firstWhereOrNull` — `collection`
+  /// is only a transitive dep here, not one this app declares directly.
+  Project? _findInboxProject(List<Project> projects) {
+    for (final p in projects) {
+      if (p.isInbox) return p;
+    }
+    return null;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -855,9 +865,16 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     );
     final balance = entriesLoaded ? ledgerBalance(items) : null;
 
+    final inboxProject = _findInboxProject(state.projects);
+    final inboxCount = inboxProject == null
+        ? 0
+        : ranged.where((e) => e.projectId == inboxProject.id).length;
+
     final controls = _LedgerControls(
       projects: state.projects,
       favoriteIds: favoriteIds,
+      inboxProjectId: inboxProject?.id,
+      inboxCount: inboxCount,
       selectedProjectId: _projectFilter,
       showUncategorized: _hasUncategorized(ranged, liveIds),
       sort: _sort,
@@ -1157,6 +1174,8 @@ class _LedgerControls extends StatelessWidget {
   const _LedgerControls({
     required this.projects,
     required this.favoriteIds,
+    required this.inboxProjectId,
+    required this.inboxCount,
     required this.selectedProjectId,
     required this.showUncategorized,
     required this.sort,
@@ -1172,6 +1191,14 @@ class _LedgerControls extends StatelessWidget {
 
   final List<Project> projects;
   final Set<String> favoriteIds;
+
+  /// The id of the auto-created "Inbox" project (`Project.isInbox`), or null
+  /// if none exists yet.
+  final String? inboxProjectId;
+
+  /// Count of the inbox project's expenses in the current (time-ranged) list.
+  /// The inbox chip only renders when this is > 0.
+  final int inboxCount;
   final String? selectedProjectId;
   final bool showUncategorized;
   final _LedgerSort sort;
@@ -1323,11 +1350,28 @@ class _LedgerControls extends StatelessWidget {
                   onTap: () => onProjectChanged(_kFavoritesFilter),
                 ),
               ],
+              // Pinned Inbox chip: only when the inbox project exists AND has
+              // expenses in the current window, so it never clutters the row
+              // once everything's been triaged out.
+              if (inboxProjectId != null && inboxCount > 0) ...[
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  label: '📥 Inbox ($inboxCount)',
+                  dense: true,
+                  selected: selectedProjectId == inboxProjectId,
+                  color: AppColors.warn,
+                  onTap: () => onProjectChanged(inboxProjectId),
+                ),
+              ],
               // Starred projects lead the per-project chips so the ones the
-              // user budgets against are one tap away, not a scroll away.
+              // user budgets against are one tap away, not a scroll away. The
+              // inbox project gets its own pinned chip above, so it's excluded
+              // here to avoid a duplicate.
               for (final p in [
-                ...projects.where((p) => favoriteIds.contains(p.id)),
-                ...projects.where((p) => !favoriteIds.contains(p.id)),
+                ...projects.where((p) =>
+                    favoriteIds.contains(p.id) && p.id != inboxProjectId),
+                ...projects.where((p) =>
+                    !favoriteIds.contains(p.id) && p.id != inboxProjectId),
               ]) ...[
                 const SizedBox(width: AppSpacing.sm),
                 LzChip(

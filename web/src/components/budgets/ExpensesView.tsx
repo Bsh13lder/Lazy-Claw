@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../../api";
-import type { Expense, Project, TaskItem } from "../../api";
+import type { Expense, InboxSuggestion, Project, TaskItem } from "../../api";
 import { fmtMoney } from "./money";
 import { ExpenseRow } from "./ExpenseRow";
 import { ProjectExpenseAdder } from "./ExpenseAdder";
@@ -33,6 +33,27 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
   // Surfaced near the totals block below — a failed assign (e.g. the target
   // project got deleted elsewhere) must never be swallowed silently.
   const [assignError, setAssignError] = useState<string | null>(null);
+
+  // --- Bulk select + bulk assign + AI auto-assign (inbox-only bulk bar) ---
+  // Kept deliberately separate from `assignError` above: that state is the
+  // single-row block-and-retry banner (Task 3). Bulk operations are
+  // partial-failure by nature ("moved 8 of 10") so they get their own
+  // summary state instead of reusing the single-row error slot.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkTargetProjectId, setBulkTargetProjectId] = useState("");
+  const [bulkAssignBusy, setBulkAssignBusy] = useState(false);
+  const [bulkAssignResult, setBulkAssignResult] = useState<
+    { total: number; moved: number; failures: string[] } | null
+  >(null);
+  const [suggestions, setSuggestions] = useState<Map<string, InboxSuggestion>>(new Map());
+  const [suggestSkipped, setSuggestSkipped] = useState(0);
+  const [suggestBusy, setSuggestBusy] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [applyingIds, setApplyingIds] = useState<Set<string>>(new Set());
+  const [applyResult, setApplyResult] = useState<
+    { total: number; moved: number; failures: string[] } | null
+  >(null);
 
   useEffect(() => {
     let alive = true;
@@ -106,6 +127,56 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     [projects, inboxProject],
   );
 
+  // Membership set for the inbox — every General-project expense id,
+  // regardless of the starred filter (that's a display filter, not an inbox
+  // membership fact). Used below to prune selection + suggestions once an
+  // expense actually leaves the inbox by ANY path.
+  const generalExpenseIds = useMemo(
+    () => new Set((expenses || []).filter((e) => e.project_id === inboxProject?.id).map((e) => e.id)),
+    [expenses, inboxProject],
+  );
+
+  // Selection and AI-suggestion state both key off individual expense ids.
+  // Once an id leaves the inbox — single-row assign, bulk assign, an applied
+  // suggestion, a deletion, or even another client's change picked up by the
+  // background poll — its checkbox AND any stale "→ ProjectX" suggestion
+  // must vanish too, or a leftover suggestion could later be applied to an
+  // expense that has already moved (or been reassigned to something else).
+  useEffect(() => {
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (generalExpenseIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setSuggestions((prev) => {
+      let changed = false;
+      const next = new Map<string, InboxSuggestion>();
+      for (const [id, s] of prev) {
+        if (generalExpenseIds.has(id)) next.set(id, s);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [generalExpenseIds]);
+
+  // Leaving inbox-only mode clears the whole bulk-selection UI so re-entering
+  // it later starts clean rather than resurrecting a stale pick/summary.
+  useEffect(() => {
+    if (!inboxOnly) {
+      setSelected(new Set());
+      setBulkTargetProjectId("");
+      setBulkAssignResult(null);
+      setSuggestions(new Map());
+      setSuggestSkipped(0);
+      setSuggestError(null);
+      setApplyResult(null);
+    }
+  }, [inboxOnly]);
+
   // Single-expense assign, wired per-row below (General group only).
   // Rethrows after recording the error so ExpenseRow's own busy/panel state
   // knows the attempt failed and keeps the picker open for a retry.
@@ -118,6 +189,85 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
       setAssignError(e instanceof Error ? e.message : String(e));
       throw e;
     }
+  };
+
+  // Bulk assign: sequential PATCH loop over the current selection into one
+  // target project. Sequential (not Promise.all) because counts here are at
+  // most a few dozen and sequential keeps a failure attributable to a
+  // specific id rather than an unordered Promise.allSettled dump.
+  const runBulkAssign = async () => {
+    if (bulkAssignBusy || selected.size === 0 || !bulkTargetProjectId) return;
+    setBulkAssignBusy(true);
+    setBulkAssignResult(null);
+    const ids = Array.from(selected);
+    const failures: string[] = [];
+    let moved = 0;
+    for (const id of ids) {
+      try {
+        await api.updateExpense(id, { project_id: bulkTargetProjectId });
+        moved++;
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    refresh();
+    setBulkAssignResult({ total: ids.length, moved, failures });
+    setBulkAssignBusy(false);
+  };
+
+  // Auto-assign: fetch AI suggestions for the selection (or, with nothing
+  // selected, the whole inbox — capped at 10 server-side). Suggestions render
+  // per-row via the `suggestions` map; nothing is applied here.
+  const runAutoAssign = async () => {
+    if (suggestBusy) return;
+    setSuggestBusy(true);
+    setSuggestError(null);
+    try {
+      const ids = selected.size > 0 ? Array.from(selected) : undefined;
+      const { suggestions: sugs, skipped } = await api.getInboxSuggestions(ids);
+      const m = new Map<string, InboxSuggestion>();
+      for (const s of sugs) m.set(s.expense_id, s);
+      setSuggestions(m);
+      setSuggestSkipped(skipped);
+    } catch (e) {
+      setSuggestError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSuggestBusy(false);
+    }
+  };
+
+  // Shared apply path for both the per-row "Apply" button (a single-item
+  // array) and "Apply all confident" (every high/medium suggestion with a
+  // non-null project_id). `applyBusy` is a single global lock — not per-row —
+  // so a per-row Apply and "Apply all confident" can never race the same
+  // suggestion set from two directions at once.
+  const applySuggestions = async (items: InboxSuggestion[]) => {
+    const applicable = items.filter((s) => s.project_id);
+    if (applicable.length === 0 || applyBusy) return;
+    setApplyBusy(true);
+    setApplyResult(null);
+    setApplyingIds(new Set(applicable.map((s) => s.expense_id)));
+    const failures: string[] = [];
+    let moved = 0;
+    for (const s of applicable) {
+      try {
+        await api.updateExpense(s.expense_id, { project_id: s.project_id as string });
+        moved++;
+        // Drop it immediately so a re-render before the refetch lands can't
+        // show an already-applied suggestion as still actionable.
+        setSuggestions((prev) => {
+          const next = new Map(prev);
+          next.delete(s.expense_id);
+          return next;
+        });
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    refresh();
+    setApplyResult({ total: applicable.length, moved, failures });
+    setApplyingIds(new Set());
+    setApplyBusy(false);
   };
 
   // Auto-reset the filter once its own result set empties out (last inbox
@@ -176,6 +326,41 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
     });
     return list;
   }, [expenses, currencyByProject, starredOnly, inboxOnly, inboxProject]);
+
+  // The currently VISIBLE inbox row ids — i.e. `groups`' General group,
+  // which already has the starred filter folded in when both are active.
+  // This (not `generalExpenseIds` above) is what "Select all" toggles,
+  // matching the brief's "reflects the visible inbox set".
+  const inboxRowIds = useMemo(() => {
+    if (!inboxOnly || !inboxProject) return [];
+    const g = groups.find((x) => x.projectId === inboxProject.id);
+    return g ? g.rows.map((r) => r.id) : [];
+  }, [groups, inboxOnly, inboxProject]);
+
+  const allInboxSelected = inboxRowIds.length > 0 && inboxRowIds.every((id) => selected.has(id));
+
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const toggleSelectAll = () =>
+    setSelected((prev) => {
+      if (inboxRowIds.length > 0 && inboxRowIds.every((id) => prev.has(id))) return new Set();
+      return new Set(inboxRowIds);
+    });
+
+  // Suggestions eligible for the one-click "Apply all confident" — high or
+  // medium confidence AND an actual project match (never "no match" rows).
+  const confidentSuggestions = useMemo(
+    () => Array.from(suggestions.values()).filter(
+      (s) => s.project_id && (s.confidence === "high" || s.confidence === "medium"),
+    ),
+    [suggestions],
+  );
 
   // Total of the currently-shown set (starred/inbox filters applied), split
   // per currency — no FX conversion (matches spending report).
@@ -281,6 +466,83 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
         <div className="text-[11px] text-rose-400">Couldn't assign: {assignError}</div>
       )}
 
+      {inboxOnly && inboxProject && (
+        <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-bg-secondary/40 p-2.5">
+          <div className="flex items-center gap-2 flex-wrap text-[11px]">
+            <label className="flex items-center gap-1.5 text-text-secondary">
+              <input
+                type="checkbox"
+                checked={allInboxSelected}
+                onChange={toggleSelectAll}
+                disabled={inboxRowIds.length === 0}
+                className="accent-accent"
+              />
+              Select all
+            </label>
+            <span className="text-text-muted">{selected.size} selected</span>
+            <span className="text-text-muted">·</span>
+            <select
+              value={bulkTargetProjectId}
+              onChange={(e) => setBulkTargetProjectId(e.target.value)}
+              disabled={bulkAssignBusy || assignableProjects.length === 0}
+              className="bg-bg-primary border border-border rounded px-2 py-1 text-text-primary"
+            >
+              <option value="">Assign to…</option>
+              {assignableProjects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => void runBulkAssign()}
+              disabled={bulkAssignBusy || selected.size === 0 || !bulkTargetProjectId}
+              className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
+            >
+              {bulkAssignBusy ? "Assigning…" : "✓ Assign"}
+            </button>
+            <button
+              onClick={() => void runAutoAssign()}
+              disabled={suggestBusy}
+              className="px-2.5 py-1 rounded border border-accent/40 bg-accent-soft text-accent hover:bg-accent/20 disabled:opacity-40"
+            >
+              {suggestBusy ? "Analyzing…" : "✨ Auto-assign"}
+            </button>
+            {confidentSuggestions.length > 0 && (
+              <button
+                onClick={() => void applySuggestions(confidentSuggestions)}
+                disabled={applyBusy}
+                className="px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
+              >
+                {applyBusy ? "Applying…" : `Apply all confident (${confidentSuggestions.length})`}
+              </button>
+            )}
+          </div>
+          {bulkAssignResult && (
+            <div className="text-[11px] text-text-secondary">
+              Moved {bulkAssignResult.moved} of {bulkAssignResult.total}.
+              {bulkAssignResult.failures.length > 0 && (
+                <span className="text-rose-400"> Failed: {bulkAssignResult.failures.join("; ")}</span>
+              )}
+            </div>
+          )}
+          {applyResult && (
+            <div className="text-[11px] text-text-secondary">
+              Moved {applyResult.moved} of {applyResult.total}.
+              {applyResult.failures.length > 0 && (
+                <span className="text-rose-400"> Failed: {applyResult.failures.join("; ")}</span>
+              )}
+            </div>
+          )}
+          {suggestError && (
+            <div className="text-[11px] text-rose-400">Auto-assign failed: {suggestError}</div>
+          )}
+          {suggestSkipped > 0 && (
+            <div className="text-[11px] text-text-muted">
+              {suggestSkipped} more not analyzed — run again.
+            </div>
+          )}
+        </div>
+      )}
+
       {adding && (
         <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-bg-secondary/40 p-2.5">
           <label className="text-[11px] text-text-secondary flex items-center gap-2">
@@ -336,6 +598,7 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
                 <div className="px-2 pb-2 flex flex-col gap-1">
                   {g.rows.map((e) => {
                     const isInboxGroup = !!inboxProject && g.projectId === inboxProject.id;
+                    const suggestion = suggestions.get(e.id) ?? null;
                     return (
                       <ExpenseRow
                         key={e.id}
@@ -349,6 +612,19 @@ export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
                                 assignExpense(e.id, projectId, taskId),
                               assignProjects: assignableProjects,
                               assignTasks: tasks,
+                            }
+                          : {})}
+                        {...(isInboxGroup && inboxOnly
+                          ? {
+                              selectable: true,
+                              selected: selected.has(e.id),
+                              onToggleSelect: () => toggleSelect(e.id),
+                              suggestion,
+                              onApplySuggestion: suggestion
+                                ? () => applySuggestions([suggestion])
+                                : undefined,
+                              suggestionBusy: applyingIds.has(e.id),
+                              suggestionLocked: applyBusy && !applyingIds.has(e.id),
                             }
                           : {})}
                       />

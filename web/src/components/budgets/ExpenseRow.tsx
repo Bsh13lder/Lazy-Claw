@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import * as api from "../../api";
-import type { Expense, Project, TaskItem } from "../../api";
+import type { Expense, InboxSuggestion, Project, TaskItem } from "../../api";
 import { fmtMoney } from "./money";
 
 /**
@@ -12,9 +12,16 @@ import { fmtMoney } from "./money";
  * affordance — a compact inline panel to move the expense onto a real project
  * (and optionally one of that project's tasks). The parent only passes
  * ``assignable``/``onAssign`` for General-group rows.
+ *
+ * When the inbox is being multi-selected/bulk-assigned (the parent's
+ * `inboxOnly` mode), the parent additionally passes a leading checkbox
+ * (`selectable`/`selected`/`onToggleSelect`) and an inline AI auto-assign
+ * suggestion (`suggestion`/`onApplySuggestion`) for this row's own id.
  */
 export function ExpenseRow({
   date, expense, onChanged, assignable, onAssign, assignProjects, assignTasks,
+  selectable, selected, onToggleSelect,
+  suggestion, onApplySuggestion, suggestionBusy, suggestionLocked,
 }: {
   date: string;
   expense: Expense;
@@ -31,6 +38,24 @@ export function ExpenseRow({
    *  category (casefold-equal to the project's name_key — the same join the
    *  server uses). */
   assignTasks?: TaskItem[];
+  /** True only while the parent's bulk-select mode (inboxOnly) is active. */
+  selectable?: boolean;
+  /** Whether this row's id is in the parent's selection Set. */
+  selected?: boolean;
+  /** Toggles this row's id in the parent's selection Set. */
+  onToggleSelect?: () => void;
+  /** This row's AI auto-assign suggestion, if the parent has fetched one and
+   *  it hasn't been pruned (row already left the inbox / already applied). */
+  suggestion?: InboxSuggestion | null;
+  /** Applies `suggestion` for this row only. Absent/no-op when the
+   *  suggestion has no `project_id` ("no match" — nothing to apply). */
+  onApplySuggestion?: () => void;
+  /** True while THIS row's suggestion is mid-apply. */
+  suggestionBusy?: boolean;
+  /** True while some OTHER apply (a different row, or "Apply all confident")
+   *  is in flight — blocks this row's Apply button too, so two loops can
+   *  never race the same suggestion set. */
+  suggestionLocked?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
@@ -88,6 +113,16 @@ export function ExpenseRow({
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2 text-[11px] text-text-secondary px-2 py-1 rounded bg-bg-tertiary/40">
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={() => onToggleSelect?.()}
+            disabled={busy}
+            title="Select for bulk actions"
+            className="accent-accent shrink-0"
+          />
+        )}
         <button
           onClick={() => void toggleStar()}
           className={expense.is_favorite ? "text-amber-400" : "text-text-muted hover:text-amber-400"}
@@ -161,6 +196,31 @@ export function ExpenseRow({
           >
             Cancel
           </button>
+        </div>
+      )}
+
+      {suggestion && (
+        <div className="flex items-center gap-2 pl-2 pr-2 pb-1 text-[11px] text-text-secondary flex-wrap">
+          {suggestion.project_id ? (
+            <>
+              <span>
+                → <span className="text-accent">{suggestion.project_name || "project"}</span>
+                {" · "}{suggestion.confidence}
+                {suggestion.reason && <span className="text-text-muted"> — {suggestion.reason}</span>}
+              </span>
+              <button
+                onClick={() => onApplySuggestion?.()}
+                disabled={suggestionBusy || suggestionLocked}
+                className="text-emerald-300 hover:text-emerald-200 disabled:opacity-40"
+              >
+                {suggestionBusy ? "Applying…" : "Apply"}
+              </button>
+            </>
+          ) : (
+            <span className="text-text-muted">
+              No match{suggestion.reason ? ` — ${suggestion.reason}` : ""}
+            </span>
+          )}
         </div>
       )}
     </div>

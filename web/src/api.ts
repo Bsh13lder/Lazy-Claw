@@ -851,6 +851,21 @@ export interface Expense {
   project_name?: string | null;
 }
 
+export type ExpensePatch = Partial<
+  Pick<
+    Expense,
+    "amount" | "currency" | "description" | "vendor" | "notes" | "project_id" | "task_id" | "spent_at" | "is_favorite"
+  >
+>;
+
+export interface InboxSuggestion {
+  expense_id: string;
+  project_id: string | null;
+  project_name: string | null;
+  confidence: string;
+  reason: string | null;
+}
+
 export const listProjects = (status: "active" | "archived" | "all" = "all") =>
   request<{ projects: Project[]; count: number }>(
     `/api/budgets/projects?status=${status}`,
@@ -929,12 +944,15 @@ export const deleteExpense = (expenseId: string) =>
     method: "DELETE",
   });
 
-/** Star / un-star an expense — the "starred only" overview total sums these. */
-export const setExpenseFavorite = (expenseId: string, isFavorite: boolean) =>
+export const updateExpense = (expenseId: string, patch: ExpensePatch) =>
   request<{ status: string }>(`/api/budgets/expenses/${expenseId}`, {
     method: "PATCH",
-    body: JSON.stringify({ is_favorite: isFavorite }),
+    body: JSON.stringify(patch),
   });
+
+/** Star / un-star an expense — the "starred only" overview total sums these. */
+export const setExpenseFavorite = (expenseId: string, isFavorite: boolean) =>
+  updateExpense(expenseId, { is_favorite: isFavorite });
 
 export const createRecurringExpense = (
   projectId: string,
@@ -951,6 +969,15 @@ export const createRecurringExpense = (
     `/api/budgets/projects/${projectId}/recurring`,
     { method: "POST", body: JSON.stringify(body) },
   );
+
+export const getInboxSuggestions = (expenseIds?: string[]) =>
+  request<{ suggestions: InboxSuggestion[]; skipped: number }>(
+    "/api/budgets/inbox/suggestions",
+    {
+      method: "POST",
+      body: JSON.stringify({ expense_ids: expenseIds ?? null }),
+    },
+  ).then((r) => ({ suggestions: r.suggestions, skipped: r.skipped }));
 
 export interface BudgetEntry {
   id: string;

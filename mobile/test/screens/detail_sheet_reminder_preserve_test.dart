@@ -137,6 +137,27 @@ const _timed = Task(
   createdAt: '2026-06-06T00:00:00Z',
 );
 
+/// The 2026-07-31 incident shape: a recurring chain whose due is a TIMED
+/// MIDNIGHT and whose reminder fires 23:30 later that same day — a NEGATIVE
+/// lead the picker cannot express. leadFromReminderAt coerces it to "At
+/// time"; a save trusting that coercion rewrote the reminder onto the
+/// midnight due (13 hours in the past when edited that afternoon) and the
+/// server nagged within a minute.
+const _negativeLead = Task(
+  id: 'task-neglead',
+  userId: 'u1',
+  title: 'Night meds',
+  description: 'Original notes',
+  priority: 'medium',
+  status: 'todo',
+  owner: 'user',
+  dueDate: '2026-06-10T00:00:00',
+  reminderAt: '2026-06-10T23:30:00',
+  recurring: '0 23 * * *',
+  nagCount: 0,
+  createdAt: '2026-06-06T00:00:00Z',
+);
+
 void main() {
   Widget host(_StubTasksNotifier stub, Task task) => ProviderScope(
     overrides: [tasksProvider.overrideWith((ref) => stub)],
@@ -273,4 +294,47 @@ void main() {
     // kDefaultReminderLead is "At time" → the reminder fires AT 17:00.
     expect(stub.updateCalls.single['reminderAt'], '2026-06-10T17:00:00');
   });
+
+  testWidgets(
+    'a notes-only edit PRESERVES a reminder the lead model cannot express',
+    (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub, _negativeLead);
+
+      await tester.enterText(
+        find.byKey(const Key('task-detail-notes')),
+        'Tweaked the note',
+      );
+      await save(tester);
+
+      expect(stub.updateCalls, hasLength(1));
+      // null = untouched. The broken behaviour recomposed from the coerced
+      // "At time" lead and sent the midnight due instant — hours in the past.
+      expect(
+        stub.updateCalls.single['reminderAt'],
+        isNull,
+        reason: 'an unrepresentable (negative-lead) reminder must survive '
+            'an unrelated save verbatim, not be rewritten onto the due',
+      );
+    },
+  );
+
+  testWidgets(
+    'moving the due DAY re-anchors an unrepresentable reminder, same clock',
+    (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub, _negativeLead);
+
+      await tester.tap(find.text('Tomorrow'));
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final tomorrow = isoFor(DateTime.now().add(const Duration(days: 1)));
+      // The 23:30 wall-clock rides onto the new day — never the due instant.
+      expect(
+        stub.updateCalls.single['reminderAt'],
+        '${tomorrow}T23:30:00',
+      );
+    },
+  );
 }

@@ -89,6 +89,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   /// Set once the user touches the REMIND control — a lead chip, or the ✕ on the
   /// read-only reminder row. Only then may Save send the clear sentinel.
   bool _reminderTouched = false;
+  bool _leadRepresentsOriginal = true;
 
   /// Set once the user changes the due day or the due time. Gates re-anchoring a
   /// date-only task's reminder onto the new day (and clearing it outright when
@@ -152,6 +153,14 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _explicitLead = (hasReminder && dueDateHasTime(raw))
         ? leadFromReminderAt(raw, t.reminderAt)
         : null;
+    // A reminder AFTER its timed due (negative lead — the recurring
+    // "due at midnight, ping late that night" chain) cannot round-trip
+    // through the picker: leadFromReminderAt coerces it to "At time", and a
+    // save trusting that coercion rewrote the reminder onto the (long past)
+    // midnight due — which the server then nagged within a minute. When the
+    // pair is unrepresentable, saves PRESERVE the raw instant unless the
+    // user explicitly touches the reminder control.
+    _leadRepresentsOriginal = leadRepresentsReminder(raw, t.reminderAt);
     _subtasks = List.of(t.subtasks);
     _originalSteps = serializeSubtasks(_subtasks);
     _category = (t.category == null || t.category!.isEmpty) ? null : t.category;
@@ -208,9 +217,22 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   /// hitting Save permanently deleted its reminder, its server reminder job and
   /// its advance nags.
   String? get _reminderArg {
-    // A timed due makes the reminder fully derivable, and the lead picker IS the
-    // user-visible control for it — so it stays authoritative (status quo).
-    if (dueDateHasTime(_composedDue)) return _composedReminderAt;
+    // A timed due normally makes the reminder fully derivable, and the lead
+    // picker IS the user-visible control for it — so it stays authoritative…
+    if (dueDateHasTime(_composedDue)) {
+      // …EXCEPT when the STORED pair never fit the lead model in the first
+      // place (reminder after its due — negative lead). Recomposing from the
+      // coerced picker value would silently rewrite the reminder onto the due
+      // instant, hours in the past for a midnight due. Preserve the raw
+      // instant (re-anchored if the due day moved) until the user explicitly
+      // picks a lead.
+      if (!_leadRepresentsOriginal && !_reminderTouched) {
+        final surviving = _survivingReminderAt;
+        if (surviving == _originalReminderAt) return null; // untouched → omit
+        return surviving ?? '';
+      }
+      return _composedReminderAt;
+    }
     final surviving = _survivingReminderAt;
     if (surviving == null) return '';
     // Unchanged → leave the column absent from the patch, matching how this sheet

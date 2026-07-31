@@ -55,6 +55,15 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
   late final TabController _tabController;
   String? _lastSelectedProjectId;
 
+  /// Whether the Ledger's pinned bulk-action bar is currently showing.
+  /// Reported up by `_LedgerTab` (see `onBulkBarVisibleChanged`) since the
+  /// FAB is owned here but the selection-mode state lives in the tab's own
+  /// state. The FAB sits bottom-right — exactly where the pinned bar's
+  /// trailing controls (Auto, Cancel) live — so it must hide while the bar
+  /// is on screen, or it visually covers those controls AND intercepts
+  /// their taps.
+  bool _bulkBarVisible = false;
+
   @override
   void initState() {
     super.initState();
@@ -63,6 +72,15 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
     // NOTE: the cold-start deep-link replay lives in [build] via
     // [drainPendingAction] (not a one-shot here) so it survives whichever frame
     // this screen first becomes visible on.
+  }
+
+  /// Callback handed to `_LedgerTab`; called (post-frame, from the tab's own
+  /// build) whenever its pinned bulk-bar visibility changes. No-ops when the
+  /// value hasn't actually changed so it doesn't schedule a needless rebuild
+  /// of this whole screen on every Ledger tab build.
+  void _handleBulkBarVisibleChanged(bool visible) {
+    if (visible == _bulkBarVisible) return;
+    setState(() => _bulkBarVisible = visible);
   }
 
   /// The deep-link actions this screen owns.
@@ -211,7 +229,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           Expanded(child: _buildBody(state)),
         ],
       ),
-      floatingActionButton: _buildFAB(state),
+      floatingActionButton: _bulkBarVisible ? null : _buildFAB(state),
     );
   }
 
@@ -327,6 +345,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           onToggleExpenseFavorite: (id) =>
               ref.read(budgetsProvider.notifier).toggleExpenseFavorite(id),
           onRefresh: _refresh,
+          onBulkBarVisibleChanged: _handleBulkBarVisibleChanged,
         ),
       ],
     );
@@ -567,6 +586,7 @@ class _LedgerTab extends ConsumerStatefulWidget {
     required this.onTapExpense,
     required this.onToggleExpenseFavorite,
     required this.onRefresh,
+    required this.onBulkBarVisibleChanged,
   });
 
   final BudgetsState state;
@@ -574,6 +594,11 @@ class _LedgerTab extends ConsumerStatefulWidget {
   final void Function(Expense expense) onTapExpense;
   final void Function(String id) onToggleExpenseFavorite;
   final Future<void> Function() onRefresh;
+
+  /// Reports whenever the pinned bulk-action bar's visibility changes, so
+  /// the parent `ExpensesScreen` (which owns the FAB) can hide it while the
+  /// bar is on screen — see `_ExpensesScreenState._handleBulkBarVisibleChanged`.
+  final ValueChanged<bool> onBulkBarVisibleChanged;
 
   @override
   ConsumerState<_LedgerTab> createState() => _LedgerTabState();
@@ -1169,6 +1194,17 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     );
 
     final showBulkBar = _selectionMode && inboxFilterActive;
+
+    // Tell the screen whether the pinned bar is showing so it can hide its
+    // FloatingActionButton — the FAB docks bottom-right, exactly where the
+    // bar's trailing controls (Auto, Cancel) sit, and would otherwise cover
+    // them and steal their taps. Deferred to a post-frame callback: this
+    // notifies a DIFFERENT widget's state (`_ExpensesScreenState`), and
+    // calling its `setState` synchronously mid-build would hit "setState()
+    // or markNeedsBuild() called during build".
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onBulkBarVisibleChanged(showBulkBar);
+    });
 
     // The bulk bar is a screen-pinned overlay (bottom-anchored in a Stack)
     // rather than a sliver living inside the scroll content. It used to render

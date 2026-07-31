@@ -13,6 +13,15 @@ import 'money_helpers.dart';
 /// Tapping the row body fires [onTap] — the Money screen wires this to open the
 /// expense detail/edit sheet. Null leaves the row non-tappable. The swipe-to-
 /// delete gesture is unchanged.
+///
+/// The Ledger's inbox multi-select (Task 5) layers on top via [selectionMode]:
+/// when true, the leading receipt icon is replaced by a check indicator,
+/// [onTap] toggles [onToggleSelect] instead of opening the detail sheet, and
+/// swipe-to-delete is disabled entirely (a selected row shouldn't also be
+/// dismissible out from under the bulk action). [onLongPress] is what ENTERS
+/// selection mode from the outside — the parent only wires it while the
+/// Ledger's project filter is the inbox, so a plain tap/long-press elsewhere
+/// never hijacks normal row behavior.
 class ExpenseRow extends StatelessWidget {
   const ExpenseRow({
     super.key,
@@ -23,6 +32,10 @@ class ExpenseRow extends StatelessWidget {
     this.showProject = true,
     this.onTap,
     this.onToggleFavorite,
+    this.selectionMode = false,
+    this.selected = false,
+    this.onToggleSelect,
+    this.onLongPress,
   });
 
   final Expense expense;
@@ -32,11 +45,30 @@ class ExpenseRow extends StatelessWidget {
   final bool showProject;
 
   /// Opens the expense detail/edit sheet. Null leaves the row non-tappable.
+  /// Ignored while [selectionMode] is true (tap toggles selection instead).
   final VoidCallback? onTap;
 
   /// Flips the expense's favorite (star) flag. When null the star affordance is
   /// hidden — e.g. the read-only rows nested inside a project card.
   final VoidCallback? onToggleFavorite;
+
+  /// Whether the Ledger is in inbox multi-select mode. Swaps the leading icon
+  /// for a check indicator, disables swipe-to-delete, and redirects [onTap] to
+  /// [onToggleSelect].
+  final bool selectionMode;
+
+  /// Whether this row is part of the current bulk selection (only meaningful
+  /// while [selectionMode] is true).
+  final bool selected;
+
+  /// Toggles this row's membership in the bulk selection. Wired as the row's
+  /// effective tap handler while [selectionMode] is true.
+  final VoidCallback? onToggleSelect;
+
+  /// Enters selection mode for this row. Only wired by the parent while the
+  /// Ledger is filtered to the inbox; null everywhere else so long-pressing an
+  /// ordinary row does nothing.
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -45,11 +77,22 @@ class ExpenseRow extends StatelessWidget {
     final vendor = expense.vendor ?? '';
 
     final inner = _buildContent(context, desc, vendor, projectName);
-    final content = onTap == null
+    final effectiveOnTap = selectionMode ? onToggleSelect : onTap;
+    // Once already in selection mode a long-press on another row just keeps
+    // toggling membership — only the FIRST long-press (selectionMode still
+    // false) is the one that flips the parent into selection mode.
+    final effectiveOnLongPress = selectionMode ? onToggleSelect : onLongPress;
+    final content = (effectiveOnTap == null && effectiveOnLongPress == null)
         ? inner
-        : InkWell(onTap: onTap, child: inner);
+        : InkWell(
+            onTap: effectiveOnTap,
+            onLongPress: effectiveOnLongPress,
+            child: inner,
+          );
 
-    if (onDelete == null) {
+    // Selection mode disables swipe-to-delete outright — a row the user is
+    // mid-bulk-select on shouldn't also be dismissible.
+    if (onDelete == null || selectionMode) {
       return content;
     }
 
@@ -109,22 +152,9 @@ class ExpenseRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Leading receipt icon container.
-          Container(
-            width: 40,
-            height: 40,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.bgSurfaceElevated,
-              borderRadius: AppRadii.rMd,
-              border: Border.all(color: AppColors.borderSubtle),
-            ),
-            child: const Icon(
-              Icons.receipt_long_outlined,
-              size: 18,
-              color: AppColors.textMuted,
-            ),
-          ),
+          // Leading icon: the receipt icon normally, a check indicator while
+          // the Ledger is in bulk-selection mode.
+          selectionMode ? _buildSelectionIndicator() : _buildReceiptIcon(),
           const SizedBox(width: AppSpacing.md),
           // Description + muted metadata line (vendor · saved time).
           Expanded(
@@ -234,6 +264,46 @@ class ExpenseRow extends StatelessWidget {
       ),
     );
   }
+
+  /// The normal leading icon — a receipt glyph in a bordered tile.
+  Widget _buildReceiptIcon() => Container(
+        width: 40,
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: AppColors.bgSurfaceElevated,
+          borderRadius: AppRadii.rMd,
+          border: Border.all(color: AppColors.borderSubtle),
+        ),
+        child: const Icon(
+          Icons.receipt_long_outlined,
+          size: 18,
+          color: AppColors.textMuted,
+        ),
+      );
+
+  /// The bulk-selection leading icon — a filled check when [selected], an
+  /// empty ring otherwise. Replaces [_buildReceiptIcon] while [selectionMode]
+  /// is active.
+  Widget _buildSelectionIndicator() => Container(
+        width: 40,
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.16)
+              : AppColors.bgSurfaceElevated,
+          borderRadius: AppRadii.rMd,
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.borderSubtle,
+          ),
+        ),
+        child: Icon(
+          selected ? Icons.check_circle_rounded : Icons.circle_outlined,
+          size: 20,
+          color: selected ? AppColors.accent : AppColors.textMuted,
+        ),
+      );
 
   /// Composes the muted metadata line: vendor (when distinct from the
   /// description) and the "Saved …" timestamp, joined with a thin dot. Returns

@@ -56,6 +56,21 @@ class InboxSuggestion {
       'InboxSuggestion(expenseId: $expenseId, projectName: $projectName, confidence: $confidence)';
 }
 
+// ── Public helper ──────────────────────────────────────────────────────────
+
+/// Suggestions worth a one-tap bulk apply — an actual project match
+/// (`projectId != null`) at high or medium confidence. Low-confidence and
+/// "no match" rows are excluded; those stay in the preview list for manual
+/// review instead. Backs the Ledger's "Apply N confident" bulk action.
+List<InboxSuggestion> confidentSuggestions(List<InboxSuggestion> suggestions) {
+  return [
+    for (final s in suggestions)
+      if (s.projectId != null &&
+          (s.confidence == 'high' || s.confidence == 'medium'))
+        s,
+  ];
+}
+
 // ── Private helpers ────────────────────────────────────────────────────────
 
 String? _str(dynamic v) {

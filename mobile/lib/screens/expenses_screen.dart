@@ -4,10 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/actions/app_actions.dart';
 import '../models/budget_entry.dart';
 import '../models/expense.dart';
+import '../models/inbox_suggestion.dart';
 import '../models/project.dart';
+import '../models/task.dart';
+import '../models/task_project_link.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart'
-    show reachableProvider, dbHealthProvider;
+    show reachableProvider, dbHealthProvider, tasksProvider;
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_log_sheet.dart';
@@ -603,6 +606,218 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
   /// The picked window when [_range] is [ExpenseRange.custom] (null otherwise).
   DateTimeRange? _customRange;
 
+  // ── Inbox bulk-select (Task 5) ─────────────────────────────────────────
+  //
+  // Only meaningful while filtered to the inbox project. Entered via a
+  // long-press on a row (see `ExpenseRow.onLongPress`, wired only in that
+  // filter), exited via the bulk bar's ✕ or by changing the project filter.
+
+  /// True once a long-press has entered bulk-selection mode. Kept separate
+  /// from `_selected.isEmpty` because Auto must still be tappable with
+  /// nothing selected (it then scans the whole inbox) — deselecting the last
+  /// row must NOT silently exit the mode out from under the user.
+  bool _selectionMode = false;
+
+  /// Ids of the expenses currently selected for a bulk action.
+  Set<String> _selected = {};
+
+  /// AI suggestions from the last Auto fetch, keyed by expense id. Cleared
+  /// whenever the selection is applied, cancelled, or the filter leaves the
+  /// inbox — a stale suggestion must never outlive the rows it describes.
+  Map<String, InboxSuggestion> _suggestions = {};
+
+  /// ONE shared busy lock across every bulk action — bulk-assign, the Auto
+  /// suggestion fetch, and applying confident suggestions all PATCH the same
+  /// rows, so only one may run at a time. Every bulk-bar button (and the
+  /// cancel affordance) must gate on this, not a per-action flag.
+  bool _bulkBusy = false;
+
+  void _enterSelection(String expenseId) {
+    setState(() {
+      _selectionMode = true;
+      _selected = {..._selected, expenseId};
+    });
+  }
+
+  void _toggleSelected(String expenseId) {
+    setState(() {
+      final next = {..._selected};
+      if (!next.remove(expenseId)) next.add(expenseId);
+      _selected = next;
+    });
+  }
+
+  void _cancelSelection() {
+    setState(() {
+      _selectionMode = false;
+      _selected = {};
+      _suggestions = {};
+    });
+  }
+
+  /// A human label for a bulk-action failure summary — the expense's
+  /// description, falling back to vendor, then the formatted amount — so two
+  /// failures never render as identical, unattributable strings.
+  String _expenseLabel(String expenseId) {
+    for (final e in widget.state.expenses) {
+      if (e.id == expenseId) {
+        final d = e.displayDescription;
+        return d.isNotEmpty ? d : fmtMoney(e.currency, e.amount);
+      }
+    }
+    return expenseId;
+  }
+
+  Future<void> _openAssignSheet(
+    List<Project> projects,
+    String? inboxProjectId,
+  ) async {
+    if (_bulkBusy || _selected.isEmpty) return;
+    final assignable =
+        projects.where((p) => p.id != inboxProjectId).toList();
+    if (assignable.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Create another project first.')),
+      );
+      return;
+    }
+    final allTasks = ref.read(tasksProvider).tasks;
+    final result = await LzBottomSheet.show<(String, String?)>(
+      context,
+      title:
+          'Assign ${_selected.length} expense${_selected.length == 1 ? '' : 's'}',
+      builder: (_) => _BulkAssignSheet(projects: assignable, allTasks: allTasks),
+    );
+    if (result == null || !mounted) return;
+    await _runBulkAssign(result.$1, result.$2);
+  }
+
+  /// Sequential PATCH loop over a SNAPSHOT of the current selection (taken
+  /// before the loop starts, so a mutation mid-flight — not currently
+  /// possible since the bar disables while busy, but a safe habit regardless)
+  /// can never change what's being moved out from under the loop. Each PATCH
+  /// clears the expense's old task link (`taskIdSet: true` even when `taskId`
+  /// is null) — a moved expense's old task belonged to the old project.
+  Future<void> _runBulkAssign(String targetProjectId, String? taskId) async {
+    if (_bulkBusy || _selected.isEmpty) return;
+    final ids = _selected.toList();
+    setState(() => _bulkBusy = true);
+    var moved = 0;
+    final failures = <String>[];
+    for (final id in ids) {
+      final ok = await ref.read(budgetsProvider.notifier).updateExpense(
+            id,
+            projectId: targetProjectId,
+            taskId: taskId,
+            taskIdSet: true,
+          );
+      if (ok) {
+        moved++;
+      } else {
+        failures.add(_expenseLabel(id));
+      }
+    }
+    await widget.onRefresh();
+    if (!mounted) return;
+    setState(() {
+      _bulkBusy = false;
+      _selectionMode = false;
+      _selected = {};
+      _suggestions = {};
+    });
+    _showBulkSnack(moved: moved, total: ids.length, failures: failures);
+  }
+
+  /// Fetches AI suggestions for the current selection (or the whole inbox
+  /// when nothing is selected — server caps that scan at 10) and opens the
+  /// preview sheet. This is an ONLINE-only feature: any failure (including
+  /// the `DioException(error: ApiError(...))` shape the interceptor throws)
+  /// surfaces as a plain "needs connection" hint, never a raw error string.
+  Future<void> _openAutoAssign() async {
+    if (_bulkBusy) return;
+    setState(() => _bulkBusy = true);
+    final ids = _selected.isEmpty ? null : _selected.toList();
+    ({List<InboxSuggestion> suggestions, int skipped})? result;
+    try {
+      result = await ref
+          .read(budgetsRepositoryProvider)
+          .getInboxSuggestions(expenseIds: ids);
+    } catch (_) {
+      result = null;
+    }
+    if (!mounted) return;
+    setState(() => _bulkBusy = false);
+    if (result == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Auto-assign needs a connection. Try again online.'),
+        ),
+      );
+      return;
+    }
+    final suggestions = result.suggestions;
+    setState(() {
+      _suggestions = {for (final s in suggestions) s.expenseId: s};
+    });
+    final apply = await LzBottomSheet.show<bool>(
+      context,
+      title: 'Auto-assign suggestions',
+      builder: (_) => _AutoPreviewSheet(
+        suggestions: suggestions,
+        skipped: result!.skipped,
+        labelFor: _expenseLabel,
+      ),
+    );
+    if (apply == true && mounted) {
+      await _applyConfidentSuggestions();
+    }
+  }
+
+  /// Applies every high/medium-confidence, matched suggestion
+  /// ([confidentSuggestions]) via the same clear-on-move PATCH semantics as
+  /// [_runBulkAssign] (task link cleared, project set).
+  Future<void> _applyConfidentSuggestions() async {
+    if (_bulkBusy) return;
+    final confident = confidentSuggestions(_suggestions.values.toList());
+    if (confident.isEmpty) return;
+    setState(() => _bulkBusy = true);
+    var moved = 0;
+    final failures = <String>[];
+    for (final s in confident) {
+      final ok = await ref.read(budgetsProvider.notifier).updateExpense(
+            s.expenseId,
+            projectId: s.projectId!,
+            taskId: null,
+            taskIdSet: true,
+          );
+      if (ok) {
+        moved++;
+      } else {
+        failures.add(_expenseLabel(s.expenseId));
+      }
+    }
+    await widget.onRefresh();
+    if (!mounted) return;
+    setState(() {
+      _bulkBusy = false;
+      _selectionMode = false;
+      _selected = {};
+      _suggestions = {};
+    });
+    _showBulkSnack(moved: moved, total: confident.length, failures: failures);
+  }
+
+  void _showBulkSnack({
+    required int moved,
+    required int total,
+    required List<String> failures,
+  }) {
+    final msg = failures.isEmpty
+        ? 'Moved $moved of $total.'
+        : 'Moved $moved of $total. Failed: ${failures.join('; ')}';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   /// Whether any visible expense no longer maps to a live project.
   bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
       visible.any((e) => !liveIds.contains(e.projectId));
@@ -812,6 +1027,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
         .where((p) => p.isFavorite && !p.isArchived)
         .map((p) => p.id)
         .toSet();
+    final inboxProject = _findInboxProject(state.projects);
     // A stale filter (its project was just deleted, or the last favorite was
     // un-starred) collapses back to "All".
     if (_projectFilter != null &&
@@ -823,6 +1039,18 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     if (_projectFilter == _kFavoritesFilter && favoriteIds.isEmpty) {
       _projectFilter = null;
     }
+    // Bulk selection / AI suggestions only make sense while filtered to the
+    // inbox — clear them the moment the filter lands anywhere else (project
+    // deleted, favorites collapse, a manual filter change that somehow
+    // skipped the onProjectChanged reset below), so a stale selection can
+    // never survive into a different project's view.
+    if (_selectionMode && _projectFilter != inboxProject?.id) {
+      _selectionMode = false;
+      _selected = {};
+      _suggestions = {};
+    }
+    final inboxFilterActive =
+        inboxProject != null && _projectFilter == inboxProject.id;
 
     // Scope to the active time window first (offline, in-memory), then compose
     // with the project filter. Sort happens in the sliver builders below.
@@ -865,7 +1093,6 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     );
     final balance = entriesLoaded ? ledgerBalance(items) : null;
 
-    final inboxProject = _findInboxProject(state.projects);
     final inboxCount = inboxProject == null
         ? 0
         : ranged.where((e) => e.projectId == inboxProject.id).length;
@@ -888,11 +1115,22 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
       rangeTotalText: fmtMoney(currency, rangeTotal(filtered)),
       // Forward (newer) month step is disabled once we're on the current month.
       monthForwardEnabled: _monthOffset < 0,
-      onProjectChanged: (id) => setState(() => _projectFilter = id),
+      onProjectChanged: (id) => setState(() {
+        _projectFilter = id;
+        // Leaving the inbox filter exits bulk-selection entirely — it has no
+        // meaning against a different project's rows.
+        if (id != inboxProject?.id) {
+          _selectionMode = false;
+          _selected = {};
+          _suggestions = {};
+        }
+      }),
       onSortChanged: (s) => setState(() => _sort = s),
       onRangeChanged: _onRangeChanged,
       onMonthStep: _stepMonth,
     );
+
+    final showBulkBar = _selectionMode && inboxFilterActive;
 
     return LzRefresh(
       onRefresh: _handleRefresh,
@@ -910,9 +1148,38 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
             )
           else ...[
             if (_sort == _LedgerSort.amount)
-              _amountSliver(items)
+              _amountSliver(items, inboxFilterActive: inboxFilterActive)
             else
-              _dateGroupedSliver(items, newestFirst: _sort == _LedgerSort.newest),
+              _dateGroupedSliver(
+                items,
+                newestFirst: _sort == _LedgerSort.newest,
+                inboxFilterActive: inboxFilterActive,
+              ),
+            // Bulk action bar — pinned above the footer sliver, only while
+            // bulk-selection mode is active against the inbox filter.
+            if (showBulkBar)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.lg,
+                    AppSpacing.md,
+                    AppSpacing.lg,
+                    0,
+                  ),
+                  child: _BulkActionBar(
+                    count: _selected.length,
+                    busy: _bulkBusy,
+                    onAssign: _selected.isEmpty
+                        ? null
+                        : () => _openAssignSheet(
+                              state.projects,
+                              inboxProject.id,
+                            ),
+                    onAuto: _openAutoAssign,
+                    onCancel: _cancelSelection,
+                  ),
+                ),
+              ),
             // Footer: the running balance (once credits loaded) and/or the
             // offline hint. Always present so it also carries the bottom scroll
             // room (the content slivers no longer pad the bottom).
@@ -943,7 +1210,8 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
 
   /// A flat, single-card list sorted by magnitude (largest first), credits +
   /// debits interleaved. The section total is the money SPENT (debits) in view.
-  Widget _amountSliver(List<LedgerItem> items) {
+  Widget _amountSliver(List<LedgerItem> items,
+      {required bool inboxFilterActive}) {
     final sorted = [...items]
       ..sort((a, b) => b.magnitude.compareTo(a.magnitude));
     final spent = sorted
@@ -961,7 +1229,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
         child: LzSection(
           title: 'By amount',
           action: _SectionTotal(text: fmtMoney(currency, spent)),
-          child: _ledgerCard(sorted),
+          child: _ledgerCard(sorted, inboxFilterActive: inboxFilterActive),
         ),
       ),
     );
@@ -970,8 +1238,11 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
   /// Date-grouped sections, ordered [newestFirst] (or oldest-first), with credit
   /// top-ups interleaved among the expenses of each day. The section total is
   /// the day's SPEND (debits) — the balance footer rolls credits up.
-  Widget _dateGroupedSliver(List<LedgerItem> items,
-      {required bool newestFirst}) {
+  Widget _dateGroupedSliver(
+    List<LedgerItem> items, {
+    required bool newestFirst,
+    required bool inboxFilterActive,
+  }) {
     final ordered = newestFirst ? items : items.reversed.toList();
     final byDate =
         groupBy<LedgerItem, String>(ordered, (i) => _ledgerDayKey(i.date));
@@ -999,7 +1270,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
             child: LzSection(
               title: friendlyDate(date),
               action: _SectionTotal(text: fmtMoney(currency, daySpent)),
-              child: _ledgerCard(dayItems),
+              child: _ledgerCard(dayItems, inboxFilterActive: inboxFilterActive),
             ),
           );
         },
@@ -1010,13 +1281,14 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
 
   /// A single card of ledger rows — expense (debit) rows via [ExpenseRow] and
   /// budget top-up (credit) rows via [CreditRow], separated by hairlines.
-  Widget _ledgerCard(List<LedgerItem> items) {
+  Widget _ledgerCard(List<LedgerItem> items,
+      {required bool inboxFilterActive}) {
     return LzCard(
       padding: EdgeInsets.zero,
       child: Column(
         children: [
           for (int j = 0; j < items.length; j++) ...[
-            _ledgerRow(items[j]),
+            _ledgerRow(items[j], inboxFilterActive: inboxFilterActive),
             if (j < items.length - 1)
               Divider(
                 height: 0.5,
@@ -1030,7 +1302,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
     );
   }
 
-  Widget _ledgerRow(LedgerItem item) {
+  Widget _ledgerRow(LedgerItem item, {required bool inboxFilterActive}) {
     if (item.isCredit) {
       return CreditRow(item: item);
     }
@@ -1043,6 +1315,10 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
       onTap: () => widget.onTapExpense(e),
       onToggleFavorite: () => widget.onToggleExpenseFavorite(e.id),
       showProject: true,
+      selectionMode: _selectionMode,
+      selected: _selected.contains(e.id),
+      onToggleSelect: () => _toggleSelected(e.id),
+      onLongPress: inboxFilterActive ? () => _enterSelection(e.id) : null,
     );
   }
 }
@@ -1156,6 +1432,320 @@ class _LedgerConnectHint extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Inbox bulk-select UI (Task 5) ───────────────────────────────────────────
+
+/// The Ledger's inbox bulk-action bar: a selected count, Assign/Auto actions,
+/// and a cancel — all gated on the SAME [busy] flag (the shared bulk-mutation
+/// lock in `_LedgerTabState`) so every entry point disables together while any
+/// one bulk operation is in flight.
+class _BulkActionBar extends StatelessWidget {
+  const _BulkActionBar({
+    required this.count,
+    required this.busy,
+    required this.onAssign,
+    required this.onAuto,
+    required this.onCancel,
+  });
+
+  final int count;
+  final bool busy;
+  final VoidCallback? onAssign;
+  final VoidCallback? onAuto;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzCard(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          if (busy) ...[
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.accent,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+          ],
+          Text(
+            '$count selected',
+            style: AppText.label.copyWith(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const Spacer(),
+          _BarAction(label: 'Assign', onTap: busy ? null : onAssign),
+          const SizedBox(width: AppSpacing.md),
+          _BarAction(label: '✨ Auto', onTap: busy ? null : onAuto),
+          const SizedBox(width: AppSpacing.md),
+          LzIconButton(
+            icon: Icons.close_rounded,
+            tooltip: 'Cancel selection',
+            size: 18,
+            color: AppColors.textMuted,
+            onPressed: busy ? null : onCancel,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small text action used inside [_BulkActionBar]. Dims and stops
+/// responding to taps when [onTap] is null (busy or not yet actionable).
+class _BarAction extends StatelessWidget {
+  const _BarAction({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: AppRadii.rMd,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        child: Text(
+          label,
+          style: AppText.label.copyWith(
+            color: enabled ? AppColors.accent : AppColors.textMuted,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The bulk "Assign to project" sheet: a project picker (inbox already
+/// excluded by the caller) + an optional task picker scoped to the chosen
+/// project — mirrors `_ProjectPicker`/`_TaskPicker`'s dropdown idiom in
+/// `expense_detail_sheet.dart`. Pops `(projectId, taskId)` on Assign.
+class _BulkAssignSheet extends StatefulWidget {
+  const _BulkAssignSheet({required this.projects, required this.allTasks});
+
+  /// Assignable projects — the inbox project is already excluded.
+  final List<Project> projects;
+  final List<Task> allTasks;
+
+  @override
+  State<_BulkAssignSheet> createState() => _BulkAssignSheetState();
+}
+
+class _BulkAssignSheetState extends State<_BulkAssignSheet> {
+  String? _projectId;
+  String? _taskId;
+
+  @override
+  void initState() {
+    super.initState();
+    _projectId = widget.projects.isNotEmpty ? widget.projects.first.id : null;
+  }
+
+  /// Tasks selectable for the currently-picked project — empty when nothing
+  /// is picked (shouldn't happen once a project list is non-empty, but stays
+  /// safe if it ever is).
+  List<Task> get _availableTasks {
+    for (final p in widget.projects) {
+      if (p.id == _projectId) return tasksForProject(widget.allTasks, p);
+    }
+    return const [];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tasks = _availableTasks;
+    final hasTaskSelected = tasks.any((t) => t.id == _taskId);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Project', style: AppText.label.copyWith(color: AppColors.textSecondary)),
+        const SizedBox(height: AppSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rMd,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              key: const Key('bulk-assign-project'),
+              value: widget.projects.any((p) => p.id == _projectId)
+                  ? _projectId
+                  : null,
+              isExpanded: true,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              dropdownColor: AppColors.bgSurfaceElevated,
+              style: AppText.body,
+              icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                  color: AppColors.textMuted),
+              items: [
+                for (final p in widget.projects)
+                  DropdownMenuItem<String>(
+                    value: p.id,
+                    child: Text(p.name, style: AppText.body),
+                  ),
+              ],
+              onChanged: (id) => setState(() {
+                _projectId = id;
+                // A task belongs to one project — reset it on project change,
+                // same as the single-expense detail sheet.
+                _taskId = null;
+              }),
+            ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        Text('Task (optional)',
+            style: AppText.label.copyWith(color: AppColors.textSecondary)),
+        const SizedBox(height: AppSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rMd,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              key: const Key('bulk-assign-task'),
+              value: hasTaskSelected ? _taskId : null,
+              isExpanded: true,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              dropdownColor: AppColors.bgSurfaceElevated,
+              style: AppText.body,
+              icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                  color: AppColors.textMuted),
+              items: [
+                DropdownMenuItem<String>(
+                  value: null,
+                  child: Text(
+                    '(no task)',
+                    style: AppText.body.copyWith(color: AppColors.textMuted),
+                  ),
+                ),
+                for (final t in tasks)
+                  DropdownMenuItem<String>(
+                    value: t.id,
+                    child: Text(t.title,
+                        style: AppText.body, overflow: TextOverflow.ellipsis),
+                  ),
+              ],
+              onChanged: (id) => setState(() => _taskId = id),
+            ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xl),
+        LzButton.primary(
+          key: const Key('bulk-assign-submit'),
+          label: 'Assign',
+          icon: Icons.check,
+          expand: true,
+          onPressed: _projectId == null
+              ? null
+              : () => Navigator.of(context).pop((_projectId!, _taskId)),
+        ),
+      ],
+    );
+  }
+}
+
+/// The Auto-assign preview sheet: lists every suggestion the server returned
+/// (`description → projectName (confidence)`, "no match" rows dimmed), plus
+/// the skipped-count hint, plus an "Apply N confident" button that pops
+/// `true` to tell the caller to run the apply loop.
+class _AutoPreviewSheet extends StatelessWidget {
+  const _AutoPreviewSheet({
+    required this.suggestions,
+    required this.skipped,
+    required this.labelFor,
+  });
+
+  final List<InboxSuggestion> suggestions;
+  final int skipped;
+
+  /// Resolves an expense id to a display label (description/vendor/amount).
+  final String Function(String expenseId) labelFor;
+
+  @override
+  Widget build(BuildContext context) {
+    final confident = confidentSuggestions(suggestions);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (suggestions.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
+            child: Text(
+              'No suggestions yet — try again once the inbox has some context to match on.',
+              style: AppText.body.copyWith(color: AppColors.textMuted),
+            ),
+          )
+        else
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.4,
+            ),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: suggestions.length,
+              separatorBuilder: (_, _) =>
+                  Divider(height: 1, color: AppColors.borderSubtle),
+              itemBuilder: (_, i) {
+                final s = suggestions[i];
+                final matched = s.projectId != null;
+                final text = matched
+                    ? '${labelFor(s.expenseId)} → ${s.projectName ?? "?"} (${s.confidence})'
+                    : '${labelFor(s.expenseId)} — no match';
+                return Opacity(
+                  opacity: matched ? 1.0 : 0.5,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+                    child: Text(text, style: AppText.body),
+                  ),
+                );
+              },
+            ),
+          ),
+        if (skipped > 0) ...[
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            '$skipped more not analyzed — run again.',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+        ],
+        const SizedBox(height: AppSpacing.lg),
+        LzButton.primary(
+          key: const Key('auto-preview-apply'),
+          label: confident.isEmpty
+              ? 'No confident matches'
+              : 'Apply ${confident.length} confident',
+          icon: Icons.check,
+          expand: true,
+          onPressed:
+              confident.isEmpty ? null : () => Navigator.of(context).pop(true),
+        ),
+      ],
     );
   }
 }

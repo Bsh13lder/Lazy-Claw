@@ -10,7 +10,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
@@ -21,6 +20,9 @@ import 'assistant_router.dart';
 import 'assistant_settings_providers.dart';
 import 'assistant_state.dart';
 import 'cloud_turn_client.dart';
+import 'flutter_tts_speaker.dart';
+import 'sentence_streamer.dart';
+import 'speech_queue.dart';
 
 // Re-export the view-state types so existing call-sites that import the
 // controller keep resolving AssistantState/AssistantPhase/TurnSource.
@@ -38,7 +40,9 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     bool Function()? readConfirmCloud,
     bool Function()? readConsentGiven,
     void Function()? markConsentGiven,
+    Speaker? speaker,
   })  : _router = router,
+        _speech = SpeechQueue(speaker ?? FlutterTtsSpeaker()),
         _ensureCloud = ensureCloud,
         _ensureLocalModel = ensureLocalModel,
         _readConfirmCloud = readConfirmCloud,
@@ -61,8 +65,16 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   final bool Function()? _readConsentGiven;
   final void Function()? _markConsentGiven;
   final stt.SpeechToText _stt = stt.SpeechToText();
-  final FlutterTts _tts = FlutterTts();
+
+  /// Serialized TTS. Sentences are spoken as they are produced, so audio starts
+  /// about one sentence into the reply instead of after the whole generation.
+  final SpeechQueue _speech;
+  bool _speechReady = false;
   bool _sttReady = false;
+
+  /// Bumped per turn. A superseded turn's stream must not keep writing state,
+  /// or stopping and asking again flickers the previous answer back on screen.
+  int _turn = 0;
 
   /// Auto-endpoint timer: when no new words arrive for [_silenceWindow] while
   /// listening, finalize automatically — so the user never has to tap "Done"
@@ -89,7 +101,23 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
       'Plain speech only: no markdown, no asterisks, no emoji, no bullet points, '
       'no headings, no stage directions.\n'
       'If you do not know, say so in one sentence.\n'
-      "Reply in the user's language.";
+      "Reply in the user's language.\n"
+      'If the answer needs the internet, live data, or my tools, reply with '
+      'exactly $_sentinel and nothing else.';
+
+  /// Escalation marker. The contract is PREFIX-ONLY on purpose: a substring test
+  /// would throw away a perfectly good answer that merely mentions it.
+  static const String _sentinel = '[[NEEDS_CLOUD]]';
+
+  /// True while the buffer could still turn out to BE the sentinel, so speech
+  /// can be held back until that is ruled out — usually within a chunk or two.
+  static bool _sentinelStillPossible(String buffer) {
+    final head = buffer.trimLeft();
+    if (head.isEmpty) return true;
+    return head.length >= _sentinel.length
+        ? head.startsWith(_sentinel)
+        : _sentinel.startsWith(head);
+  }
 
   /// Strips roleplay actions (*smiles*), emojis and markdown so the spoken (and
   /// shown) reply is clean text — not "asterisk smiles asterisk".
@@ -102,7 +130,15 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
             unicode: true),
         '');
     t = t.replaceAll(RegExp(r'[#`_>]'), '');
-    return t.replaceAll(RegExp(r'[ \t]+'), ' ').replaceAll(RegExp(r' *\n *'), '\n').trim();
+    // Bullet markers survive the pair-matching regex above, so strip them too —
+    // otherwise "* item" is read aloud as "asterisk item".
+    t = t.replaceAll(RegExp(r'^[ \t]*[*\-•]\s+', multiLine: true), '');
+    t = t.replaceAll(RegExp(r'[ \t]+'), ' ').replaceAll(RegExp(r' *\n *'), '\n');
+    // Removing an inline marker leaves a space stranded before the punctuation
+    // ("Sure **thing**." -> "Sure thing ."), which both reads wrong on screen
+    // and makes the speech engine pause in the wrong place.
+    t = t.replaceAllMapped(RegExp(r'\s+([.,!?;:…])'), (m) => m.group(1)!);
+    return t.trim();
   }
 
   /// Tap the mic: start listening, or stop (finish talking) if already listening.
@@ -119,7 +155,8 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     // instant the assistant surfaces (Google-like), even on a cold wake while
     // the on-device model is still loading. The model is ensured in _ask, only
     // when (and if) a local answer is actually needed.
-    await _tts.stop();
+    // Silence any reply still playing; a new question supersedes the old one.
+    await _speech.stop();
     if (!_sttReady) {
       _sttReady = await _stt.initialize(
         onError: (e) => _fail("I didn't catch that"),
@@ -159,8 +196,22 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     });
   }
 
+  /// Barge-in: stop talking AND stop generating.
+  ///
+  /// Cancelling the engine matters as much as silencing the queue — without it
+  /// an abandoned turn keeps the CPU busy to its token limit and its stream
+  /// keeps overwriting `state.response`, so stopping and asking again would
+  /// flicker the previous answer back on screen. The turn counter makes the
+  /// abandoned stream a no-op even if it outlives this call.
   Future<void> stopSpeaking() async {
-    await _tts.stop();
+    _turn++;
+    await _speech.stop();
+    try {
+      await _engine.cancel();
+    } catch (_) {
+      // Best effort: a cancel that fails must not block the user.
+    }
+    if (!mounted) return;
     state = state.copyWith(phase: AssistantPhase.idle);
   }
 
@@ -202,60 +253,120 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
 
     state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
 
+    final turn = ++_turn;
+    await _ensureSpeechReady();
+    await _speech.stop(); // silence anything still playing from a previous turn
+    final epoch = _speech.epoch;
+
     final buf = StringBuffer();
+    final seg = SentenceStreamer();
     TurnSource source =
         route == AssistantRoute.cloud ? TurnSource.cloud : TurnSource.onDevice;
+
+    // Cloud tokens are final, so speech is armed immediately. The LOCAL branch
+    // starts DISARMED: sentences are held until the reply is proven not to be
+    // the escalation sentinel. That makes speaking-then-discarding structurally
+    // impossible — escalation is only reachable on a turn where nothing was
+    // ever spoken.
+    var armed = route == AssistantRoute.cloud;
+    final held = <String>[];
+
+    void emit(String chunk) {
+      if (turn != _turn) return; // superseded by a newer turn
+      buf.write(chunk);
+      if (!armed && !_sentinelStillPossible(buf.toString())) {
+        armed = true;
+        for (final h in held) {
+          _speech.add(h, epoch);
+        }
+        held.clear();
+      }
+      // Clean per EMITTED SENTENCE, never per chunk: the segmenter guarantees a
+      // sentence is a whole whitespace-delimited unit, so a markdown token can
+      // never be split across the boundary.
+      for (final sentence in seg.add(chunk)) {
+        final line = _clean(sentence);
+        if (line.isEmpty) continue;
+        if (armed) {
+          _speech.add(line, epoch);
+        } else {
+          held.add(line);
+        }
+      }
+      state = AssistantState(
+        phase: state.phase == AssistantPhase.speaking
+            ? AssistantPhase.speaking
+            : AssistantPhase.thinking,
+        transcript: prompt,
+        response: _clean(buf.toString()),
+        source: source,
+      );
+    }
+
     try {
       if (route == AssistantRoute.cloud) {
         final ok = (_ensureCloud == null) ? true : await _ensureCloud();
         if (!ok) {
-          // No session → degrade to local with an honest note.
           source = TurnSource.onDevice;
-          await _streamLocal(prompt, buf);
+          await _streamLocal(prompt, emit);
         } else {
-          await _streamCloud(prompt, buf);
+          await _streamCloud(prompt, emit);
         }
       } else {
-        // Ensure the on-device model is loaded before answering locally. The
-        // load was kicked off while the user was still speaking, so this is
-        // usually instant; it only ever waits on a true cold start.
         final localReady = (_ensureLocalModel == null)
             ? _engine.isLoaded
             : await _ensureLocalModel();
         if (!localReady) {
-          // Can't answer on-device. Escalate to the cloud when the mode allows;
-          // otherwise say so plainly rather than failing silently.
           final canCloud = _readMode() != AssistantBackendMode.onlyOnDevice &&
               !_readOnDeviceOnly();
           if (canCloud &&
               (_ensureCloud == null ? true : await _ensureCloud())) {
             source = TurnSource.cloud;
-            await _streamCloud(prompt, buf);
+            armed = true;
+            await _streamCloud(prompt, emit);
           } else {
-            buf.write(canCloud
+            final msg = canCloud
                 ? "I couldn't reach the server and my on-device model isn't "
                     "ready yet — give it a moment and try again."
                 : "I'm still getting my on-device model ready — give me a "
-                    "second and ask again.");
+                    "second and ask again.";
+            buf.write(msg);
+            armed = true;
+            _speech.add(msg, epoch);
           }
         } else {
-          await _streamLocal(prompt, buf);
-          // Optional secondary self-signal: local asked to escalate.
-          if (_readMode() == AssistantBackendMode.preferOnDevice &&
-              !_readOnDeviceOnly() &&
-              buf.toString().contains('[[NEEDS_CLOUD]]')) {
-            buf.clear();
-            final ok = (_ensureCloud == null) ? true : await _ensureCloud();
-            if (ok) {
-              source = TurnSource.cloud;
-              await _streamCloud(prompt, buf);
-            }
-          }
+          await _streamLocal(prompt, emit);
         }
       }
     } catch (e) {
-      _emitError(prompt, e, source);
+      if (turn == _turn) _emitError(prompt, e, source, buf);
       return;
+    }
+
+    if (turn != _turn) return;
+
+    // Escalate only if nothing was ever spoken. Prefix test, not `contains`.
+    if (!armed && buf.toString().trimLeft().startsWith(_sentinel)) {
+      held.clear();
+      await _speech.stop();
+      final ok = (_ensureCloud == null) ? true : await _ensureCloud();
+      if (ok) {
+        await _runHeldCloudTurn(prompt);
+        return;
+      }
+    }
+
+    // Speak whatever the segmenter still holds, and release anything that was
+    // held back but never escalated (a short reply with no terminator).
+    if (!armed) {
+      for (final h in held) {
+        _speech.add(h, epoch);
+      }
+    }
+    final tail = seg.flush();
+    if (tail != null) {
+      final line = _clean(tail);
+      if (line.isNotEmpty) _speech.add(line, epoch);
     }
 
     await _finishTurn(prompt, buf, source);
@@ -276,22 +387,71 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     await _runHeldCloudTurn(prompt);
   }
 
+  /// Builds a sink that buffers, segments, cleans and speaks as tokens arrive.
+  ///
+  /// Used by the consent paths, which are already past the escalation decision,
+  /// so speech is armed from the first token — no holding required.
+  void Function(String) _armedSink(
+    String prompt,
+    StringBuffer buf,
+    SentenceStreamer seg,
+    TurnSource source,
+    int turn,
+    int epoch,
+  ) {
+    return (String chunk) {
+      if (turn != _turn) return;
+      buf.write(chunk);
+      for (final sentence in seg.add(chunk)) {
+        final line = _clean(sentence);
+        if (line.isNotEmpty) _speech.add(line, epoch);
+      }
+      state = AssistantState(
+        phase: state.phase == AssistantPhase.speaking
+            ? AssistantPhase.speaking
+            : AssistantPhase.thinking,
+        transcript: prompt,
+        response: _clean(buf.toString()),
+        source: source,
+      );
+    };
+  }
+
+  /// Speaks the segmenter's remaining tail at end of stream.
+  void _flushTail(SentenceStreamer seg, int epoch) {
+    final tail = seg.flush();
+    if (tail == null) return;
+    final line = _clean(tail);
+    if (line.isNotEmpty) _speech.add(line, epoch);
+  }
+
   /// User declined the cloud hop. Keep it on-device with an honest spoken note.
   Future<void> denyCloud() async {
     final prompt = _takePendingPrompt();
     if (prompt == null) return;
 
     state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
+    final turn = ++_turn;
+    await _ensureSpeechReady();
+    await _speech.stop();
+    final epoch = _speech.epoch;
     final buf = StringBuffer();
+    final seg = SentenceStreamer();
     try {
-      await _streamLocal(prompt, buf);
+      await _streamLocal(
+          prompt, _armedSink(prompt, buf, seg, TurnSource.onDevice, turn, epoch));
     } catch (e) {
-      _emitError(prompt, e, TurnSource.onDevice);
+      if (turn == _turn) _emitError(prompt, e, TurnSource.onDevice, buf);
       return;
     }
+    if (turn != _turn) return;
     if (buf.isEmpty) {
-      buf.write(
-          "Okay, keeping this on your phone — I can't reach the internet for that.");
+      const note =
+          "Okay, keeping this on your phone — I can't reach the internet for that.";
+      buf.write(note);
+      _speech.add(note, epoch);
+    } else {
+      _flushTail(seg, epoch);
     }
     await _finishTurn(prompt, buf, TurnSource.onDevice);
   }
@@ -299,20 +459,28 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   /// Runs the approved cloud turn, degrading to local if there's no session.
   Future<void> _runHeldCloudTurn(String prompt) async {
     state = AssistantState(phase: AssistantPhase.thinking, transcript: prompt);
+    final turn = ++_turn;
+    await _ensureSpeechReady();
+    await _speech.stop();
+    final epoch = _speech.epoch;
     final buf = StringBuffer();
+    final seg = SentenceStreamer();
+    var source = TurnSource.cloud;
     try {
       final ok = (_ensureCloud == null) ? true : await _ensureCloud();
       if (!ok) {
-        await _streamLocal(prompt, buf); // no session → honest local fallback
-        await _finishTurn(prompt, buf, TurnSource.onDevice);
-        return;
+        source = TurnSource.onDevice; // no session → honest local fallback
+        await _streamLocal(prompt, _armedSink(prompt, buf, seg, source, turn, epoch));
+      } else {
+        await _streamCloud(prompt, _armedSink(prompt, buf, seg, source, turn, epoch));
       }
-      await _streamCloud(prompt, buf);
     } catch (e) {
-      _emitError(prompt, e, TurnSource.cloud);
+      if (turn == _turn) _emitError(prompt, e, source, buf);
       return;
     }
-    await _finishTurn(prompt, buf, TurnSource.cloud);
+    if (turn != _turn) return;
+    _flushTail(seg, epoch);
+    await _finishTurn(prompt, buf, source);
   }
 
   String? _takePendingPrompt() {
@@ -321,43 +489,34 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     return prompt;
   }
 
-  void _emitError(String prompt, Object e, TurnSource source) {
+  /// Keeps whatever was already produced. A cloud stream that fails after three
+  /// sentences used to show nothing at all.
+  void _emitError(String prompt, Object e, TurnSource source,
+      [StringBuffer? partial]) {
     state = AssistantState(
       phase: AssistantPhase.error,
       transcript: prompt,
+      response: partial == null ? '' : _clean(partial.toString()),
       error: 'Something went wrong: $e',
       source: source,
     );
   }
 
-  Future<void> _streamCloud(String prompt, StringBuffer buf) async {
+  Future<void> _streamCloud(String prompt, void Function(String) sink) async {
     await for (final tok in _cloud.streamTurn(prompt)) {
-      buf.write(tok);
-      state = AssistantState(
-        phase: AssistantPhase.thinking,
-        transcript: prompt,
-        response: buf.toString(),
-        source: TurnSource.cloud,
-      );
+      sink(tok);
     }
   }
 
-  /// Cleans, shows + speaks the buffered reply, then settles to idle.
+  /// Waits for the spoken queue to drain, then settles to idle.
+  ///
+  /// Speech already started mid-generation, so this no longer speaks anything —
+  /// it only decides when the turn is over.
   Future<void> _finishTurn(
       String prompt, StringBuffer buf, TurnSource source) async {
     final reply = _clean(buf.toString());
-    if (reply.isEmpty) {
-      state = AssistantState(
-          phase: AssistantPhase.idle, transcript: prompt, source: source);
-      return;
-    }
-    state = AssistantState(
-      phase: AssistantPhase.speaking,
-      transcript: prompt,
-      response: reply,
-      source: source,
-    );
-    await _speak(reply);
+    await _speech.idle;
+    if (!mounted) return;
     state = AssistantState(
       phase: AssistantPhase.idle,
       transcript: prompt,
@@ -366,28 +525,34 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     );
   }
 
-  Future<void> _streamLocal(String prompt, StringBuffer buf) async {
+  /// Lazily performs the one-time TTS setup. Doing it per utterance costs two
+  /// extra platform round trips per sentence once speech is chunked.
+  Future<void> _ensureSpeechReady() async {
+    if (_speechReady) return;
+    _speechReady = true;
+    _speech.onUtteranceStart = () {
+      if (!mounted) return;
+      // thinking -> speaking the moment audio actually starts. Generation may
+      // still be running; the phases now overlap by design.
+      if (state.phase == AssistantPhase.thinking) {
+        state = state.copyWith(phase: AssistantPhase.speaking);
+      }
+    };
+    try {
+      await _speech.init();
+    } catch (_) {
+      // A failed init must not block the turn; the queue degrades to unspoken.
+    }
+  }
+
+  Future<void> _streamLocal(String prompt, void Function(String) sink) async {
     await for (final tok in _engine.generate(
       [LocalLlmMessage.user(prompt)],
       systemPrompt: _system,
       options: LocalGenOptions.voice,
     )) {
-      buf.write(tok);
-      state = AssistantState(
-        phase: AssistantPhase.thinking,
-        transcript: prompt,
-        response: buf.toString(),
-        source: TurnSource.onDevice,
-      );
+      sink(tok);
     }
-  }
-
-  Future<void> _speak(String text) async {
-    try {
-      await _tts.awaitSpeakCompletion(true);
-      await _tts.setSpeechRate(0.5);
-      await _tts.speak(text);
-    } catch (_) {/* best effort */}
   }
 
   void _fail(String message) {
@@ -398,9 +563,11 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
 
   @override
   void dispose() {
+    _turn++;
     _silenceTimer?.cancel();
     _stt.cancel();
-    _tts.stop();
+    _pendingCloudPrompt = null;
+    unawaited(_speech.dispose());
     super.dispose();
   }
 }

@@ -80,7 +80,10 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
   /// listening, finalize automatically — so the user never has to tap "Done"
   /// (some Android recognizers don't honor `pauseFor`). Reset on every partial.
   Timer? _silenceTimer;
-  static const _silenceWindow = Duration(milliseconds: 1600);
+  // 900ms, and it is now the ONLY endpointer: the plugin's own pauseFor and
+  // its hidden 2s finalTimeout used to stack on top, giving a ~3.6s worst
+  // case against Google's ~0.5-0.8s.
+  static const _silenceWindow = Duration(milliseconds: 900);
 
   /// The utterance held while [AssistantPhase.awaitingCloudConsent] — the
   /// prompt the cloud turn will run once the user approves. Null otherwise.
@@ -160,7 +163,7 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     if (!_sttReady) {
       _sttReady = await _stt.initialize(
         onError: (e) => _fail("I didn't catch that"),
-        onStatus: (_) {},
+        onStatus: _onSttStatus,
       );
     }
     if (!_sttReady) {
@@ -168,15 +171,25 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
       return;
     }
     state = const AssistantState(phase: AssistantPhase.listening);
-    await _stt.listen(
-      onResult: _onSpeech,
-      listenOptions: stt.SpeechListenOptions(
-        partialResults: true,
-        cancelOnError: true,
-        listenFor: const Duration(seconds: 30),
-        pauseFor: const Duration(seconds: 2),
-      ),
-    );
+    try {
+      await _stt.listen(
+        onResult: _onSpeech,
+        listenOptions: stt.SpeechListenOptions(
+          partialResults: true,
+          cancelOnError: true,
+          listenFor: const Duration(seconds: 30),
+          // Ours is the only endpointer. The plugin's pauseFor always lost to
+          // the shorter silence window anyway, and having two made the real
+          // behaviour impossible to reason about.
+          pauseFor: const Duration(seconds: 30),
+        ),
+      );
+    } catch (e) {
+      // ListenFailedException when the platform refuses the mic — the wake
+      // handoff race, or an incoming call. Settle instead of hanging.
+      _fail("I couldn't open the microphone — try again");
+      return;
+    }
     _bumpSilenceTimer();
   }
 
@@ -213,6 +226,25 @@ class LazyAssistantController extends StateNotifier<AssistantState> {
     }
     if (!mounted) return;
     state = state.copyWith(phase: AssistantPhase.idle);
+  }
+
+  /// Endpoint signal from the recognizer.
+  ///
+  /// Without this a turn where nothing was heard never delivers a final result
+  /// — the plugin only notifies when a previous result exists, and listen()
+  /// clears it — so the phase stayed at `listening` with a dead mic until the
+  /// screen was popped. Salvages any partial rather than discarding it.
+  void _onSttStatus(String status) {
+    if (status != 'done' && status != 'notListening') return;
+    if (state.phase != AssistantPhase.listening) return; // a final already ran
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+    final heard = state.transcript.trim();
+    if (heard.isEmpty) {
+      state = const AssistantState();
+      return;
+    }
+    unawaited(_ask(heard));
   }
 
   void _onSpeech(SpeechRecognitionResult r) {

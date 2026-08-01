@@ -6,7 +6,6 @@ library;
 
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:speech_to_text/speech_to_text.dart';
 
 import 'miui_permissions.dart';
 import 'wake_service.dart';
@@ -17,12 +16,19 @@ class NativeWakeService implements WakeService {
 
   @override
   Future<bool> start() async {
-    // Vosk's AudioRecord needs RECORD_AUDIO. speech_to_text requests it on
-    // initialize(); reuse that instead of adding a permission dependency. Best
-    // effort — the assistant has usually already granted it.
+    // Vosk's AudioRecord needs RECORD_AUDIO, requested natively.
+    //
+    // This deliberately does NOT touch speech_to_text. That plugin is a process
+    // singleton whose initialize() early-returns without replacing its
+    // callbacks, so the FIRST caller owns onError/onStatus permanently. This
+    // service runs at boot, ahead of the assistant, so piggybacking on it here
+    // left the assistant's error handler wired to nothing — and every
+    // error_no_match / error_speech_timeout / error_busy vanished, leaving the
+    // UI stuck on "Listening…" with a dead microphone.
     try {
-      await SpeechToText().initialize(onError: (_) {}, onStatus: (_) {});
-    } catch (_) {/* fall through — native side surfaces a mic error if denied */}
+      final granted = await _ch.invokeMethod<bool>('micGranted') ?? false;
+      if (!granted) await _ch.invokeMethod<bool>('requestMic');
+    } catch (_) {/* fall through — native start() reports a mic denial */}
     try {
       return (await _ch.invokeMethod<bool>('start')) ?? false;
     } on PlatformException {

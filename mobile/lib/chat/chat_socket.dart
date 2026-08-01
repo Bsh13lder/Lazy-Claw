@@ -103,7 +103,16 @@ class ChatSocket {
   /// start the assistant turn only once the message actually went out.
   Stream<int> get outboxFlushed => _outboxFlushed.stream;
 
+  /// True while a live channel is open.
+  bool get isConnected => _isConnected;
+
   Future<void> connect(String wsUrl, {required String cookie}) async {
+    // Reconnecting to the SAME endpoint while already connected tore down a
+    // working channel and re-dialled it — 150-800ms of TCP+TLS+upgrade on every
+    // call, with in-flight frames at risk. The assistant calls this once per
+    // turn, so that cost was paid on every question. A genuine change of URL or
+    // cookie still reconnects.
+    if (_isConnected && _wsUrl == wsUrl && _cookie == cookie) return;
     _wsUrl = wsUrl;
     _cookie = cookie;
     _attempt = 0;

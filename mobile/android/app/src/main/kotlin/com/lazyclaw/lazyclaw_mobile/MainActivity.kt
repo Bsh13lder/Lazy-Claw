@@ -97,6 +97,30 @@ class MainActivity : FlutterActivity() {
                     }
                     "isRunning" -> result.success(WakeWordService.isRunning)
                     "modelReady" -> result.success(WakeWordService.modelReady(this))
+                    // Requests RECORD_AUDIO natively.
+                    //
+                    // The Dart side used to trigger this by calling
+                    // SpeechToText().initialize() purely for its permission
+                    // prompt — but that plugin is a process singleton whose
+                    // initialize() early-returns without replacing callbacks, so
+                    // whoever calls it FIRST owns onError/onStatus forever. The
+                    // wake service ran first at boot, which silently left the
+                    // assistant's error handler unwired and any recognizer error
+                    // stuck on "Listening..." with a dead mic.
+                    //
+                    // Fire-and-forget: the grant arrives asynchronously and the
+                    // caller re-checks micGranted, so there is no result to wait
+                    // for here.
+                    "requestMic" -> {
+                        try {
+                            androidx.core.app.ActivityCompat.requestPermissions(
+                                this, arrayOf(Manifest.permission.RECORD_AUDIO), 4201
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
                     "micGranted" -> result.success(
                         ContextCompat.checkSelfPermission(
                             this, Manifest.permission.RECORD_AUDIO,

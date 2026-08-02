@@ -360,6 +360,7 @@ class _ProjectBucket extends StatelessWidget {
                       children: [
                         for (int i = 0; i < ordered.length; i++) ...[
                           AgentTaskBadged(
+                            key: ValueKey('project-task-${ordered[i].id}'),
                             task: ordered[i],
                             child: ConnectedTaskRow(
                               task: ordered[i],

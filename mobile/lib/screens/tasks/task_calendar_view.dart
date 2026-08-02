@@ -194,6 +194,7 @@ class TaskCalendarView extends StatelessWidget {
         else
           for (int i = 0; i < dayTasks.length; i++) ...[
             TaskRow(
+              key: ValueKey('calendar-task-${dayTasks[i].id}'),
               task: dayTasks[i],
               pendingSync: dirtyIds.contains(dayTasks[i].id),
               onComplete: () => onComplete(dayTasks[i].id),

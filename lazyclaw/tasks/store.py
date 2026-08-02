@@ -1052,6 +1052,11 @@ async def update_task(
     if not fields:
         return False
 
+    if "comments" in fields:
+        raise ValueError(
+            "comments cannot be updated via update_task — use add_comment/delete_comment"
+        )
+
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
     params: list = []

@@ -35,3 +35,9 @@ async def test_comments_column_exists_and_defaults_null(cfg) -> None:
     fetched = await task_store.get_task(cfg, "u1", task["id"])
     assert "comments" in fetched
     assert fetched["comments"] is None
+
+
+async def test_update_task_rejects_comments_field(cfg) -> None:
+    task = await task_store.create_task(cfg, "u1", "guarded")
+    with pytest.raises(ValueError):
+        await task_store.update_task(cfg, "u1", task["id"], comments="[]")

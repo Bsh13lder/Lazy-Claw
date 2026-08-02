@@ -23,8 +23,11 @@ from lazyclaw.tasks.ai_parse import ai_parse_task
 from lazyclaw.tasks.nl_time import parse_full as regex_parse_full
 from lazyclaw.tasks.pre_reminders import resolve_pre_reminders
 from lazyclaw.tasks.store import (
+    CommentLimitReached,
+    add_comment,
     complete_task,
     create_task,
+    delete_comment,
     delete_task,
     get_task,
     get_task_changes,
@@ -51,6 +54,14 @@ class StepDraft(BaseModel):
     id: str | None = None
     title: str
     done: bool = False
+
+
+class CommentBody(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay
+    # (same convention as CreateTaskBody.id).
+    id: str | None = Field(default=None, max_length=64)
+    text: str = Field(min_length=1, max_length=2000)
+    subtask_id: str | None = Field(default=None, max_length=64)
 
 
 class CreateTaskBody(BaseModel):
@@ -515,6 +526,46 @@ async def toggle_step_route(
         )
         raise HTTPException(status_code=404, detail="Task or step not found")
     return {"task": task}
+
+
+# ---------------------------------------------------------------------------
+# Comments
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{task_id}/comments")
+async def add_comment_route(
+    task_id: str,
+    body: CommentBody,
+    user: User = Depends(get_current_user),
+):
+    """Append one user-authored comment to a task (or one of its subtasks)."""
+    try:
+        entry = await add_comment(
+            _config, user.id, task_id,
+            text=body.text, author="user",
+            subtask_id=body.subtask_id, comment_id=body.id,
+        )
+    except CommentLimitReached as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"comment": entry}
+
+
+@router.delete("/{task_id}/comments/{comment_id}")
+async def delete_comment_route(
+    task_id: str,
+    comment_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Remove one comment by id. Idempotent: an unknown id returns deleted=false."""
+    result = await delete_comment(_config, user.id, task_id, comment_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"deleted": result}
 
 
 # ---------------------------------------------------------------------------

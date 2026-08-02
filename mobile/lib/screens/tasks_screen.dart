@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -11,6 +13,7 @@ import '../models/subtask.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
+import '../providers/ui_prefs_provider.dart';
 import 'expenses/add_expense_sheet.dart';
 import 'notes/notes_body.dart';
 import 'settings/settings_prefs.dart';
@@ -173,6 +176,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// list-only path so a list-only screen never builds the budgets provider).
   bool _budgetsRequested = false;
 
+  /// The Projects view's persisted expanded-bucket names. Empty (all
+  /// collapsed) until the async pref load below completes — the view renders
+  /// fine meanwhile since collapsed-by-default is the pre-existing behavior.
+  Set<String> _projectsExpanded = const <String>{};
+
+  /// The Projects view's persisted "hide completed" toggle.
+  bool _projectsHideCompleted = false;
+
   @override
   void initState() {
     super.initState();
@@ -184,9 +195,69 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // The list (tap-the-chip project picker + Projects view) all need the
     // project list, so load the budgets store up front (cheap, offline-first).
     _ensureBudgetsLoaded();
+    // Restore the Projects view's persisted expansion + hide-completed state
+    // (client-local, see UiPrefsDao) — a single async read, applied once.
+    unawaited(_loadProjectsPrefs());
     // NOTE: the cold-start deep-link replay lives in [build] via
     // [drainPendingAction] (not a one-shot here) so it survives whichever frame
     // this screen first becomes visible on — see _myActions usage below.
+  }
+
+  /// One-shot restore of the Projects view's persisted UI state. Best-effort:
+  /// this is client-local convenience state, not user data, so a failure here
+  /// (a DB hiccup, or a test host that never overrode [appDatabaseProvider])
+  /// must never block the rest of the Tasks screen from rendering — it just
+  /// falls back to the collapsed/visible defaults already set above.
+  Future<void> _loadProjectsPrefs() async {
+    try {
+      final prefs = ref.read(uiPrefsDaoProvider);
+      final expanded = await prefs.getStringSet(kPrefProjectsExpanded);
+      final hideCompleted = await prefs.getBool(kPrefProjectsHideCompleted);
+      if (!mounted) return;
+      setState(() {
+        _projectsExpanded = expanded;
+        _projectsHideCompleted = hideCompleted;
+      });
+    } catch (e) {
+      debugPrint('TasksScreen._loadProjectsPrefs failed: $e');
+    }
+  }
+
+  /// Persists the Projects view's expanded-bucket set as it changes, and
+  /// keeps the local copy in sync so a view remount (leaving and returning to
+  /// Projects) restores it without waiting on another async DB read.
+  void _onProjectsExpandedChanged(Set<String> expanded) {
+    setState(() => _projectsExpanded = expanded);
+    unawaited(
+      _persistProjectsPref(
+        () => ref
+            .read(uiPrefsDaoProvider)
+            .setStringSet(kPrefProjectsExpanded, expanded),
+      ),
+    );
+  }
+
+  /// Persists the Projects view's hide-completed toggle, mirroring
+  /// [_onProjectsExpandedChanged].
+  void _onProjectsHideCompletedChanged(bool value) {
+    setState(() => _projectsHideCompleted = value);
+    unawaited(
+      _persistProjectsPref(
+        () => ref
+            .read(uiPrefsDaoProvider)
+            .setBool(kPrefProjectsHideCompleted, value),
+      ),
+    );
+  }
+
+  /// Runs a fire-and-forget prefs write, swallowing (and logging) any
+  /// failure — see [_loadProjectsPrefs] for why this stays best-effort.
+  Future<void> _persistProjectsPref(Future<void> Function() write) async {
+    try {
+      await write();
+    } catch (e) {
+      debugPrint('TasksScreen: persisting a Projects-view pref failed: $e');
+    }
   }
 
   /// The deep-link actions this screen owns (Tasks + the nested Notes segment).
@@ -250,7 +321,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       defaultLead: _defaultLead,
     );
     if (result == null || !mounted) return;
-    await ref.read(tasksProvider.notifier).addTask(
+    await ref
+        .read(tasksProvider.notifier)
+        .addTask(
           result.title,
           priority: result.priority,
           dueDate: result.dueDate,
@@ -272,14 +345,15 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       context,
       title: 'New Project',
       builder: (_) => AddProjectSheet(
-        onSubmit: (name, budget, color, startDate, dueDate) =>
-            ref.read(budgetsProvider.notifier).createProject(
-                  name,
-                  budget: budget,
-                  color: color,
-                  startDate: startDate,
-                  dueDate: dueDate,
-                ),
+        onSubmit: (name, budget, color, startDate, dueDate) => ref
+            .read(budgetsProvider.notifier)
+            .createProject(
+              name,
+              budget: budget,
+              color: color,
+              startDate: startDate,
+              dueDate: dueDate,
+            ),
       ),
     );
   }
@@ -343,8 +417,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             action: SnackBarAction(
               label: 'Dismiss',
               textColor: AppColors.accent,
-              onPressed: () =>
-                  ref.read(tasksProvider.notifier).clearError(),
+              onPressed: () => ref.read(tasksProvider.notifier).clearError(),
             ),
           ),
         );
@@ -581,18 +654,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   }
 
   /// Open the Smart Fast Reschedule sheet for [task] (overdue cards route here).
-  void _openReschedule(Task task) =>
-      showRescheduleSheet(context, ref, task);
+  void _openReschedule(Task task) => showRescheduleSheet(context, ref, task);
 
   /// Open the full detail sheet for [task], handing it the project list so its
   /// project picker is populated.
   void _openDetail(Task task, List<Project> projects) => showTaskDetailSheet(
-        context,
-        ref,
-        task,
-        projects: projects,
-        defaultLead: _defaultLead,
-      );
+    context,
+    ref,
+    task,
+    projects: projects,
+    defaultLead: _defaultLead,
+  );
 
   /// The Projects view: tasks grouped under their project (Money-tab projects +
   /// a first-class Inbox bucket), each bucket expandable to its tasks.
@@ -620,6 +692,12 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     return LzRefresh(
       onRefresh: _refresh,
       child: TasksProjectView(
+        // Stable across rebuilds (never derived from mutable state) so this
+        // view's internal expand-state survives an unrelated screen rebuild
+        // while Projects stays the active view. Losing it only on a genuine
+        // remount (switching away and back) is fine — that's restored from
+        // [_projectsExpanded] below.
+        key: const ValueKey('tasks-project-view'),
         tasks: visibleTasks,
         projects: projects,
         dirtyIds: state.dirtyIds,
@@ -632,6 +710,10 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         onCategoryChanged: _commitCategory,
         onSubtasksChanged: _commitSubtasks,
         onAddProject: _showAddProject,
+        initialExpanded: _projectsExpanded,
+        onExpandedChanged: _onProjectsExpandedChanged,
+        hideCompleted: _projectsHideCompleted,
+        onHideCompletedChanged: _onProjectsHideCompletedChanged,
       ),
     );
   }
@@ -715,8 +797,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               projects: projects,
               onComplete: (id) =>
                   ref.read(tasksProvider.notifier).completeTask(id),
-              onDelete: (id) =>
-                  ref.read(tasksProvider.notifier).deleteTask(id),
+              onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
               onOpen: (task) => _openDetail(task, projects),
               onRenameTitle: _commitTitle,
               onPriorityChanged: _commitPriority,
@@ -790,12 +871,14 @@ class _TaskSectionState extends State<_TaskSection> {
   /// Wrap [child] in a subtle, index-staggered fade+slide entrance — but only
   /// until [_entered] flips. The flag is flipped by the LAST row's completion
   /// so earlier rows are never cut short mid-animation.
-  Widget _entrance({required int index, required int last, required Widget child}) {
+  Widget _entrance({
+    required int index,
+    required int last,
+    required Widget child,
+  }) {
     if (_entered) return child;
     return child
-        .animate(
-          onComplete: index == last ? (_) => _markEntered() : null,
-        )
+        .animate(onComplete: index == last ? (_) => _markEntered() : null)
         .fadeIn(
           duration: AppMotion.base,
           delay: Duration(milliseconds: 28 * index),

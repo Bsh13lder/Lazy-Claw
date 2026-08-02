@@ -39,6 +39,10 @@ class TasksProjectView extends StatefulWidget {
     this.onCategoryChanged,
     this.onSubtasksChanged,
     this.onAddProject,
+    this.initialExpanded = const <String>{},
+    this.onExpandedChanged,
+    this.hideCompleted = false,
+    this.onHideCompletedChanged,
   });
 
   final List<Task> tasks;
@@ -58,19 +62,39 @@ class TasksProjectView extends StatefulWidget {
   /// section-header "+" all route here). Null hides those affordances.
   final VoidCallback? onAddProject;
 
+  /// Bucket names expanded on first build — the caller's persisted state
+  /// (restored via [UiPrefsDao] one level up). Defaults to "all collapsed",
+  /// matching prior behavior for callers that don't persist anything.
+  final Set<String> initialExpanded;
+
+  /// Fired with the full updated expanded-set whenever a bucket is toggled,
+  /// so the caller can persist it. Null = ephemeral (no persistence).
+  final ValueChanged<Set<String>>? onExpandedChanged;
+
+  /// When true, completed tasks are hidden from every expanded bucket's body
+  /// (the header badge still shows the full open/total count).
+  final bool hideCompleted;
+
+  /// Fired with the new value when the eye toggle is tapped. Null hides the
+  /// toggle affordance entirely.
+  final ValueChanged<bool>? onHideCompletedChanged;
+
   @override
   State<TasksProjectView> createState() => _TasksProjectViewState();
 }
 
 class _TasksProjectViewState extends State<TasksProjectView> {
-  /// Names of the currently-expanded project buckets. Collapsed by default.
-  final Set<String> _expanded = <String>{};
+  /// Names of the currently-expanded project buckets, seeded from the
+  /// caller's persisted set. A fresh copy — never mutates [widget.initialExpanded]
+  /// itself.
+  late final Set<String> _expanded = {...widget.initialExpanded};
 
   void _toggle(String name) {
     HapticFeedback.selectionClick();
     setState(() {
       if (!_expanded.remove(name)) _expanded.add(name);
     });
+    widget.onExpandedChanged?.call({..._expanded});
   }
 
   @override
@@ -103,17 +127,7 @@ class _TasksProjectViewState extends State<TasksProjectView> {
         if (split.hasRealProjects || widget.tasks.isNotEmpty)
           LzSection(
             title: 'Projects',
-            action: widget.onAddProject == null
-                ? null
-                : GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: widget.onAddProject,
-                    child: Icon(
-                      Icons.add_circle_outline,
-                      size: 20,
-                      color: AppColors.accent,
-                    ),
-                  ),
+            action: _projectsAction(),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -126,6 +140,7 @@ class _TasksProjectViewState extends State<TasksProjectView> {
                     tasks: split.inbox,
                     expanded: _expanded.contains(kInboxProjectLabel),
                     onToggle: () => _toggle(kInboxProjectLabel),
+                    hideCompleted: widget.hideCompleted,
                     dirtyIds: widget.dirtyIds,
                     projects: widget.projects,
                     onComplete: widget.onComplete,
@@ -147,6 +162,7 @@ class _TasksProjectViewState extends State<TasksProjectView> {
                       tasks: bucket.tasks,
                       expanded: _expanded.contains(bucket.name),
                       onToggle: () => _toggle(bucket.name),
+                      hideCompleted: widget.hideCompleted,
                       dirtyIds: widget.dirtyIds,
                       projects: widget.projects,
                       onComplete: widget.onComplete,
@@ -180,6 +196,7 @@ class _TasksProjectViewState extends State<TasksProjectView> {
                       tasks: bucket.tasks,
                       expanded: _expanded.contains(bucket.name),
                       onToggle: () => _toggle(bucket.name),
+                      hideCompleted: widget.hideCompleted,
                       dirtyIds: widget.dirtyIds,
                       projects: widget.projects,
                       onComplete: widget.onComplete,
@@ -200,11 +217,53 @@ class _TasksProjectViewState extends State<TasksProjectView> {
     );
   }
 
+  /// The "Projects" section header's trailing action(s): the hide-completed
+  /// eye toggle and/or the add-project button, whichever are wired up. Both
+  /// share the row when both callbacks are present.
+  Widget? _projectsAction() {
+    final actions = <Widget>[
+      if (widget.onHideCompletedChanged != null)
+        GestureDetector(
+          key: const ValueKey('projects-hide-completed-toggle'),
+          behavior: HitTestBehavior.opaque,
+          onTap: () => widget.onHideCompletedChanged!(!widget.hideCompleted),
+          child: Icon(
+            widget.hideCompleted
+                ? Icons.visibility_off_outlined
+                : Icons.visibility_outlined,
+            size: 20,
+            color: AppColors.textMuted,
+          ),
+        ),
+      if (widget.onAddProject != null)
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onAddProject,
+          child: Icon(
+            Icons.add_circle_outline,
+            size: 20,
+            color: AppColors.accent,
+          ),
+        ),
+    ];
+    if (actions.isEmpty) return null;
+    if (actions.length == 1) return actions.single;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (int i = 0; i < actions.length; i++) ...[
+          if (i > 0) const SizedBox(width: AppSpacing.md),
+          actions[i],
+        ],
+      ],
+    );
+  }
+
   /// Bottom-spaces a bucket so consecutive cards don't touch.
   Widget _bucketPadding(Widget child) => Padding(
-        padding: const EdgeInsets.only(bottom: AppSpacing.md),
-        child: child,
-      );
+    padding: const EdgeInsets.only(bottom: AppSpacing.md),
+    child: child,
+  );
 }
 
 /// One bucket: a tappable header that expands to reveal the bucket's tasks. The
@@ -219,6 +278,7 @@ class _ProjectBucket extends StatelessWidget {
     required this.tasks,
     required this.expanded,
     required this.onToggle,
+    required this.hideCompleted,
     required this.dirtyIds,
     required this.projects,
     required this.onComplete,
@@ -240,6 +300,10 @@ class _ProjectBucket extends StatelessWidget {
   final List<Task> tasks;
   final bool expanded;
   final VoidCallback onToggle;
+
+  /// When true, done tasks are filtered out of the expanded body below — the
+  /// header badge (computed from the full [tasks] list) is unaffected.
+  final bool hideCompleted;
   final Set<String> dirtyIds;
   final List<Project> projects;
 
@@ -281,6 +345,14 @@ class _ProjectBucket extends StatelessWidget {
     final counts = projectGroupCounts(tasks);
     final allDone = counts.total > 0 && counts.open == 0;
     final ordered = sortDoneLast(tasks);
+    // The badge above always reflects the FULL bucket regardless of this
+    // filter — only the rendered rows are trimmed.
+    final visible = hideCompleted
+        ? [
+            for (final t in ordered)
+              if (!t.isDone) t,
+          ]
+        : ordered;
 
     return LzCard(
       padding: EdgeInsets.zero,
@@ -345,26 +417,31 @@ class _ProjectBucket extends StatelessWidget {
                 AppSpacing.md,
                 AppSpacing.md,
               ),
-              child: tasks.isEmpty
+              child: visible.isEmpty
                   ? Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        _isInbox
-                            ? 'No loose tasks'
-                            : 'No tasks in this project',
-                        style: AppText.caption
-                            .copyWith(color: AppColors.textMuted),
+                        tasks.isEmpty
+                            ? (_isInbox
+                                  ? 'No loose tasks'
+                                  : 'No tasks in this project')
+                            // Tasks exist but hideCompleted filtered them all
+                            // out — distinguish from the true-empty message.
+                            : 'All done — nothing to show',
+                        style: AppText.caption.copyWith(
+                          color: AppColors.textMuted,
+                        ),
                       ),
                     )
                   : Column(
                       children: [
-                        for (int i = 0; i < ordered.length; i++) ...[
+                        for (int i = 0; i < visible.length; i++) ...[
                           AgentTaskBadged(
-                            key: ValueKey('project-task-${ordered[i].id}'),
-                            task: ordered[i],
+                            key: ValueKey('project-task-${visible[i].id}'),
+                            task: visible[i],
                             child: ConnectedTaskRow(
-                              task: ordered[i],
-                              pendingSync: dirtyIds.contains(ordered[i].id),
+                              task: visible[i],
+                              pendingSync: dirtyIds.contains(visible[i].id),
                               projects: projects,
                               onComplete: onComplete,
                               onDelete: onDelete,
@@ -376,7 +453,7 @@ class _ProjectBucket extends StatelessWidget {
                               onSubtasksChanged: onSubtasksChanged,
                             ),
                           ),
-                          if (i < ordered.length - 1)
+                          if (i < visible.length - 1)
                             const SizedBox(height: AppSpacing.sm),
                         ],
                       ],

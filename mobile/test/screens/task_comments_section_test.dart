@@ -249,6 +249,68 @@ void main() {
     expect(field.controller!.text, '[docs](https://a.io)');
   });
 
+  testWidgets(
+    'a non-overflowing insert splices at the cursor position, not the end',
+    (tester) async {
+      await tester.pumpWidget(
+        host(
+          comments: const [],
+          onAdd: (_) {},
+          onDelete: (_) {},
+          onAddLink: () async => '[x](y)',
+        ),
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('comment-input')),
+        'before after',
+      );
+      await tester.pump();
+
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('comment-input')),
+      );
+      // Place the cursor right after "before" (offset 6), mid-string.
+      field.controller!.selection = const TextSelection.collapsed(offset: 6);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('comment-add-link')));
+      await tester.pumpAndSettle();
+
+      final updated = tester.widget<TextField>(
+        find.byKey(const Key('comment-input')),
+      );
+      expect(updated.controller!.text, 'before[x](y) after');
+    },
+  );
+
+  testWidgets(
+    'an overflowing splice is clamped: field text unchanged + snackbar shown',
+    (tester) async {
+      await tester.pumpWidget(
+        host(
+          comments: const [],
+          onAdd: (_) {},
+          onDelete: (_) {},
+          onAddLink: () async => 'x' * 50,
+        ),
+      );
+
+      final seed = 'a' * 1990;
+      await tester.enterText(find.byKey(const Key('comment-input')), seed);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('comment-add-link')));
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('comment-input')),
+      );
+      expect(field.controller!.text, seed);
+      expect(find.text('Comment limit is 2000 characters.'), findsOneWidget);
+    },
+  );
+
   group('showSubtaskCommentsSheet', () {
     // Regression test for the add-then-delete-in-same-session bug: the sheet
     // used to synthesize its OWN local id for an optimistically-added comment
@@ -263,6 +325,7 @@ void main() {
       required Future<TaskComment?> Function(String) onAdd,
       required ValueChanged<String> onDelete,
       List<TaskComment> comments = const [],
+      Future<String?> Function()? onAddLink,
     }) {
       return MaterialApp(
         theme: buildAppTheme(),
@@ -275,6 +338,7 @@ void main() {
                 comments: comments,
                 onAdd: onAdd,
                 onDelete: onDelete,
+                onAddLink: onAddLink,
               ),
               child: const Text('open'),
             ),
@@ -282,6 +346,24 @@ void main() {
         ),
       );
     }
+
+    testWidgets(
+      'the sheet body built WITH onAddLink shows the add-link icon',
+      (tester) async {
+        await tester.pumpWidget(
+          sheetHost(
+            onAdd: (_) async => null,
+            onDelete: (_) {},
+            onAddLink: () async => '[docs](https://a.io)',
+          ),
+        );
+
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+
+        expect(find.byIcon(Icons.add_link), findsOneWidget);
+      },
+    );
 
     testWidgets(
       'add then delete in the same session deletes the PERSISTED id, not a '

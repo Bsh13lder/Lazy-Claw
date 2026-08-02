@@ -72,6 +72,7 @@ Future<void> showSubtaskCommentsSheet(
   required List<TaskComment> comments,
   required Future<TaskComment?> Function(String text) onAdd,
   required ValueChanged<String> onDelete,
+  Future<String?> Function()? onAddLink,
 }) {
   return LzBottomSheet.show<void>(
     context,
@@ -80,6 +81,7 @@ Future<void> showSubtaskCommentsSheet(
       comments: comments,
       onAdd: onAdd,
       onDelete: onDelete,
+      onAddLink: onAddLink,
     ),
   );
 }
@@ -101,11 +103,13 @@ class _SubtaskCommentsSheetBody extends StatefulWidget {
     required this.comments,
     required this.onAdd,
     required this.onDelete,
+    this.onAddLink,
   });
 
   final List<TaskComment> comments;
   final Future<TaskComment?> Function(String text) onAdd;
   final ValueChanged<String> onDelete;
+  final Future<String?> Function()? onAddLink;
 
   @override
   State<_SubtaskCommentsSheetBody> createState() =>
@@ -142,8 +146,12 @@ class _SubtaskCommentsSheetBodyState extends State<_SubtaskCommentsSheetBody> {
   }
 
   @override
-  Widget build(BuildContext context) =>
-      _CommentsBody(comments: _comments, onAdd: _add, onDelete: _delete);
+  Widget build(BuildContext context) => _CommentsBody(
+    comments: _comments,
+    onAdd: _add,
+    onDelete: _delete,
+    onAddLink: widget.onAddLink,
+  );
 }
 
 /// The shared thread-list + composer body, shown as-is (no filtering) — the
@@ -276,6 +284,13 @@ class _CommentInputRowState extends State<_CommentInputRow> {
   /// appending at the end when the selection is invalid (field not yet
   /// focused, so the controller's selection is still the default
   /// collapsed-at--1).
+  ///
+  /// Clamped at [kMaxCommentChars]: this splice bypasses the field's
+  /// `maxLength` input formatter (that only guards typed input, not
+  /// programmatic `TextEditingController.value` assignment), so an insert
+  /// that would push the field over the cap is refused outright — text left
+  /// untouched, refusal surfaced via a snackbar rather than silently
+  /// truncating the just-pasted link.
   Future<void> _addLink() async {
     final onAddLink = widget.onAddLink;
     if (onAddLink == null) return;
@@ -286,6 +301,12 @@ class _CommentInputRowState extends State<_CommentInputRow> {
     final start = selection.isValid ? selection.start : text.length;
     final end = selection.isValid ? selection.end : text.length;
     final nextText = text.replaceRange(start, end, result);
+    if (nextText.length > kMaxCommentChars) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Comment limit is 2000 characters.')),
+      );
+      return;
+    }
     setState(() {
       _ctrl.value = TextEditingValue(
         text: nextText,

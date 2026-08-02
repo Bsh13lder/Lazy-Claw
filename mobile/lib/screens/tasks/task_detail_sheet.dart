@@ -894,6 +894,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               onDelete: (cid) => ref
                   .read(tasksProvider.notifier)
                   .deleteComment(widget.task.id, cid),
+              onAddLink: () => showAddLinkDialog(context),
             ),
           ),
 

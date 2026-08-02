@@ -114,6 +114,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           dueDate: result.dueDate,
           category: result.category,
           reminderAt: result.reminderAt,
+          recurring: result.recurring,
+          recurUntil: result.recurUntil,
           description: result.description,
           steps: result.steps,
         );

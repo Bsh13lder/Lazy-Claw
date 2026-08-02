@@ -105,11 +105,21 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
   bool _submitting = false;
 
+  /// The projects offered by the PROJECT chip's picker and the `/` suggestion
+  /// strip. Seeded from [widget.projects] (a construction-time snapshot) but
+  /// then kept live: a project created FROM INSIDE this sheet (via "＋ New
+  /// project" or the strip's "Create project" row) is refreshed into this
+  /// list from [budgetsProvider] right after the create succeeds, so a
+  /// re-opened picker (or a re-typed `/token`) sees it immediately instead of
+  /// the sheet acting on stale data and inviting a duplicate create.
+  late List<Project> _projects;
+
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
 
   @override
   void initState() {
     super.initState();
+    _projects = widget.projects;
     // A caller-supplied date (calendar day-tap) pre-selects the due date. We
     // mark the field as touched so it wins over any parsed default and stays
     // put until the user explicitly changes it.
@@ -178,10 +188,14 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       ? (_manualRecurrence ?? Recurrence.none)
       : (_parsed.recurrence ?? Recurrence.none);
 
+  // The project term is excluded once `_categoryTouched` (its chip is
+  // suppressed below — see the SMART DETECTED row) so this doesn't show an
+  // empty "SMART DETECTED" header when the parsed project is the only
+  // detection.
   bool get _hasDetection =>
       _parsed.dueDate != null ||
       _parsed.priority != null ||
-      _parsed.project != null ||
+      (_parsed.project != null && !_categoryTouched) ||
       _parsed.recurrence != null;
 
   /// Combine a date-only [day] string with an optional [time] into the final
@@ -334,7 +348,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
           if (_parsed.project != null && _titleFocusNode.hasFocus)
             _ProjectSuggestionStrip(
               token: _parsed.project!,
-              projects: widget.projects,
+              projects: _projects,
               onSelect: _applyProjectSuggestion,
               onCreate: _createProjectFromSuggestion,
             ),
@@ -388,7 +402,12 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
                     color: _priorityColor(_parsed.priority!),
                     dense: true,
                   ),
-                if (_parsed.project != null)
+                // Suppressed once a manual PROJECT-chip pick has touched the
+                // category — otherwise a picked "Casa" sits next to a stale
+                // `#Groceries` parsed from a since-superseded `/token`, and
+                // the manual pick (which is what actually wins on submit)
+                // reads as contradicted.
+                if (_parsed.project != null && !_categoryTouched)
                   LzChip(
                     label: '#${_parsed.project!}',
                     icon: Icons.folder_outlined,
@@ -462,7 +481,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
           const SizedBox(height: AppSpacing.sm),
           ProjectChip(
             fieldKey: const Key('add-task-project'),
-            projects: widget.projects,
+            projects: _projects,
             category: _effectiveCategory,
             onTap: _openProjectPicker,
           ),
@@ -728,7 +747,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   Future<void> _openProjectPicker() async {
     final result = await showProjectPicker(
       context,
-      projects: widget.projects,
+      projects: _projects,
       current: _effectiveCategory,
       allowCreate: true,
     );
@@ -763,6 +782,11 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             setState(() {
               _category = name;
               _categoryTouched = true;
+              // Refresh the live list so a re-opened picker (or the `/`
+              // strip) sees the project we just created instead of acting on
+              // the construction-time snapshot and offering to create it
+              // again.
+              _projects = ref.read(budgetsProvider).projects;
             });
           }
           return ok;
@@ -780,9 +804,17 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     final next = removeProjectToken(_titleController.text);
     final reparsed = parseSmartAdd(next);
     setState(() {
-      _titleController
-        ..text = next
-        ..tokens = reparsed.tokens;
+      // Assign via `.value` with an explicit collapsed selection rather than
+      // the bare `.text =` setter: the latter forces
+      // `selection: TextSelection.collapsed(offset: -1)`, an invalid caret
+      // that (absent Flutter's focus-based self-heal) leaves the next
+      // keystroke landing at index 0. Same pattern as
+      // task_comments_section.dart's `_addLink`.
+      _titleController.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: next.length),
+      );
+      _titleController.tokens = reparsed.tokens;
       _parsed = reparsed;
       _category = projectName;
       _categoryTouched = true;
@@ -796,6 +828,10 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   Future<void> _createProjectFromSuggestion(String token) async {
     final ok = await ref.read(budgetsProvider.notifier).createProject(token);
     if (ok && mounted) {
+      // Refresh the live list first so a re-opened picker (or a re-typed
+      // `/token`) sees the project we just created — [_applyProjectSuggestion]
+      // below fires the `setState` that rebuilds with it.
+      _projects = ref.read(budgetsProvider).projects;
       _applyProjectSuggestion(token);
     }
   }
@@ -906,9 +942,12 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
 /// Live `/token` project suggestions, shown under the title field while the
 /// user is mid-token (see [_AddTaskSheetState] wiring). Rows are the
-/// case-insensitive SUBSTRING matches over [projects] (max 4), plus a
-/// trailing "Create project '{token}'" row when no project name EXACTLY
-/// matches the typed token. Bounded-height inline dropdown, matching the
+/// case-insensitive SUBSTRING matches over [projects] (max 4, exact match
+/// first, then prefix, then substring — so an exact match can't be pushed
+/// outside the visible window by source-order while [hasExactMatch] still
+/// hides the create row), deduped by lowercased name, plus a trailing
+/// "Create project '{token}'" row when no project name EXACTLY matches the
+/// typed token. Bounded-height inline dropdown, matching the
 /// [SheetFormulaHelper]-style autocomplete pattern used elsewhere
 /// (sheet_formula_bar.dart).
 class _ProjectSuggestionStrip extends StatelessWidget {
@@ -932,11 +971,29 @@ class _ProjectSuggestionStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final needle = token.toLowerCase();
-    final matches = projects
-        .where((p) => p.name.toLowerCase().contains(needle))
-        .take(4)
-        .toList();
-    final hasExactMatch = projects.any((p) => p.name.toLowerCase() == needle);
+    // Bucket by match strength (exact / prefix / substring) instead of a
+    // single source-order filter, then dedupe by lowercased name — a
+    // duplicate name would otherwise produce two rows sharing the same
+    // ValueKey (a debug assert). Buckets preserve [projects]' original
+    // relative order within themselves.
+    final exact = <Project>[];
+    final prefix = <Project>[];
+    final substring = <Project>[];
+    final seenNames = <String>{};
+    for (final p in projects) {
+      final name = p.name.toLowerCase();
+      if (!name.contains(needle)) continue;
+      if (!seenNames.add(name)) continue;
+      if (name == needle) {
+        exact.add(p);
+      } else if (name.startsWith(needle)) {
+        prefix.add(p);
+      } else {
+        substring.add(p);
+      }
+    }
+    final matches = [...exact, ...prefix, ...substring].take(4).toList();
+    final hasExactMatch = exact.isNotEmpty;
 
     return Container(
       margin: const EdgeInsets.only(top: AppSpacing.xs),

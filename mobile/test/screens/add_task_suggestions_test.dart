@@ -138,6 +138,11 @@ void main() {
 
       final field = tester.widget<TextField>(find.byType(TextField).first);
       expect(field.controller!.text, 'buy paint');
+      // The caret must land at the end of the stripped text (a raw `.text =`
+      // assignment resets Flutter's selection to -1/invalid, which makes the
+      // next keystroke land at index 0 instead of where the user was typing).
+      expect(field.controller!.selection.baseOffset, 'buy paint'.length);
+      expect(field.controller!.selection.extentOffset, 'buy paint'.length);
 
       await tester.ensureVisible(find.text('Add Task'));
       await tester.pump();

@@ -1188,10 +1188,10 @@ Merged to main @ 558072b (22 commits), deployed via `make rebuild`, APK v1.24.0+
 Deployed as mobile v1.24.1+124 (OTA, no backend changes). Ships the follow-up UX pass planned in `docs/superpowers/sdd/2026-08-02-tasks-followup-ux/`:
 
 - **Project chip + create-new in Add Task** — `add_task_sheet.dart` gets a project chip (via the now-public `ProjectChip`) and the project picker sheet grows a "create new" affordance, backed by `BudgetsNotifier.ensureProject` (case-insensitive get-or-create).
-- **`/` + `#` live project suggestions** — typing `/project` or `#project` in Add Task's smart-add field now shows a live-filtered suggestion list against existing projects and creates the project on the fly via `ensureProject` if it doesn't exist yet.
+- **`/` + `#` live project suggestions** — typing `/project` or `#project` in Add Task's smart-add field now shows a live-filtered suggestion list against existing projects and creates the project on the fly via `createProject` if it doesn't exist yet.
 - **Add-link on subtask comments + splice clamp** — subtask comment composer gets the same Add-link affordance as task comments; the cursor-splice path is clamped to `kMaxCommentChars` (2000) with a snackbar refusal instead of a silent drop (closes the Phase 24 follow-up above).
 - **Settings → Guide tips dialog** — `settings_screen.dart` adds a Guide entry that surfaces short usage tips.
 - **Multiline subtask editing** — `subtask_editor.dart` / `task_detail_sheet.dart` support multi-line subtask titles instead of single-line-only.
 
 **New follow-up parked at this review:**
-- [ ] `home_screen` quick-add drops recurring/recurUntil from the shared `AddTaskSheet` result (pre-existing; silent recurrence loss from Home).
+- [x] `home_screen` quick-add drops recurring/recurUntil from the shared `AddTaskSheet` result (pre-existing; silent recurrence loss from Home). — closed in the final whole-branch review fix wave: `home_screen.dart`'s `_openAddTask` now passes `recurring`/`recurUntil` through to `addTask`, mirroring `tasks_screen.dart`.

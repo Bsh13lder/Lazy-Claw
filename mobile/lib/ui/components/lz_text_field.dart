@@ -23,6 +23,7 @@ class LzTextField extends StatelessWidget {
     this.autofocus = false,
     this.enabled = true,
     this.fieldKey,
+    this.focusNode,
   });
 
   final TextEditingController? controller;
@@ -40,6 +41,11 @@ class LzTextField extends StatelessWidget {
   final int? maxLines;
   final bool autofocus;
   final bool enabled;
+
+  /// Optional [FocusNode] for the inner [TextField] — lets a caller drive
+  /// focus programmatically (e.g. focusing the field right after switching
+  /// it in from a read-only preview).
+  final FocusNode? focusNode;
 
   /// Optional [Key] applied to the inner [TextField] (handy for tests).
   final Key? fieldKey;
@@ -59,6 +65,7 @@ class LzTextField extends StatelessWidget {
         TextField(
           key: fieldKey,
           controller: controller,
+          focusNode: focusNode,
           obscureText: obscureText,
           keyboardType: keyboardType,
           textInputAction: textInputAction,

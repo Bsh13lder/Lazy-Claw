@@ -11,8 +11,10 @@ import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/tasks_provider.dart';
+import '../../widgets/link_text.dart';
 import '../expenses/project_color_picker.dart';
 import '../settings/settings_prefs.dart';
+import 'add_link_dialog.dart';
 import 'chip_edit.dart';
 import 'recurrence_picker.dart';
 import 'reminder_lead_picker.dart';
@@ -51,6 +53,13 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late final TextEditingController _notesController;
   late final TextEditingController _budgetController;
   late String _priority;
+
+  /// Whether the Notes block shows the editable field vs. a read-only
+  /// [LinkText] preview. Seeded so empty notes open straight in the editor
+  /// (today's behavior); non-empty notes start collapsed into the preview and
+  /// only switch to the editor when the user taps it.
+  late bool _editingNotes;
+  late final FocusNode _notesFocus;
 
   /// Working copy of the task's tags. Edited in-sheet (add/remove chips) and
   /// committed on Save. [_originalTagsJson] snapshots the on-open serialization
@@ -132,6 +141,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final t = widget.task;
     _titleController = TextEditingController(text: t.title);
     _notesController = TextEditingController(text: t.description ?? '');
+    _editingNotes = t.description?.trim().isNotEmpty != true;
+    _notesFocus = FocusNode();
     _tags = _parseTags(t.tags);
     _originalTagsJson = jsonEncode(_tags);
     _originalBudget = t.allocatedBudget;
@@ -249,6 +260,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _notesController.dispose();
     _budgetController.dispose();
     _tagController.dispose();
+    _notesFocus.dispose();
     super.dispose();
   }
 
@@ -286,6 +298,35 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
   void _removeTag(String tag) {
     setState(() => _tags = _tags.where((t) => t != tag).toList());
+  }
+
+  /// Switches the Notes block from the read-only preview to the editable
+  /// field and focuses it — mirrors the tap-to-edit pattern used by the
+  /// title/sub-task inline editors elsewhere in this sheet.
+  void _beginEditNotes() {
+    setState(() => _editingNotes = true);
+    _notesFocus.requestFocus();
+  }
+
+  /// Opens the "Add link" dialog and, when the user inserts a link, splices
+  /// the returned `[text](url)` markdown into `_notesController` at the
+  /// current cursor position. Falls back to appending at the end when the
+  /// selection is invalid (e.g. the field hasn't been focused yet, so the
+  /// controller's selection is still the default collapsed-at--1).
+  Future<void> _addLink() async {
+    final result = await showAddLinkDialog(context);
+    if (result == null || !mounted) return;
+    final text = _notesController.text;
+    final selection = _notesController.selection;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    final nextText = text.replaceRange(start, end, result);
+    setState(() {
+      _notesController.value = TextEditingValue(
+        text: nextText,
+        selection: TextSelection.collapsed(offset: start + result.length),
+      );
+    });
   }
 
   Future<void> _save() async {
@@ -424,6 +465,53 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     }
   }
 
+  /// The Notes block: a read-only [LinkText] preview when there's non-empty,
+  /// un-touched content (tapping anywhere but a link switches to the editor),
+  /// else the editable field with a trailing "Add link" affordance.
+  Widget _buildNotes() {
+    if (!_editingNotes) {
+      return GestureDetector(
+        key: const Key('task-detail-notes-preview'),
+        behavior: HitTestBehavior.opaque,
+        onTap: _beginEditNotes,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(AppSpacing.md),
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rMd,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: LinkText(_notesController.text, style: AppText.body),
+        ),
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: LzTextField(
+            controller: _notesController,
+            fieldKey: const Key('task-detail-notes'),
+            focusNode: _notesFocus,
+            hint: 'Notes (optional)',
+            prefixIcon: Icons.notes_outlined,
+            minLines: 2,
+            maxLines: 5,
+            keyboardType: TextInputType.multiline,
+          ),
+        ),
+        IconButton(
+          key: const Key('task-detail-notes-add-link'),
+          icon: const Icon(Icons.add_link),
+          color: AppColors.textMuted,
+          tooltip: 'Add link',
+          onPressed: _addLink,
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
@@ -443,15 +531,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           const SizedBox(height: AppSpacing.lg),
 
           // ── Notes ──────────────────────────────────────────────────────
-          LzTextField(
-            controller: _notesController,
-            fieldKey: const Key('task-detail-notes'),
-            hint: 'Notes (optional)',
-            prefixIcon: Icons.notes_outlined,
-            minLines: 2,
-            maxLines: 5,
-            keyboardType: TextInputType.multiline,
-          ),
+          _buildNotes(),
 
           const SizedBox(height: AppSpacing.xl),
 

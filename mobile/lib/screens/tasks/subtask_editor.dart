@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
+import 'package:lazyclaw_mobile/widgets/link_text.dart';
 
 import '../../models/subtask.dart';
 import 'task_sort.dart';
@@ -210,7 +211,9 @@ class _SubtaskTileState extends State<_SubtaskTile> {
       key: ValueKey('subtask-text-${widget.subtask.id}'),
       behavior: HitTestBehavior.opaque,
       onTap: _beginEdit,
-      child: Text(
+      // LinkText's tap recognizers only claim link spans, so a tap anywhere
+      // else on the title still bubbles up to this GestureDetector's onTap.
+      child: LinkText(
         widget.subtask.title,
         style: done
             ? AppText.body.copyWith(

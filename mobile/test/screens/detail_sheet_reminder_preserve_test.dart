@@ -181,6 +181,11 @@ void main() {
       final stub = _stub();
       await openSheet(tester, stub, _respawned);
 
+      // Non-empty notes render as a read-only preview by default; tap it to
+      // reveal the editable field before typing.
+      await tester.tap(find.byKey(const Key('task-detail-notes-preview')));
+      await tester.pumpAndSettle();
+
       await tester.enterText(
         find.byKey(const Key('task-detail-notes')),
         'Tweaked the note',

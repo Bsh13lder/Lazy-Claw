@@ -21,6 +21,7 @@ import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
+import 'package:lazyclaw_mobile/widgets/link_text.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
 class _OfflineTransport implements TasksTransport {
@@ -131,6 +132,19 @@ const _sample = Task(
   createdAt: '2026-06-06T00:00:00Z',
 );
 
+/// A task whose notes contain a bare URL, for the read-only preview tests.
+const _withLinkNote = Task(
+  id: 'task-link',
+  userId: 'u1',
+  title: 'Read the doc',
+  description: 'see https://a.io',
+  priority: 'medium',
+  status: 'todo',
+  owner: 'user',
+  nagCount: 0,
+  createdAt: '2026-06-06T00:00:00Z',
+);
+
 void main() {
   Widget host(_StubTasksNotifier stub, {List<Project> projects = const []}) =>
       ProviderScope(
@@ -190,11 +204,107 @@ void main() {
     );
     expect(titleField.controller!.text, 'Original title');
 
+    // Non-empty notes render as a read-only preview by default; tap it to
+    // reveal the editable field and confirm the prefill survived the switch.
+    await tester.tap(find.byKey(const Key('task-detail-notes-preview')));
+    await tester.pumpAndSettle();
+
     final notesField = tester.widget<TextField>(
       find.byKey(const Key('task-detail-notes')),
     );
     expect(notesField.controller!.text, 'Original notes');
   });
+
+  testWidgets(
+    'empty notes open straight in the editor (no preview)',
+    (tester) async {
+      const noNotes = Task(
+        id: 'task-empty-notes',
+        userId: 'u1',
+        title: 'No notes yet',
+        priority: 'medium',
+        status: 'todo',
+        owner: 'user',
+        nagCount: 0,
+        createdAt: '2026-06-06T00:00:00Z',
+      );
+      final stub = _stub();
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 2200);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          child: MaterialApp(
+            theme: buildAppTheme(),
+            home: Consumer(
+              builder: (ctx, ref, _) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => showTaskDetailSheet(ctx, ref, noNotes),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('task-detail-notes')), findsOneWidget);
+      expect(
+        find.byKey(const Key('task-detail-notes-preview')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'notes containing a link render as a read-only LinkText preview',
+    (tester) async {
+      final stub = _stub();
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 2200);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          child: MaterialApp(
+            theme: buildAppTheme(),
+            home: Consumer(
+              builder: (ctx, ref, _) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () =>
+                        showTaskDetailSheet(ctx, ref, _withLinkNote),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LinkText), findsOneWidget);
+      expect(find.byKey(const Key('task-detail-notes')), findsNothing);
+
+      // Tap the preview: it swaps in the editable TextField with the text
+      // preserved.
+      await tester.tap(find.byKey(const Key('task-detail-notes-preview')));
+      await tester.pumpAndSettle();
+
+      final notesField = tester.widget<TextField>(
+        find.byKey(const Key('task-detail-notes')),
+      );
+      expect(notesField.controller!.text, 'see https://a.io');
+      expect(find.byType(LinkText), findsNothing);
+    },
+  );
 
   testWidgets('editing the title + tapping Save invokes updateTask', (
     tester,

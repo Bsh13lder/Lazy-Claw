@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/project.dart';
 import '../../models/task.dart';
+import 'task_sort.dart';
 
 /// Pure, framework-light helpers backing the Tasks calendar view.
 ///
@@ -28,7 +29,8 @@ Map<DateTime, List<Task>> groupTasksByDay(List<Task> tasks) {
     final key = DateTime(parsed.year, parsed.month, parsed.day);
     (out[key] ??= <Task>[]).add(task);
   }
-  return out;
+  // Sort each day's bucket: pending tasks first, done tasks sink to bottom.
+  return out.map((day, tasks) => MapEntry(day, sortDoneLast(tasks)));
 }
 
 /// Builds a `lowercased project name → "#RRGGBB"` lookup from [projects].

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/subtask.dart';
+import 'task_sort.dart';
 
 /// A controlled checklist editor for a task's sub-tasks (Todoist/Taskade-style).
 ///
@@ -58,7 +59,7 @@ class SubtaskEditor extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final s in subtasks)
+        for (final s in sortSubtasksDoneLast(subtasks))
           _SubtaskTile(
             key: ValueKey('subtask-tile-${s.id}'),
             subtask: s,

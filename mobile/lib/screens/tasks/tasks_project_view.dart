@@ -9,6 +9,7 @@ import '../expenses/project_color_picker.dart';
 import 'ai_task_badge.dart';
 import 'connected_task_row.dart';
 import 'task_project_grouping.dart';
+import 'task_sort.dart';
 
 /// The Tasks-tab "Projects" view. Buckets are split into three clearly-separated
 /// sections (see [splitTasksByGroup]):
@@ -279,6 +280,7 @@ class _ProjectBucket extends StatelessWidget {
   Widget build(BuildContext context) {
     final counts = projectGroupCounts(tasks);
     final allDone = counts.total > 0 && counts.open == 0;
+    final ordered = sortDoneLast(tasks);
 
     return LzCard(
       padding: EdgeInsets.zero,
@@ -356,12 +358,12 @@ class _ProjectBucket extends StatelessWidget {
                     )
                   : Column(
                       children: [
-                        for (int i = 0; i < tasks.length; i++) ...[
+                        for (int i = 0; i < ordered.length; i++) ...[
                           AgentTaskBadged(
-                            task: tasks[i],
+                            task: ordered[i],
                             child: ConnectedTaskRow(
-                              task: tasks[i],
-                              pendingSync: dirtyIds.contains(tasks[i].id),
+                              task: ordered[i],
+                              pendingSync: dirtyIds.contains(ordered[i].id),
                               projects: projects,
                               onComplete: onComplete,
                               onDelete: onDelete,
@@ -373,7 +375,7 @@ class _ProjectBucket extends StatelessWidget {
                               onSubtasksChanged: onSubtasksChanged,
                             ),
                           ),
-                          if (i < tasks.length - 1)
+                          if (i < ordered.length - 1)
                             const SizedBox(height: AppSpacing.sm),
                         ],
                       ],

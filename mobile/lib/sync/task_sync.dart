@@ -545,13 +545,41 @@ class TaskSync {
   /// cause a few rows to be re-checked, never a duplicate or a loss.
   static const Duration _cursorOverlap = Duration(seconds: 2);
 
-  /// Parse [rawNow], subtract [_cursorOverlap], and re-serialise. Falls back
-  /// to the raw string verbatim when it can't be parsed as a date — a clock
-  /// format hiccup from the server must never crash the sync.
+  /// Parse [rawNow], subtract [_cursorOverlap], and re-serialise via
+  /// [_formatServerCursor]. Falls back to the raw string verbatim when it
+  /// can't be parsed as a date — a clock format hiccup from the server must
+  /// never crash the sync.
   String _withOverlap(String rawNow) {
     final parsed = DateTime.tryParse(rawNow);
     if (parsed == null) return rawNow;
-    return parsed.subtract(_cursorOverlap).toIso8601String();
+    return _formatServerCursor(parsed.subtract(_cursorOverlap));
+  }
+
+  /// Format [dt] to byte-match the server's own timestamp convention:
+  /// `YYYY-MM-DDTHH:MM:SS.ffffff+00:00` (UTC, 6-digit microseconds, literal
+  /// `+00:00`).
+  ///
+  /// MUST NOT use `DateTime.toIso8601String()` here. The server
+  /// (`lazyclaw/tasks/store.py:2351`) stamps `now` — and every row's
+  /// `updated_at` — via Python's `datetime.now(timezone.utc).isoformat()`,
+  /// which always renders `+00:00`, never `Z`. `get_task_changes`
+  /// (store.py:2353-2359) compares `WHERE updated_at > ?` as raw SQLite
+  /// TEXT — a byte-for-byte LEXICAL comparison, not a parsed-datetime one.
+  /// Dart's `toIso8601String()` emits `Z` instead of `+00:00` and OMITS the
+  /// microsecond digits entirely when they're zero. `Z` (0x5A) sorts AFTER
+  /// any digit and `.` (0x2E) sorts AFTER `+` (0x2B), so a cursor built with
+  /// `toIso8601String()` can lexically compare GREATER than a real,
+  /// chronologically-LATER server row — silently re-introducing the exact
+  /// orphaning bug this overlap window exists to fix, on every ordinary
+  /// pull. This formatter exists solely to byte-match the server's
+  /// convention so the comparison behaves as a real datetime comparison.
+  String _formatServerCursor(DateTime dt) {
+    final utc = dt.isUtc ? dt : dt.toUtc();
+    String pad(int n, int width) => n.toString().padLeft(width, '0');
+    final micros = utc.millisecond * 1000 + utc.microsecond;
+    return '${pad(utc.year, 4)}-${pad(utc.month, 2)}-${pad(utc.day, 2)}'
+        'T${pad(utc.hour, 2)}:${pad(utc.minute, 2)}:${pad(utc.second, 2)}'
+        '.${pad(micros, 6)}+00:00';
   }
 
   /// Best-effort: cancel the local reminder alarms of a freshly tombstoned

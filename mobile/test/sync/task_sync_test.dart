@@ -678,10 +678,13 @@ void main() {
   group('TaskSync.pull last-write-wins', () {
     test('writes a brand-new server task into the cache', () async {
       final dao = await _freshDao();
+      // Real server clock format (store.py:2351 — Python's
+      // `datetime.now(timezone.utc).isoformat()`): 6-digit microseconds,
+      // literal `+00:00`, never Dart's `Z`.
       final transport = _FakeTransport(changesResponse: {
         'tasks': [_serverTaskJson(id: 'srv', title: 'Hello')],
         'deleted': [],
-        'now': '2026-06-05T12:00:00Z',
+        'now': '2026-06-05T12:00:00.000000+00:00',
       });
       final result = await TaskSync(dao, TasksRepository(transport)).pull();
       expect(result.pulled, 1);
@@ -689,7 +692,7 @@ void main() {
       expect(stored!.title, 'Hello');
       // 2s overlap window, not the bare server clock — see the dedicated
       // "cursor advance stores `now` minus a 2s overlap" test below.
-      expect(await dao.getCursor(), '2026-06-05T11:59:58.000Z');
+      expect(await dao.getCursor(), '2026-06-05T11:59:58.000000+00:00');
     });
 
     test('passes the stored cursor as ?since', () async {
@@ -974,19 +977,25 @@ void main() {
     });
 
     // ── cursor overlap window ──
+    //
+    // `now` fixtures below use the REAL server format (store.py:2351 —
+    // Python's `datetime.now(timezone.utc).isoformat()`: 6-digit
+    // microseconds, literal `+00:00`), never Dart's `Z`. Using Dart-style
+    // fixtures here would only validate Dart's formatter against itself and
+    // miss the lexical-comparison mismatch the regression test below pins.
 
     test(
-        'cursor advance stores `now` minus a 2s overlap, not the bare '
-        'server clock', () async {
+        'cursor advance stores `now` minus a 2s overlap, formatted to match '
+        'the server\'s own convention (never Dart\'s `Z`)', () async {
       final dao = await _freshDao();
       final transport = _FakeTransport(changesResponse: {
         'tasks': [],
         'deleted': [],
-        'now': '2026-08-03T10:00:00.000Z',
+        'now': '2026-08-03T10:00:00.000000+00:00',
       });
       final result = await TaskSync(dao, TasksRepository(transport)).pull();
       expect(result.pullFailed, isFalse);
-      expect(await dao.getCursor(), '2026-08-03T09:59:58.000Z',
+      expect(await dao.getCursor(), '2026-08-03T09:59:58.000000+00:00',
           reason: 'a row committed between the server\'s now_iso stamp and '
               'its SELECT must stay inside the next since= window instead '
               'of being permanently skipped');
@@ -1003,6 +1012,47 @@ void main() {
       final result = await TaskSync(dao, TasksRepository(transport)).pull();
       expect(result.pullFailed, isFalse);
       expect(await dao.getCursor(), 'not-a-real-timestamp');
+    });
+
+    test(
+        'REGRESSION: a row committed 1µs after the shifted cursor still '
+        'lexically compares greater, matching the server\'s raw-TEXT '
+        '`WHERE updated_at > ?` filter (store.py:2353-2359)', () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': [],
+        // Zero microseconds, deliberately: this is the exact shape that
+        // broke the invariant in production — Dart's `toIso8601String()`
+        // OMITS the fractional-microsecond digits entirely when they're
+        // zero (only the 3-digit millisecond + `Z` survive), while the
+        // server's own convention always renders all 6 digits + `+00:00`.
+        'now': '2026-08-03T10:00:00.000000+00:00',
+      });
+      await TaskSync(dao, TasksRepository(transport)).pull();
+      final storedCursor = await dao.getCursor();
+      expect(storedCursor, isNotNull);
+
+      // A row that committed exactly 1 microsecond after the shifted
+      // instant (2026-08-03T09:59:58.000000+00:00 + 1µs), written in the
+      // server's own timestamp format — a fixed literal, independent of
+      // whatever this test's production code actually produced.
+      const laterRow = '2026-08-03T09:59:58.000001+00:00';
+
+      // This IS the server's actual filter: SQLite compares `updated_at`
+      // and `since` as raw TEXT (no `datetime()` cast), which is a
+      // byte-for-byte lexical comparison — exactly what Dart's
+      // `String.compareTo` performs for this all-ASCII format. Under the
+      // OLD `DateTime.toIso8601String()` implementation the stored cursor
+      // is `2026-08-03T09:59:58.000Z` (no microseconds, `Z` not `+00:00`):
+      // `laterRow.compareTo('...000Z')` is NEGATIVE — the row that
+      // committed LATER lexically sorts BEFORE the cursor, so the server's
+      // `WHERE updated_at > ?` would silently and permanently skip it. That
+      // is the exact bug this overlap window exists to fix.
+      expect(laterRow.compareTo(storedCursor!) > 0, isTrue,
+          reason:
+              'the server\'s WHERE updated_at > ? must not skip a row that '
+              'committed after the cursor\'s instant');
     });
   });
 

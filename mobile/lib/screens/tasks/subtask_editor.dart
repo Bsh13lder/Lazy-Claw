@@ -17,10 +17,22 @@ class SubtaskEditor extends StatelessWidget {
     super.key,
     required this.subtasks,
     required this.onChanged,
+    this.commentCounts = const {},
+    this.onOpenComments,
   });
 
   final List<Subtask> subtasks;
   final ValueChanged<List<Subtask>> onChanged;
+
+  /// Comment counts keyed by sub-task id, used to show a `+count` badge next
+  /// to the comment icon. Missing/absent ids are treated as zero.
+  final Map<String, int> commentCounts;
+
+  /// When supplied, each tile shows a small comment icon (+count when > 0)
+  /// between the title and the delete affordance; tapping it invokes this
+  /// with the tile's sub-task id. Null (the default) keeps tiles badge-free —
+  /// existing callers that don't pass it compile and render unchanged.
+  final ValueChanged<String>? onOpenComments;
 
   void _toggle(String id) {
     onChanged([
@@ -43,7 +55,10 @@ class SubtaskEditor extends StatelessWidget {
   }
 
   void _delete(String id) {
-    onChanged([for (final s in subtasks) if (s.id != id) s]);
+    onChanged([
+      for (final s in subtasks)
+        if (s.id != id) s,
+    ]);
   }
 
   void _add(String title) {
@@ -67,6 +82,10 @@ class SubtaskEditor extends StatelessWidget {
             onToggle: () => _toggle(s.id),
             onTextChanged: (t) => _editText(s.id, t),
             onDelete: () => _delete(s.id),
+            commentCount: commentCounts[s.id] ?? 0,
+            onOpenComments: onOpenComments == null
+                ? null
+                : () => onOpenComments!(s.id),
           ),
         _AddSubtaskField(onAdd: _add),
       ],
@@ -83,12 +102,16 @@ class _SubtaskTile extends StatefulWidget {
     required this.onToggle,
     required this.onTextChanged,
     required this.onDelete,
+    this.commentCount = 0,
+    this.onOpenComments,
   });
 
   final Subtask subtask;
   final VoidCallback onToggle;
   final ValueChanged<String> onTextChanged;
   final VoidCallback onDelete;
+  final int commentCount;
+  final VoidCallback? onOpenComments;
 
   @override
   State<_SubtaskTile> createState() => _SubtaskTileState();
@@ -119,8 +142,10 @@ class _SubtaskTileState extends State<_SubtaskTile> {
   void _beginEdit() {
     HapticFeedback.selectionClick();
     _ctrl.text = widget.subtask.title;
-    _ctrl.selection =
-        TextSelection(baseOffset: 0, extentOffset: _ctrl.text.length);
+    _ctrl.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _ctrl.text.length,
+    );
     setState(() => _editing = true);
     _focus.requestFocus();
   }
@@ -172,6 +197,9 @@ class _SubtaskTileState extends State<_SubtaskTile> {
           // ── Title (inline-editable) ────────────────────────────────────────
           Expanded(child: _buildText(done)),
 
+          // ── Comments badge (only when the callback is wired) ────────────────
+          if (widget.onOpenComments != null) _buildCommentBadge(),
+
           // ── Delete ─────────────────────────────────────────────────────────
           GestureDetector(
             key: ValueKey('subtask-delete-${widget.subtask.id}'),
@@ -186,6 +214,39 @@ class _SubtaskTileState extends State<_SubtaskTile> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// A small 💬 icon (+count when > 0) between the title and delete affordance.
+  /// Only built when [_SubtaskTile.onOpenComments] is non-null.
+  Widget _buildCommentBadge() {
+    return GestureDetector(
+      key: ValueKey('subtask-comments-${widget.subtask.id}'),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        widget.onOpenComments?.call();
+      },
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.chat_bubble_outline,
+              size: 14,
+              color: AppColors.textMuted,
+            ),
+            if (widget.commentCount > 0) ...[
+              const SizedBox(width: 2),
+              Text(
+                '${widget.commentCount}',
+                style: AppText.caption.copyWith(color: AppColors.textMuted),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

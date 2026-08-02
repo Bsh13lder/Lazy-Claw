@@ -20,6 +20,7 @@ import 'recurrence_picker.dart';
 import 'reminder_lead_picker.dart';
 import 'reschedule_sheet.dart';
 import 'subtask_editor.dart';
+import 'task_comments_section.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
 /// the user change the title, notes, priority, project and due date, then Save
@@ -146,7 +147,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _tags = _parseTags(t.tags);
     _originalTagsJson = jsonEncode(_tags);
     _originalBudget = t.allocatedBudget;
-    _budgetController = TextEditingController(text: _formatBudget(t.allocatedBudget));
+    _budgetController = TextEditingController(
+      text: _formatBudget(t.allocatedBudget),
+    );
     _priority = _priorities.contains(t.priority) ? t.priority : 'medium';
     final raw = t.dueDate;
     _dueDay = (raw == null || raw.isEmpty) ? null : dueDateDayPart(raw);
@@ -286,8 +289,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   void _addTag(String raw) {
     final tag = raw.trim();
     if (tag.isEmpty) return;
-    final clamped =
-        tag.length > _maxTagLength ? tag.substring(0, _maxTagLength) : tag;
+    final clamped = tag.length > _maxTagLength
+        ? tag.substring(0, _maxTagLength)
+        : tag;
     if (_tags.contains(clamped)) {
       _tagController.clear();
       return;
@@ -344,7 +348,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     // Budget: empty field clears a previously-set budget; a parsed number that
     // differs sets it; otherwise leave untouched.
     final budgetText = _budgetController.text.trim();
-    final parsedBudget = budgetText.isEmpty ? null : double.tryParse(budgetText);
+    final parsedBudget = budgetText.isEmpty
+        ? null
+        : double.tryParse(budgetText);
     double? budgetArg;
     bool clearBudget = false;
     if (budgetText.isEmpty && _originalBudget != null) {
@@ -377,8 +383,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     // churn the column).
     String? recurUntilArg;
     if (recurringArg != null && recurringArg.isEmpty) {
-      recurUntilArg =
-          (_recurUntil != null || _recurUntilTouched) ? '' : null;
+      recurUntilArg = (_recurUntil != null || _recurUntilTouched) ? '' : null;
     } else if (_recurUntilTouched) {
       recurUntilArg = _recurUntil ?? '';
     }
@@ -514,6 +519,21 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
   @override
   Widget build(BuildContext context) {
+    // Comments are IMMEDIATE (they write straight through the notifier, not
+    // save-gated like the rest of this sheet's fields) — so the sheet must
+    // watch the fresh row rather than the snapshot `widget.task` it was opened
+    // with, or a just-added comment wouldn't appear until Save/reopen.
+    final live =
+        ref
+            .watch(tasksProvider)
+            .tasks
+            .where((t) => t.id == widget.task.id)
+            .firstOrNull ??
+        widget.task;
+    final commentCounts = <String, int>{
+      for (final s in _subtasks)
+        s.id: live.taskComments.where((c) => c.subtaskId == s.id).length,
+    };
     return SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -852,6 +872,36 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           SubtaskEditor(
             subtasks: _subtasks,
             onChanged: (next) => setState(() => _subtasks = next),
+            commentCounts: commentCounts,
+            onOpenComments: (sid) => showSubtaskCommentsSheet(
+              context,
+              subtaskTitle: _subtaskTitle(sid),
+              comments: live.taskComments
+                  .where((c) => c.subtaskId == sid)
+                  .toList(),
+              onAdd: (text) => ref
+                  .read(tasksProvider.notifier)
+                  .addComment(widget.task.id, text, subtaskId: sid),
+              onDelete: (cid) => ref
+                  .read(tasksProvider.notifier)
+                  .deleteComment(widget.task.id, cid),
+            ),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Comments ───────────────────────────────────────────────────
+          _SectionLabel('COMMENTS'),
+          const SizedBox(height: AppSpacing.sm),
+          TaskCommentsSection(
+            comments: live.taskComments,
+            onAdd: (text) => ref
+                .read(tasksProvider.notifier)
+                .addComment(widget.task.id, text),
+            onDelete: (cid) => ref
+                .read(tasksProvider.notifier)
+                .deleteComment(widget.task.id, cid),
+            onAddLink: () => showAddLinkDialog(context),
           ),
 
           const SizedBox(height: AppSpacing.xxl),
@@ -925,7 +975,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   Future<void> _pickRecurUntil() async {
     final now = DateTime.now();
     DateTime initial = now.add(const Duration(days: 30));
-    final existing = _recurUntil == null ? null : DateTime.tryParse(_recurUntil!);
+    final existing = _recurUntil == null
+        ? null
+        : DateTime.tryParse(_recurUntil!);
     if (existing != null && !existing.isBefore(now)) initial = existing;
     final picked = await showDatePicker(
       context: context,
@@ -978,6 +1030,16 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   String _isoToday() => _isoFor(DateTime.now());
 
   String _isoTomorrow() => _isoFor(DateTime.now().add(const Duration(days: 1)));
+
+  /// The sub-task's title for the comments sheet header, falling back to a
+  /// generic label if the id somehow no longer matches (defensive only — the
+  /// badge that opens this sheet is only ever rendered for a live sub-task).
+  String _subtaskTitle(String id) => _subtasks
+      .firstWhere(
+        (s) => s.id == id,
+        orElse: () => const Subtask(id: '', title: 'Sub-task', done: false),
+      )
+      .title;
 }
 
 /// A small uppercase section label matching the add-task sheet's headers.

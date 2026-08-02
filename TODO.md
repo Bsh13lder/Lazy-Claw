@@ -1176,11 +1176,11 @@ Merged to main @ 558072b (22 commits), deployed via `make rebuild`, APK v1.24.0+
 
 **Follow-ups (parked at final review, all small):**
 - [x] Add-link dialog splice (`_addLink` sets `controller.value` directly) bypasses the composer's `maxLength: 2000` — near-cap text + link insert can still silently drop a comment client-side (notifier clamp returns null on the fire-and-forget path). One-line clamp in `_addLink` + a test. — closed by Phase 25 (`6efe525`): `_addLink` now refuses a splice past `kMaxCommentChars` and surfaces a snackbar instead of silently dropping text.
-- [ ] Comment composers now show Flutter's default "n / 2000" counter — style or hide via `buildCounter` if unwanted.
-- [ ] Deleting a subtask orphans its comments (invisible in every surface, still count toward the 500 cap) — cascade cleanup in `set_steps` or a fallback render.
-- [ ] `TasksProjectView` lacks the `didUpdateWidget` prefs-resync `TaskSection` got — unreachable today (Projects mounts on tap), becomes a bug if a "remember last view" feature ever mounts it on cold start.
-- [ ] `LinkText` disposes recognizers inside `build` — a rebuild during an in-flight link tap disposes the active recognizer (low probability); move disposal post-frame or to `dispose()`.
-- [ ] Stale doc comment: `ui_prefs_provider.dart` still says `kPrefListSectionCollapsed` is "not yet consumed" (Task 10 consumed it). Public name `Section` (tasks_screen.dart) is collision-prone — consider `TaskListSection`.
+- [x] Comment composers now show Flutter's default "n / 2000" counter — style or hide via `buildCounter` if unwanted. — closed in Phase 26 (`a4b1cd0`): `buildCounter` passthrough added to `LzTextField`, composer returns null (length enforcement retained).
+- [x] Deleting a subtask orphans its comments (invisible in every surface, still count toward the 500 cap) — cascade cleanup in `set_steps` or a fallback render. — closed in Phase 26 (`a69ab54`): `set_steps` prunes orphaned comments in the same UPDATE; mobile `applyLocalUpdate` mirrors the prune.
+- [x] `TasksProjectView` lacks the `didUpdateWidget` prefs-resync `TaskSection` got — unreachable today (Projects mounts on tap), becomes a bug if a "remember last view" feature ever mounts it on cold start. — closed in Phase 26 (`a4b1cd0`).
+- [x] `LinkText` disposes recognizers inside `build` — a rebuild during an in-flight link tap disposes the active recognizer (low probability); move disposal post-frame or to `dispose()`. — closed in Phase 26 (`a4b1cd0`): recognizers now built in initState/didUpdateWidget, gated on text/style change.
+- [x] Stale doc comment: `ui_prefs_provider.dart` still says `kPrefListSectionCollapsed` is "not yet consumed" (Task 10 consumed it). Public name `Section` (tasks_screen.dart) is collision-prone — consider `TaskListSection`. — closed in Phase 26 (`a4b1cd0`): comment corrected, enum renamed (values untouched, so persisted pref keys are unaffected).
 - [ ] Web UI pass for comments/sorting/links (endpoints are web-ready; reuse the client-minted-id contract).
 
 ## Phase 25: Tasks follow-up UX (2026-08-02)
@@ -1195,3 +1195,15 @@ Deployed as mobile v1.24.1+124 (OTA, no backend changes). Ships the follow-up UX
 
 **New follow-up parked at this review:**
 - [x] `home_screen` quick-add drops recurring/recurUntil from the shared `AddTaskSheet` result (pre-existing; silent recurrence loss from Home). — closed in the final whole-branch review fix wave: `home_screen.dart`'s `_openAddTask` now passes `recurring`/`recurUntil` through to `addTask`, mirroring `tasks_screen.dart`.
+
+## Phase 26: Tasks cleanup pass (2026-08-02) — SHIPPED
+
+Mobile v1.24.2+125 (OTA) + backend `make rebuild` (the comment cascade is server-side). Closes every open Phase-24 follow-up except the web pass.
+
+- **Orphaned-comment cascade** — `set_steps` (`lazyclaw/tasks/store.py`) drops comments whose `subtask_id` no longer exists, in the SAME `UPDATE` as the steps write (no half-apply, no churn when nothing is orphaned); `applyLocalUpdate` mirrors the prune locally without queueing an extra outbox op (the steps PUT triggers the server cascade). `append_steps` inherits it (routes through `set_steps`); `toggle_step` can't remove a step.
+- **Comment composer counter hidden** — `buildCounter` passthrough on `LzTextField`; 2000-char enforcement unchanged.
+- **`LinkText` recognizer lifecycle** — built in `initState`/`didUpdateWidget` gated on text/style change, disposed in `dispose()`; no more dispose-during-build.
+- **`TasksProjectView` prefs resync** — `didUpdateWidget` re-seeds expanded buckets when `initialExpanded` changes (mirrors `TaskSection`).
+- **`Section` → `TaskListSection`** + corrected `ui_prefs_provider.dart` doc. Enum VALUE names untouched, so persisted `tasks.list.<name>.collapsed` keys still resolve.
+
+**Still open:** the web UI pass for comments/sorting/collapse/links (endpoints are already web-ready — reuse the client-minted-id contract).

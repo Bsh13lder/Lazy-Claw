@@ -70,5 +70,5 @@ const List<String> kServerAliases = <String>[
 /// `test/core/app_version_constants_test.dart`, because these had silently
 /// drifted 34 builds behind (1.21.22+81 vs pubspec 1.22.5+115) and the
 /// self-update check would then compare against the wrong build number.
-const String kAppVersion = '1.24.1';
-const int kAppBuild = 124;
+const String kAppVersion = '1.24.2';
+const int kAppBuild = 125;

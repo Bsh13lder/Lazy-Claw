@@ -1,3 +1,4 @@
+import 'comment.dart';
 import 'subtask.dart';
 
 /// Immutable model mirroring the /api/tasks TaskItem shape from api.ts.
@@ -30,6 +31,7 @@ class Task {
   final String? traceSessionId;
   final String? lazybrainNoteId;
   final String? steps;
+  final String? comments;
   final double? allocatedBudget;
 
   const Task({
@@ -55,6 +57,7 @@ class Task {
     this.traceSessionId,
     this.lazybrainNoteId,
     this.steps,
+    this.comments,
     this.allocatedBudget,
   });
 
@@ -63,6 +66,9 @@ class Task {
   /// The sub-tasks (checklist items) parsed from the `steps` JSON column.
   /// Empty when there are none. See [Subtask] for the storage shape.
   List<Subtask> get subtasks => parseSubtasks(steps);
+
+  /// The comment thread parsed from the `comments` JSON column.
+  List<TaskComment> get taskComments => parseComments(comments);
 
   factory Task.fromJson(Map<String, dynamic> json) {
     return Task(
@@ -88,6 +94,7 @@ class Task {
       traceSessionId: _str(json['trace_session_id']),
       lazybrainNoteId: _str(json['lazybrain_note_id']),
       steps: _str(json['steps']),
+      comments: _str(json['comments']),
       allocatedBudget: _double(json['allocated_budget']),
     );
   }
@@ -115,6 +122,7 @@ class Task {
         'trace_session_id': traceSessionId,
         'lazybrain_note_id': lazybrainNoteId,
         'steps': steps,
+        'comments': comments,
         'allocated_budget': allocatedBudget,
       };
 
@@ -146,6 +154,7 @@ class Task {
     String? traceSessionId,
     String? lazybrainNoteId,
     String? steps,
+    String? comments,
     double? allocatedBudget,
     bool clearAllocatedBudget = false,
   }) =>
@@ -172,6 +181,7 @@ class Task {
         traceSessionId: traceSessionId ?? this.traceSessionId,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
         steps: steps ?? this.steps,
+        comments: comments ?? this.comments,
         allocatedBudget:
             clearAllocatedBudget ? null : (allocatedBudget ?? this.allocatedBudget),
       );

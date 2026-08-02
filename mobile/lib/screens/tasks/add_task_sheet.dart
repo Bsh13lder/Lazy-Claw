@@ -4,8 +4,13 @@ import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
+import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/subtask.dart';
+import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
+import 'package:lazyclaw_mobile/screens/expenses/add_expense_sheet.dart'
+    show AddProjectSheet;
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
+import 'package:lazyclaw_mobile/screens/tasks/chip_edit.dart';
 import 'package:lazyclaw_mobile/screens/tasks/recurrence_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
@@ -24,6 +29,7 @@ class AddTaskSheet extends ConsumerStatefulWidget {
     super.key,
     this.initialDueDate,
     this.defaultLead = kDefaultReminderLead,
+    this.projects = const [],
   });
 
   /// When provided (e.g. tapping a day in the calendar view), the due date is
@@ -33,6 +39,12 @@ class AddTaskSheet extends ConsumerStatefulWidget {
   /// The global default reminder lead, applied automatically once the task
   /// gains a due time and the user hasn't picked a lead explicitly.
   final ReminderLead defaultLead;
+
+  /// The user's projects, for the PROJECT chip + picker (and its "＋ New
+  /// project" create-new affordance). Empty when the caller hasn't loaded the
+  /// budgets store yet — the chip still works, just with nothing to pick from
+  /// besides "No project" / "＋ New project".
+  final List<Project> projects;
 
   @override
   ConsumerState<AddTaskSheet> createState() => _AddTaskSheetState();
@@ -58,6 +70,13 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   /// is split into a date-only day string (`_manualDueDate`) and a separate
   /// time-of-day (`_manualTime`) so the two pickers are independent.
   String? _manualPriority;
+
+  /// The manually-picked project (via the PROJECT chip's picker), and whether
+  /// the user has touched it. Until touched, the chip displays (and submit
+  /// uses) the live-parsed `/project` token instead.
+  String? _category;
+  bool _categoryTouched = false;
+
   bool _dueDateTouched = false;
   String? _manualDueDate;
   bool _timeTouched = false;
@@ -104,6 +123,13 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
   String get _effectivePriority =>
       _manualPriority ?? _parsed.priority ?? 'medium';
+
+  /// The effective project (manual pick wins over the live-parsed `/token`).
+  /// Read live in [build] so typing `/gro` updates the chip immediately, and
+  /// re-derived fresh in [_submit] so a keyboard submit can't race the
+  /// `onChanged` callback.
+  String? get _effectiveCategory =>
+      _categoryTouched ? _category : _parsed.project;
 
   /// The parsed due date's date-only day part (`yyyy-MM-dd`), or null.
   String? get _parsedDay {
@@ -220,13 +246,18 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     final notes = _notesController.text.trim();
     final steps = serializeSubtasks(_subtasks);
 
+    // Effective category: a manual PROJECT-chip pick always wins over the
+    // live-parsed `/token`, re-derived from the fresh parse (not `_parsed`)
+    // for the same submit-can't-race-onChanged reason as priority/due date.
+    final category = _categoryTouched ? _category : parsed.project;
+
     setState(() => _submitting = true);
     Navigator.of(context).pop(
       _AddTaskResult(
         title: title,
         priority: priority,
         dueDate: dueDate,
-        category: parsed.project,
+        category: category,
         reminderAt: reminderAt.isEmpty ? null : reminderAt,
         recurring: recurring,
         recurUntil: recurUntil,
@@ -387,6 +418,25 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
                 ),
               );
             }).toList(),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Project ─────────────────────────────────────────────────────
+          Text(
+            'PROJECT',
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          ProjectChip(
+            fieldKey: const Key('add-task-project'),
+            projects: widget.projects,
+            category: _effectiveCategory,
+            onTap: _openProjectPicker,
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -643,6 +693,56 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     );
   }
 
+  /// Open the project picker anchored to the PROJECT chip. A normal pick (incl.
+  /// explicit "No project" → null) marks the field touched so it wins over any
+  /// live-parsed `/token`; the "＋ New project" row opens [_openCreateProject]
+  /// instead.
+  Future<void> _openProjectPicker() async {
+    final result = await showProjectPicker(
+      context,
+      projects: widget.projects,
+      current: _effectiveCategory,
+      allowCreate: true,
+    );
+    if (result == null || !mounted) return;
+    if (result.createNew) {
+      await _openCreateProject();
+      return;
+    }
+    setState(() {
+      _category = result.category;
+      _categoryTouched = true;
+    });
+  }
+
+  /// Open the shared "New Project" sheet (same one Tasks → Projects and Money
+  /// use). On a successful create, the new project becomes this task's
+  /// (touched) category.
+  Future<void> _openCreateProject() async {
+    await LzBottomSheet.show<void>(
+      context,
+      title: 'New Project',
+      builder: (_) => AddProjectSheet(
+        onSubmit: (name, budget, color, startDate, dueDate) async {
+          final ok = await ref.read(budgetsProvider.notifier).createProject(
+                name,
+                budget: budget,
+                color: color,
+                startDate: startDate,
+                dueDate: dueDate,
+              );
+          if (ok && mounted) {
+            setState(() {
+              _category = name;
+              _categoryTouched = true;
+            });
+          }
+          return ok;
+        },
+      ),
+    );
+  }
+
   /// Apply a manual due-date (day) selection (or clear). Marks the field as
   /// touched so the parsed default no longer applies.
   void _setDueDate(String? iso) {
@@ -791,7 +891,10 @@ class _AddTaskResult {
 /// Pass [initialDueDate] (e.g. from a calendar day-tap) to pre-select the due
 /// date so the new task lands on that day. Omitting it preserves the original
 /// behavior (no date pre-selected). [defaultLead] is the global reminder-lead
-/// default applied once a due time is set without an explicit pick.
+/// default applied once a due time is set without an explicit pick. [projects]
+/// feeds the PROJECT chip's picker (and highlights the caller's existing
+/// projects) — pass `ref.read(budgetsProvider).projects`; omitting it just
+/// leaves the picker with nothing besides "No project" / "＋ New project".
 Future<
   ({
     String title,
@@ -809,12 +912,16 @@ showAddTaskSheet(
   BuildContext context, {
   DateTime? initialDueDate,
   ReminderLead defaultLead = kDefaultReminderLead,
+  List<Project> projects = const [],
 }) async {
   final result = await LzBottomSheet.show<_AddTaskResult>(
     context,
     title: 'New Task',
-    builder: (_) =>
-        AddTaskSheet(initialDueDate: initialDueDate, defaultLead: defaultLead),
+    builder: (_) => AddTaskSheet(
+      initialDueDate: initialDueDate,
+      defaultLead: defaultLead,
+      projects: projects,
+    ),
   );
   if (result == null) return null;
   return (

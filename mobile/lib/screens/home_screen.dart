@@ -90,11 +90,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// consistent with the sheet's own default).
   Future<void> _openAddTask() async {
     HapticFeedback.selectionClick();
+    // Home may not have finished its own initial budgets load yet (or this is
+    // a test host that skips initState timing) — the same best-effort lazy
+    // load Tasks uses, so the PROJECT chip's picker has something to show.
+    await _ensureBudgetsLoaded();
+    if (!mounted) return;
     final result = await showAddTaskSheet(
       context,
       defaultLead: kDefaultReminderLead,
+      projects: ref.read(budgetsProvider).projects,
     );
     if (result == null || !mounted) return;
+    // A PROJECT-chip pick or `/token` that doesn't match an existing project
+    // (by name, case-insensitive) auto-creates it instead of landing in the
+    // old silent phantom-tag bucket.
+    final category = result.category;
+    if (category != null && category.isNotEmpty) {
+      await ref.read(budgetsProvider.notifier).ensureProject(category);
+    }
     await ref.read(tasksProvider.notifier).addTask(
           result.title,
           priority: result.priority,

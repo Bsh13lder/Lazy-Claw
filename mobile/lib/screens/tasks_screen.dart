@@ -372,8 +372,16 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       context,
       initialDueDate: initialDueDate,
       defaultLead: _defaultLead,
+      projects: ref.read(budgetsProvider).projects,
     );
     if (result == null || !mounted) return;
+    // A PROJECT-chip pick or `/token` that doesn't match an existing project
+    // (by name, case-insensitive) auto-creates it instead of landing in the
+    // old silent phantom-tag bucket.
+    final category = result.category;
+    if (category != null && category.isNotEmpty) {
+      await ref.read(budgetsProvider.notifier).ensureProject(category);
+    }
     await ref
         .read(tasksProvider.notifier)
         .addTask(

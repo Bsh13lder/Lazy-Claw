@@ -9,6 +9,8 @@ import 'package:lazyclaw_mobile/models/subtask.dart';
 import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/screens/expenses/add_expense_sheet.dart'
     show AddProjectSheet;
+import 'package:lazyclaw_mobile/screens/expenses/project_color_picker.dart'
+    show ProjectColorDot;
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
 import 'package:lazyclaw_mobile/screens/tasks/chip_edit.dart';
 import 'package:lazyclaw_mobile/screens/tasks/recurrence_picker.dart';
@@ -52,6 +54,12 @@ class AddTaskSheet extends ConsumerStatefulWidget {
 
 class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   final _titleController = SmartAddController();
+
+  /// Drives the `/` project-suggestion strip: it only shows while the title
+  /// field is actually focused (so it doesn't linger after the user moves on
+  /// to another field). [FocusNode] is a [ChangeNotifier], so a listener
+  /// rebuild is enough — nothing else needs to watch it.
+  final _titleFocusNode = FocusNode();
 
   /// Free-form notes → the task's `description`. Mirrors the edit sheet's Notes
   /// field so the two surfaces feel like one family.
@@ -110,13 +118,23 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       _dueDateTouched = true;
       _manualDueDate = _isoFor(initial);
     }
+    _titleFocusNode.addListener(_handleTitleFocusChange);
   }
 
   @override
   void dispose() {
+    _titleFocusNode
+      ..removeListener(_handleTitleFocusChange)
+      ..dispose();
     _titleController.dispose();
     _notesController.dispose();
     super.dispose();
+  }
+
+  /// Rebuilds so the suggestion strip appears/disappears with focus (its
+  /// visibility isn't otherwise driven by anything in [setState]).
+  void _handleTitleFocusChange() {
+    if (mounted) setState(() {});
   }
 
   // ── Effective (override-aware) values ───────────────────────────────────────
@@ -303,6 +321,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
           // ── Title input ────────────────────────────────────────────────
           LzTextField(
             controller: _titleController,
+            focusNode: _titleFocusNode,
             hint: 'e.g. "Pay rent tomorrow !p1 #home"',
             prefixIcon: Icons.task_alt_outlined,
             textInputAction: TextInputAction.done,
@@ -310,6 +329,15 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             onSubmitted: (_) => _submit(),
             autofocus: true,
           ),
+
+          // ── `/` project suggestion strip (live, focus-gated) ────────────
+          if (_parsed.project != null && _titleFocusNode.hasFocus)
+            _ProjectSuggestionStrip(
+              token: _parsed.project!,
+              projects: widget.projects,
+              onSelect: _applyProjectSuggestion,
+              onCreate: _createProjectFromSuggestion,
+            ),
 
           // ── Syntax legend (discoverability) ────────────────────────────
           const SizedBox(height: AppSpacing.xs),
@@ -743,6 +771,35 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     );
   }
 
+  /// Apply a `/`-suggestion-strip pick: strips the raw token from the title
+  /// text and sets [projectName] as the (touched) category — the same
+  /// override shape a manual PROJECT-chip pick produces. Re-parses the
+  /// stripped text so the title highlight + "SMART DETECTED" chips and the
+  /// strip's own visibility (which reads `_parsed.project`) all stay in sync.
+  void _applyProjectSuggestion(String projectName) {
+    final next = removeProjectToken(_titleController.text);
+    final reparsed = parseSmartAdd(next);
+    setState(() {
+      _titleController
+        ..text = next
+        ..tokens = reparsed.tokens;
+      _parsed = reparsed;
+      _category = projectName;
+      _categoryTouched = true;
+    });
+  }
+
+  /// The suggestion strip's "Create project '{token}'" row. Mirrors
+  /// [_openCreateProject]'s error-handling shape (no-ops on failure — the
+  /// notifier already surfaces `state.error` to anyone watching it), then
+  /// applies the newly created project the same way a match-row tap does.
+  Future<void> _createProjectFromSuggestion(String token) async {
+    final ok = await ref.read(budgetsProvider.notifier).createProject(token);
+    if (ok && mounted) {
+      _applyProjectSuggestion(token);
+    }
+  }
+
   /// Apply a manual due-date (day) selection (or clear). Marks the field as
   /// touched so the parsed default no longer applies.
   void _setDueDate(String? iso) {
@@ -845,6 +902,82 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   String _isoToday() => _isoFor(DateTime.now());
 
   String _isoTomorrow() => _isoFor(DateTime.now().add(const Duration(days: 1)));
+}
+
+/// Live `/token` project suggestions, shown under the title field while the
+/// user is mid-token (see [_AddTaskSheetState] wiring). Rows are the
+/// case-insensitive SUBSTRING matches over [projects] (max 4), plus a
+/// trailing "Create project '{token}'" row when no project name EXACTLY
+/// matches the typed token. Bounded-height inline dropdown, matching the
+/// [SheetFormulaHelper]-style autocomplete pattern used elsewhere
+/// (sheet_formula_bar.dart).
+class _ProjectSuggestionStrip extends StatelessWidget {
+  const _ProjectSuggestionStrip({
+    required this.token,
+    required this.projects,
+    required this.onSelect,
+    required this.onCreate,
+  });
+
+  /// The raw token text parsed from the title (no leading `#`/`/`).
+  final String token;
+  final List<Project> projects;
+
+  /// Called with the exact matched project's name.
+  final ValueChanged<String> onSelect;
+
+  /// Called with [token] when the "Create project" row is tapped.
+  final ValueChanged<String> onCreate;
+
+  @override
+  Widget build(BuildContext context) {
+    final needle = token.toLowerCase();
+    final matches = projects
+        .where((p) => p.name.toLowerCase().contains(needle))
+        .take(4)
+        .toList();
+    final hasExactMatch = projects.any((p) => p.name.toLowerCase() == needle);
+
+    return Container(
+      margin: const EdgeInsets.only(top: AppSpacing.xs),
+      constraints: const BoxConstraints(maxHeight: 168),
+      decoration: BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        borderRadius: AppRadii.rMd,
+        border: Border.all(color: AppColors.borderDefault),
+      ),
+      child: ListView(
+        shrinkWrap: true,
+        padding: EdgeInsets.zero,
+        children: [
+          for (final p in matches)
+            LzListTile(
+              key: ValueKey('project-suggest-${p.name}'),
+              dense: true,
+              leading: ProjectColorDot(hex: p.color, size: 12),
+              title: p.name,
+              onTap: () => onSelect(p.name),
+            ),
+          if (!hasExactMatch)
+            LzListTile(
+              key: const Key('project-suggest-create'),
+              dense: true,
+              leading: Icon(
+                Icons.add_rounded,
+                size: 16,
+                color: AppColors.accent,
+              ),
+              title: "Create project '$token'",
+              titleStyle: AppText.body.copyWith(
+                color: AppColors.accent,
+                fontWeight: FontWeight.w600,
+              ),
+              onTap: () => onCreate(token),
+            ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Data returned by [AddTaskSheet] when the user taps "Add Task".

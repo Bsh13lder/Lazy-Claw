@@ -547,6 +547,23 @@ final RegExp _priorityBangs = RegExp(r'(^|\s)(!{1,3})(?=\s|$)');
 // against `and/or` (slash mid-word) and `6/10` (M/D dates) being misread.
 final RegExp _project = RegExp(r'(^|\s)[#/]([A-Za-z0-9_-]+)');
 
+/// Remove the first `#token`/`/token` project reference from [title] — the
+/// same token [_project] recognizes as `SmartTokenKind.project` — collapsing
+/// the leftover double space and trimming the ends. A no-op (returns [title]
+/// unchanged) when no token is present.
+///
+/// Kept next to [_project] so the two can't drift apart. Used by the Add Task
+/// sheet's project-suggestion strip: picking a suggested (or newly created)
+/// project clears the raw token from the title text since the picked project
+/// becomes the task's category instead.
+String removeProjectToken(String title) {
+  final m = _project.firstMatch(title);
+  if (m == null) return title;
+  final start = m.start + (m.group(1)?.length ?? 0);
+  final stripped = title.replaceRange(start, m.end, '');
+  return stripped.replaceAll(_whitespace, ' ').trim();
+}
+
 // ── Dates ────────────────────────────────────────────────────────────────────
 
 const Map<String, int> _weekdays = {

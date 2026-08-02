@@ -404,4 +404,22 @@ void main() {
       expect(parse('just some text').tokens, isEmpty);
     });
   });
+
+  group('removeProjectToken', () {
+    test('strips the /token and collapses the leftover double space', () {
+      expect(removeProjectToken('buy paint /gro now'), 'buy paint now');
+    });
+
+    test('strips a #token at the start of the title', () {
+      expect(removeProjectToken('#groceries buy milk'), 'buy milk');
+    });
+
+    test('strips a trailing token with no text after it', () {
+      expect(removeProjectToken('buy paint /gro'), 'buy paint');
+    });
+
+    test('no-ops when there is no project token', () {
+      expect(removeProjectToken('buy paint now'), 'buy paint now');
+    });
+  });
 }

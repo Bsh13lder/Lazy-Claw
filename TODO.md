@@ -1207,3 +1207,5 @@ Mobile v1.24.2+125 (OTA) + backend `make rebuild` (the comment cascade is server
 - **`Section` → `TaskListSection`** + corrected `ui_prefs_provider.dart` doc. Enum VALUE names untouched, so persisted `tasks.list.<name>.collapsed` keys still resolve.
 
 **Still open:** the web UI pass for comments/sorting/collapse/links (endpoints are already web-ready — reuse the client-minted-id contract).
+
+**Test-infra follow-up (found during the Phase 26 gate):** `mobile/test/screens/home_screen_test.dart` is LOAD-FLAKY — it passes in isolation (22/22, repeatedly) but fails 2-5 assorted cases in a full-suite run when the machine is busy (load avg ~8+), with a different subset failing each run. Verified pre-existing by A/B against `main` @ a68db21, which flakes identically under the same load. Likely timing-sensitive pumps/`pumpAndSettle` racing the offline sync retries visible in its logs. Not caused by any tasks pass; fix by pinning fake time / stubbing the sync in that harness.

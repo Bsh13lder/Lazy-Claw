@@ -1169,3 +1169,16 @@ Container rebuilt 2026-05-18 00:50:17. At 00:51:07 user asked "Check james last 
 - [x] **23.11 Docs** — spec at `docs/superpowers/specs/2026-05-28-awake-mode-design.md`, DOCS.md + CLAUDE.md + MEMORY.md updated.
 
 **Verification**: 31 new tests pass. Python syntax clean on all 11 modified/new files. Web UI TypeScript consistent (AwakeStatus type, api calls, component). Bridge is macOS-only; on other platforms skill returns a clear "not installed" message.
+
+## Phase 24: Task comments + tasks-UX pass (2026-08-02) — SHIPPED
+
+Merged to main @ 558072b (22 commits), deployed via `make rebuild`, APK v1.24.0+123 published for OTA. Full notes: DOCS.md → "Task comments + tasks-UX pass (2026-08-02)"; spec + plan under `docs/superpowers/{specs,plans}/2026-08-02-*`.
+
+**Follow-ups (parked at final review, all small):**
+- [ ] Add-link dialog splice (`_addLink` sets `controller.value` directly) bypasses the composer's `maxLength: 2000` — near-cap text + link insert can still silently drop a comment client-side (notifier clamp returns null on the fire-and-forget path). One-line clamp in `_addLink` + a test.
+- [ ] Comment composers now show Flutter's default "n / 2000" counter — style or hide via `buildCounter` if unwanted.
+- [ ] Deleting a subtask orphans its comments (invisible in every surface, still count toward the 500 cap) — cascade cleanup in `set_steps` or a fallback render.
+- [ ] `TasksProjectView` lacks the `didUpdateWidget` prefs-resync `TaskSection` got — unreachable today (Projects mounts on tap), becomes a bug if a "remember last view" feature ever mounts it on cold start.
+- [ ] `LinkText` disposes recognizers inside `build` — a rebuild during an in-flight link tap disposes the active recognizer (low probability); move disposal post-frame or to `dispose()`.
+- [ ] Stale doc comment: `ui_prefs_provider.dart` still says `kPrefListSectionCollapsed` is "not yet consumed" (Task 10 consumed it). Public name `Section` (tasks_screen.dart) is collision-prone — consider `TaskListSection`.
+- [ ] Web UI pass for comments/sorting/links (endpoints are web-ready; reuse the client-minted-id contract).

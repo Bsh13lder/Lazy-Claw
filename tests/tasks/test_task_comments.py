@@ -139,3 +139,20 @@ async def test_changes_feed_carries_decrypted_comments(cfg) -> None:
     feed = await task_store.get_task_changes(cfg, "u1", None)
     row = next(t for t in feed["tasks"] if t["id"] == task["id"])
     assert [c["text"] for c in task_store.decode_comments(row["comments"])] == ["in the feed"]
+
+
+async def test_add_comment_validates_text_and_author(cfg) -> None:
+    task = await task_store.create_task(cfg, "u1", "validated")
+    with pytest.raises(ValueError):
+        await task_store.add_comment(cfg, "u1", task["id"], text="   ")
+    with pytest.raises(ValueError):
+        await task_store.add_comment(
+            cfg, "u1", task["id"], text="x" * (task_store.MAX_COMMENT_CHARS + 1),
+        )
+    with pytest.raises(ValueError):
+        await task_store.add_comment(
+            cfg, "u1", task["id"], text="ok", author="martian",
+        )
+    # none of the rejected attempts may have persisted anything
+    fetched = await task_store.get_task(cfg, "u1", task["id"])
+    assert fetched["comments"] is None

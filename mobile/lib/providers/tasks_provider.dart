@@ -8,6 +8,7 @@ import '../core/notifications/task_reminder_service.dart';
 import '../core/reminder_offset.dart';
 import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
+import '../models/comment.dart';
 import '../models/subtask.dart';
 import '../models/task.dart';
 import '../notifications/local_notifications.dart';
@@ -354,6 +355,37 @@ class TasksNotifier extends StateNotifier<TasksState> {
   /// list clears the `steps` column.
   Future<void> setSubtasks(String id, List<Subtask> subtasks) =>
       updateTask(id, steps: serializeSubtasks(subtasks) ?? '');
+
+  /// Append a comment (author=user) optimistically + queue the server append.
+  Future<void> addComment(String taskId, String text,
+      {String? subtaskId}) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    try {
+      final comment = TaskComment(
+        id: newCommentId(),
+        ts: DateTime.now().toUtc().toIso8601String(),
+        author: 'user',
+        text: trimmed,
+        subtaskId: subtaskId,
+      );
+      await _dao.applyLocalAddComment(taskId, comment);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  Future<void> deleteComment(String taskId, String commentId) async {
+    try {
+      await _dao.applyLocalDeleteComment(taskId, commentId);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
 
   Future<void> completeTask(String id) async {
     try {

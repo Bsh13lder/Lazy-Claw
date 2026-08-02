@@ -225,6 +225,18 @@ class TaskSync {
         case OutboxOp.delete:
           await _repo.deleteTask(item.entityId);
           break;
+        case OutboxOp.commentAdd:
+          final c = Map<String, dynamic>.from((p['comment'] as Map?) ?? {});
+          await _repo.addComment(item.entityId, {
+            'id': c['id'],
+            'text': c['text'],
+            'subtask_id': c['subtask_id'],
+          });
+          break;
+        case OutboxOp.commentDelete:
+          await _repo.deleteComment(
+              item.entityId, (p['comment_id'] ?? '').toString());
+          break;
         default:
           // Unknown op — drop it (deleting the outbox row happens in push()).
           break;
@@ -239,9 +251,10 @@ class TaskSync {
 
   /// Decide what a push failure means and act on it. NEVER silently drops a
   /// queued edit on a transient failure (C1). Returns `true` ONLY for an
-  /// idempotent 404-on-complete/delete (treated as a success → caller commits
-  /// + counts it). For the other drain branches it removes THIS item's outbox
-  /// row here and returns `false`, leaving the cache row dirty so the next pull
+  /// idempotent 404-on-complete/delete/comment_delete (treated as a success →
+  /// caller commits + counts it). For the other drain branches it removes THIS
+  /// item's outbox row here and returns `false`, leaving the cache row dirty so
+  /// the next pull
   /// re-establishes server truth. Throws [_PushInterrupted] to STOP the drain
   /// and keep the queue.
   ///   * network (timeout/connection/cancel, status 0, non-badResponse) →
@@ -265,7 +278,9 @@ class TaskSync {
     // server-side. Return true so the caller commits (removes the outbox row
     // AND clears dirty) and counts it as pushed.
     if (status == 404 &&
-        (item.op == OutboxOp.delete || item.op == OutboxOp.complete)) {
+        (item.op == OutboxOp.delete ||
+            item.op == OutboxOp.complete ||
+            item.op == OutboxOp.commentDelete)) {
       debugPrint(
         'TaskSync.push: HTTP 404 on ${item.op} id=${item.entityId} — '
         'idempotent success',

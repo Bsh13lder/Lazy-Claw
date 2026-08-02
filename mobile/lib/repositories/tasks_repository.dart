@@ -202,4 +202,16 @@ class TasksRepository {
   Future<void> deleteTask(String id) async {
     await _t.deleteJson('/api/tasks/$id');
   }
+
+  /// Append a comment via POST /api/tasks/{id}/comments. [body] carries
+  /// {id, text, subtask_id?} — the server is idempotent on a replayed client id.
+  Future<Map<String, dynamic>> addComment(
+          String taskId, Map<String, dynamic> body) =>
+      _t.postJson('/api/tasks/$taskId/comments', body);
+
+  /// Delete a comment via DELETE /api/tasks/{id}/comments/{comment_id}
+  /// (idempotent server-side).
+  Future<void> deleteComment(String taskId, String commentId) async {
+    await _t.deleteJson('/api/tasks/$taskId/comments/$commentId');
+  }
 }

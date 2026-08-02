@@ -1975,6 +1975,15 @@ async def set_steps(
 ) -> list[dict] | None:
     """Replace the full sub-task checklist for a task.
 
+    Also cascades comment deletion: any comment whose ``subtask_id`` no
+    longer matches a surviving step is dropped in the same write. A comment
+    pinned to a deleted subtask is otherwise invisible forever — the
+    task-level thread filters ``subtask_id is None`` and the per-subtask
+    view is only reachable from a still-live tile — yet it would keep
+    counting toward ``MAX_COMMENTS_PER_TASK`` and riding every sync payload.
+    Steps and comments are written in ONE UPDATE (one ``updated_at`` bump)
+    so the cascade can never half-apply.
+
     Returns the normalized list, or None if the task does not exist.
     """
     task = await get_task(config, user_id, task_id)
@@ -1985,13 +1994,34 @@ async def set_steps(
     normalized = _normalize_steps(steps)
     enc = encrypt(json.dumps(normalized), key) if normalized else None
 
+    surviving_ids = {s["id"] for s in normalized}
+    current_comments = decode_comments(task.get("comments"))
+    pruned_comments = [
+        c for c in current_comments
+        if not c.get("subtask_id") or c["subtask_id"] in surviving_ids
+    ]
+
     now = datetime.now(timezone.utc).isoformat()
-    async with db_session(config) as db:
-        await db.execute(
-            "UPDATE tasks SET steps = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (enc, now, task_id, user_id),
-        )
-        await db.commit()
+    if len(pruned_comments) != len(current_comments):
+        comments_enc = encrypt(json.dumps(pruned_comments), key) if pruned_comments else None
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE tasks SET steps = ?, comments = ?, updated_at = ? "
+                "WHERE id = ? AND user_id = ?",
+                (enc, comments_enc, now, task_id, user_id),
+            )
+            await db.commit()
+    else:
+        # No comments orphaned by this write — leave the comments column
+        # untouched (re-encrypting an unchanged list would still churn the
+        # ciphertext via a fresh AES-GCM nonce, and bump updated_at for no
+        # reason).
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE tasks SET steps = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (enc, now, task_id, user_id),
+            )
+            await db.commit()
 
     return normalized
 

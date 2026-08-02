@@ -313,7 +313,30 @@ class TaskDao {
     // a null means "field untouched".
     final clearDue = dueDate != null && dueDate.isEmpty;
 
-    final updated = existing.copyWith(
+    // A steps patch (the detail sheet saving a checklist edit) may DELETE a
+    // subtask. Any comment pinned to that subtask_id would otherwise linger
+    // in the cache forever — invisible in every UI surface (the task-level
+    // thread filters subtaskId == null; the subtask view is only reachable
+    // from a still-live tile) yet still counted and still riding every sync
+    // payload — so prune it here in the same local write, mirroring the
+    // server's own set_steps cascade (lazyclaw/tasks/store.py). Only runs
+    // when a steps value is actually present in this patch; an unrelated
+    // field edit (title, priority, ...) must never touch comments.
+    String? prunedComments;
+    var commentsChanged = false;
+    if (steps != null) {
+      final survivingIds = parseSubtasks(steps).map((s) => s.id).toSet();
+      final remaining = [
+        for (final c in existing.taskComments)
+          if (c.subtaskId == null || survivingIds.contains(c.subtaskId)) c,
+      ];
+      if (remaining.length != existing.taskComments.length) {
+        commentsChanged = true;
+        prunedComments = serializeComments(remaining);
+      }
+    }
+
+    var updated = existing.copyWith(
       title: title,
       description: description,
       category: category,
@@ -328,7 +351,14 @@ class TaskDao {
       tags: tags,
       allocatedBudget: allocatedBudget,
       clearAllocatedBudget: clearAllocatedBudget,
+      comments: prunedComments,
     );
+    // Task.copyWith's null-means-unchanged convention (see task.dart) can't
+    // CLEAR comments when the LAST surviving comment was just orphaned —
+    // same gotcha applyLocalDeleteComment already works around below.
+    if (commentsChanged && prunedComments == null) {
+      updated = Task.fromJson({...updated.toJson(), 'comments': null});
+    }
 
     final patch = <String, dynamic>{
       'title': ?title,
@@ -364,6 +394,12 @@ class TaskDao {
       // empty value), but the local cache column is stored as a true null so
       // reads see a cleared — not empty-string — due date.
       if (clearDue) cacheUpdates['due_date'] = null;
+      // Cache-only: the pruned comments column rides the SAME row update as
+      // the steps change (never a separate write) but deliberately does NOT
+      // ride the outbox `update` payload below — the server performs its own
+      // cascade off the `steps` it receives, so mirroring it into the patch
+      // would be redundant (and, for a stale/racing client, wrong).
+      if (commentsChanged) cacheUpdates['comments'] = prunedComments;
       await txn.update(
         'task_cache',
         cacheUpdates,

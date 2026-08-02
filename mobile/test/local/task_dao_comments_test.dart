@@ -100,4 +100,136 @@ void main() {
           isNull);
     });
   });
+
+  group('applyLocalUpdate steps cascade (subtask delete)', () {
+    test(
+        'deleting a subtask via a steps patch prunes its comment, keeps the '
+        'rest', () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalCreate(
+        'checklist',
+        steps:
+            '[{"id":"s-a","title":"A","done":false},{"id":"s-b","title":"B","done":false}]',
+      );
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-a',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'on A',
+              subtaskId: 's-a'));
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-b',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'on B',
+              subtaskId: 's-b'));
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-task',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'task level'));
+
+      // Delete subtask A: the steps patch now only carries B.
+      final updated = await dao.applyLocalUpdate(created.id,
+          steps: '[{"id":"s-b","title":"B","done":false}]');
+
+      expect(updated!.taskComments.map((c) => c.id).toSet(),
+          {'c-b', 'c-task'});
+
+      final reread = await dao.getById(created.id);
+      expect(reread!.taskComments.map((c) => c.id).toSet(),
+          {'c-b', 'c-task'},
+          reason: 'the pruned cache row must survive a re-read, not just '
+              'the in-memory returned Task');
+    });
+
+    test('steps patch with no removed subtask leaves comments untouched',
+        () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalCreate(
+        'checklist',
+        steps: '[{"id":"s-a","title":"A","done":false}]',
+      );
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-a',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'on A',
+              subtaskId: 's-a'));
+      final before = await dao.getById(created.id);
+
+      // A title-only edit of the SAME subtask id — nothing is orphaned.
+      final updated = await dao.applyLocalUpdate(created.id,
+          steps: '[{"id":"s-a","title":"A renamed","done":false}]');
+
+      expect(updated!.comments, before!.comments,
+          reason:
+              'comments column must not churn when no subtask was removed');
+    });
+
+    test(
+        'deleting the only subtask with a comment clears comments to NULL',
+        () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalCreate(
+        'checklist',
+        steps: '[{"id":"s-a","title":"A","done":false}]',
+      );
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-a',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'on A',
+              subtaskId: 's-a'));
+
+      // Clearing the checklist entirely (steps: '') mirrors setSubtasks([]).
+      final updated = await dao.applyLocalUpdate(created.id, steps: '');
+
+      expect(updated!.taskComments, isEmpty);
+      expect(updated.comments, isNull,
+          reason: 'must be a real cleared field, not a stale copyWith value');
+      final reread = await dao.getById(created.id);
+      expect(reread!.comments, isNull,
+          reason: 'task_cache.comments must be a real SQL NULL after the '
+              'last surviving comment is orphaned');
+    });
+
+    test('steps cascade does not enqueue an extra outbox op', () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalCreate(
+        'checklist',
+        steps:
+            '[{"id":"s-a","title":"A","done":false},{"id":"s-b","title":"B","done":false}]',
+      );
+      await dao.applyLocalAddComment(
+          created.id,
+          TaskComment(
+              id: 'c-a',
+              ts: '2026-08-02T10:00:00Z',
+              author: 'user',
+              text: 'on A',
+              subtaskId: 's-a'));
+      final before = await dao.readOutbox();
+
+      await dao.applyLocalUpdate(created.id,
+          steps: '[{"id":"s-b","title":"B","done":false}]');
+
+      final after = await dao.readOutbox();
+      // Exactly one new op — the ordinary `update` for the steps patch. The
+      // server runs its own comment cascade on that same PUT, so a second,
+      // local-only comment op would be pure duplication.
+      expect(after.length, before.length + 1);
+      expect(after.last.op, OutboxOp.update);
+    });
+  });
 }

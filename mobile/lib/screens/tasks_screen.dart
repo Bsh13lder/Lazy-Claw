@@ -937,6 +937,23 @@ class _TaskSectionState extends State<TaskSection> {
     _collapsed = widget.initialCollapsed;
   }
 
+  @override
+  void didUpdateWidget(TaskSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Resync when the persisted pref arrives after first mount: the List
+    // view renders its sections synchronously on the very first build
+    // (before the screen's async pref load resolves), so this State is
+    // already mounted with the seeded default by the time the parent
+    // rebuilds with the real persisted value — initState won't re-run
+    // (same widget type/slot, no key), so without this the section would be
+    // silently stuck on the default forever. A user toggle also flows back
+    // down through the parent's map into `initialCollapsed`, so this stays
+    // consistent with interactive changes too.
+    if (widget.initialCollapsed != oldWidget.initialCollapsed) {
+      _collapsed = widget.initialCollapsed;
+    }
+  }
+
   void _markEntered() {
     if (!_entered && mounted) setState(() => _entered = true);
   }

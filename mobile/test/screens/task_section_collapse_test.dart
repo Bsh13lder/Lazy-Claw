@@ -145,6 +145,85 @@ void main() {
     );
   });
 
+  group('TaskSection cold-start resync (didUpdateWidget)', () {
+    // The List view renders its TaskSections synchronously on first build —
+    // before the screen's async pref load resolves — so each section's State
+    // is already mounted (seeded from the built-in default) by the time the
+    // parent rebuilds with the real persisted `initialCollapsed`. Flutter
+    // reuses the mounted State for the same widget type/slot (no key), so
+    // `initState` does NOT re-run on that second build. These tests
+    // reproduce that exact sequence: pump once with the "pre-load" default,
+    // then pump the SAME widget slot again with the "post-load" persisted
+    // value — simulating the parent's setState after `_loadSectionCollapsedPrefs`
+    // resolves — and assert the section actually resyncs.
+    testWidgets(
+      'Today: rebuild from initialCollapsed=false to true hides its rows '
+      '(persisted "collapsed" pref arriving after first mount)',
+      (tester) async {
+        await tester.pumpWidget(
+          _host(
+            _section(
+              section: Section.today,
+              tasks: [_task('t1', 'Water the plants')],
+              initialCollapsed: false,
+            ),
+          ),
+        );
+        // pumpAndSettle (not a single pump): the row's entrance animation
+        // (flutter_animate) must finish before the next pumpWidget below, or
+        // its timer is still pending when the test ends.
+        await tester.pumpAndSettle();
+        expect(find.text('Water the plants'), findsOneWidget);
+
+        // Same widget slot, no key — Flutter reuses the mounted State.
+        await tester.pumpWidget(
+          _host(
+            _section(
+              section: Section.today,
+              tasks: [_task('t1', 'Water the plants')],
+              initialCollapsed: true,
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('Water the plants'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'Done: rebuild from initialCollapsed=true to false reveals its rows '
+      '(persisted "expanded" pref arriving after first mount)',
+      (tester) async {
+        await tester.pumpWidget(
+          _host(
+            _section(
+              section: Section.done,
+              tasks: [_task('d1', 'Filed taxes')],
+              initialCollapsed: true,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Filed taxes'), findsNothing);
+
+        // Same widget slot, no key — Flutter reuses the mounted State.
+        await tester.pumpWidget(
+          _host(
+            _section(
+              section: Section.done,
+              tasks: [_task('d1', 'Filed taxes')],
+              initialCollapsed: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Filed taxes'), findsOneWidget);
+      },
+    );
+  });
+
   group('TaskSection empty-section rendering (regression)', () {
     testWidgets(
       'empty Overdue renders nothing at all (no header, no chevron)',

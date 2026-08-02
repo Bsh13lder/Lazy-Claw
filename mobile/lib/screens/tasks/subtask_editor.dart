@@ -25,13 +25,21 @@ class SubtaskEditor extends StatelessWidget {
   final ValueChanged<List<Subtask>> onChanged;
 
   /// Comment counts keyed by sub-task id, used to show a `+count` badge next
-  /// to the comment icon. Missing/absent ids are treated as zero.
+  /// to the comment icon. A sub-task's id being ABSENT from this map (not just
+  /// mapped to zero) means comments aren't available for it yet — see
+  /// [onOpenComments].
   final Map<String, int> commentCounts;
 
-  /// When supplied, each tile shows a small comment icon (+count when > 0)
-  /// between the title and the delete affordance; tapping it invokes this
-  /// with the tile's sub-task id. Null (the default) keeps tiles badge-free —
-  /// existing callers that don't pass it compile and render unchanged.
+  /// When supplied, a tile shows a small comment icon (+count when > 0)
+  /// between the title and the delete affordance ONLY when its sub-task's id
+  /// is also a key of [commentCounts]; tapping it invokes this with the
+  /// tile's sub-task id. This lets a caller wire a single non-null callback
+  /// for the whole list while still hiding the affordance per-tile for
+  /// sub-tasks comments can't target yet (e.g. a not-yet-saved new sub-task —
+  /// see `TaskDetailSheet`, which keys `commentCounts` off the SAVED task
+  /// rather than the in-sheet working list for exactly this reason). Null (the
+  /// default) keeps every tile badge-free — existing callers that don't pass
+  /// it compile and render unchanged.
   final ValueChanged<String>? onOpenComments;
 
   void _toggle(String id) {
@@ -83,7 +91,8 @@ class SubtaskEditor extends StatelessWidget {
             onTextChanged: (t) => _editText(s.id, t),
             onDelete: () => _delete(s.id),
             commentCount: commentCounts[s.id] ?? 0,
-            onOpenComments: onOpenComments == null
+            onOpenComments:
+                (onOpenComments == null || !commentCounts.containsKey(s.id))
                 ? null
                 : () => onOpenComments!(s.id),
           ),

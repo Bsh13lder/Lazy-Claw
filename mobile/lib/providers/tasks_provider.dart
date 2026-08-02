@@ -70,7 +70,8 @@ final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
   final prefs = ref.read(settingsPrefsProvider).valueOrNull;
   final service = TaskReminderService(
     FlutterLocalNotificationsSink(LocalNotifications.plugin),
-    defaultReminderMinutes: prefs?.defaultReminderMinutes ?? kDefaultReminderMinutes,
+    defaultReminderMinutes:
+        prefs?.defaultReminderMinutes ?? kDefaultReminderMinutes,
     offsets: prefs?.reminderOffsets ?? kDefaultReminderOffsets,
   );
   // Keep the date-only fallback time-of-day in sync with the user's pref.
@@ -359,21 +360,24 @@ class TasksNotifier extends StateNotifier<TasksState> {
   /// Append a comment (author=user) optimistically + queue the server append.
   ///
   /// Returns the minted [TaskComment] (with the id this call actually
-  /// persisted) on success, or `null` when the text was blank or the write
-  /// failed. Additive: existing callers that only awaited the (formerly
-  /// `void`) future are unaffected — they simply ignore the return value.
-  /// Callers that need to act on the SAME comment a later delete must target
-  /// (e.g. an optimistic local list) should capture this return rather than
-  /// re-deriving an id client-side — [newCommentId] mints a fresh random id
-  /// on every call, so a second, separately-synthesized id would silently
-  /// diverge from the one actually persisted here.
+  /// persisted) on success, or `null` when the text was blank, over the
+  /// [kMaxCommentChars] cap (defensive — the composer already clamps input,
+  /// but this mirrors the server's own limit so nothing can slip through a
+  /// surface that forgot to wire it), or the write failed. Additive: existing
+  /// callers that only awaited the (formerly `void`) future are unaffected —
+  /// they simply ignore the return value. Callers that need to act on the
+  /// SAME comment a later delete must target (e.g. an optimistic local list)
+  /// should capture this return rather than re-deriving an id client-side —
+  /// [newCommentId] mints a fresh random id on every call, so a second,
+  /// separately-synthesized id would silently diverge from the one actually
+  /// persisted here.
   Future<TaskComment?> addComment(
     String taskId,
     String text, {
     String? subtaskId,
   }) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return null;
+    if (trimmed.isEmpty || trimmed.length > kMaxCommentChars) return null;
     try {
       final comment = TaskComment(
         id: newCommentId(),
@@ -382,7 +386,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
         text: trimmed,
         subtaskId: subtaskId,
       );
-      await _dao.applyLocalAddComment(taskId, comment);
+      // A null return means the task wasn't in the cache (nothing was
+      // enqueued) — surface that as a failed add rather than handing the
+      // caller a comment that was never actually persisted anywhere (the
+      // subtask sheet's optimistic local list would otherwise append a
+      // phantom that silently vanishes on the next real refresh).
+      final updated = await _dao.applyLocalAddComment(taskId, comment);
+      if (updated == null) return null;
       await _refreshFromCache();
       unawaited(_syncThenRefresh());
       return comment;

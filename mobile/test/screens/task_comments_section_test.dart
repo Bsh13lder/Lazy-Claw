@@ -133,6 +133,24 @@ void main() {
     expect(field.controller!.text, isEmpty);
   });
 
+  testWidgets('typing beyond 2000 chars is capped by the field itself', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(comments: const [], onAdd: (_) {}, onDelete: (_) {}),
+    );
+
+    final over = 'a' * 2100;
+    await tester.enterText(find.byKey(const Key('comment-input')), over);
+    await tester.pump();
+
+    final field = tester.widget<TextField>(
+      find.byKey(const Key('comment-input')),
+    );
+    expect(field.controller!.text.length, 2000);
+    expect(field.controller!.text, 'a' * 2000);
+  });
+
   testWidgets('an empty submit is a no-op', (tester) async {
     var calls = 0;
     await tester.pumpWidget(

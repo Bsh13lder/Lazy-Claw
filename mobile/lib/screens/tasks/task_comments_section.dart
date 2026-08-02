@@ -307,6 +307,7 @@ class _CommentInputRowState extends State<_CommentInputRow> {
             hint: 'Add a comment',
             minLines: 1,
             maxLines: 4,
+            maxLength: kMaxCommentChars,
             textInputAction: TextInputAction.send,
             onSubmitted: (_) => _submit(),
           ),

@@ -247,6 +247,36 @@ void main() {
     expect(subs.firstWhere((s) => s.id == 's1').title, 'Buy bread flour');
   });
 
+  testWidgets(
+    'a new (unsaved) sub-task shows no comment badge while a saved one '
+    'keeps it',
+    (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub); // _withSteps: saved sub-tasks s1, s2.
+
+      // Both pre-existing (SAVED) sub-tasks get a comment affordance — the
+      // detail sheet always wires onOpenComments, and their ids are present
+      // in the watched provider task's parsed steps.
+      expect(find.byIcon(Icons.chat_bubble_outline), findsNWidgets(2));
+      expect(find.byKey(const ValueKey('subtask-comments-s1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('subtask-comments-s2')), findsOneWidget);
+
+      await tester.enterText(
+        find.byKey(const Key('subtask-add-field')),
+        'Add frosting',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      // The freshly-added sub-task renders immediately (in-sheet, unsaved)
+      // but must NOT get a comment badge — the count stays at 2, not 3, since
+      // a comment on it before Save would replay against an unknown
+      // subtask_id server-side.
+      expect(find.text('Add frosting'), findsOneWidget);
+      expect(find.byIcon(Icons.chat_bubble_outline), findsNWidgets(2));
+    },
+  );
+
   testWidgets('removing the last sub-task writes an empty string (clears)', (
     tester,
   ) async {

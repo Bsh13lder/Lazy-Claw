@@ -530,8 +530,17 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             .where((t) => t.id == widget.task.id)
             .firstOrNull ??
         widget.task;
+    // Keyed off `live.subtasks` (the SAVED task's parsed steps) rather than
+    // `_subtasks` (this sheet's un-saved working list) — a comment writes
+    // through the notifier IMMEDIATELY, but a locally-added sub-task doesn't
+    // exist server-side until Save. Opening the comment sheet for one before
+    // then would replay `comment_add` against an unknown `subtask_id` (a
+    // definitive 400 the outbox then drains, silently erasing the comment).
+    // A subtask id absent here — new/unsaved — gets no key, and
+    // SubtaskEditor hides the 💬 affordance entirely for ids missing from
+    // this map (see its `onOpenComments` doc).
     final commentCounts = <String, int>{
-      for (final s in _subtasks)
+      for (final s in live.subtasks)
         s.id: live.taskComments.where((c) => c.subtaskId == s.id).length,
     };
     return SingleChildScrollView(

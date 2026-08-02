@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../tokens/tokens.dart';
 
 /// The app's text input. Thin wrapper over [TextField] that applies the design
@@ -20,6 +21,8 @@ class LzTextField extends StatelessWidget {
     this.onSubmitted,
     this.minLines,
     this.maxLines = 1,
+    this.maxLength,
+    this.maxLengthEnforcement,
     this.autofocus = false,
     this.enabled = true,
     this.fieldKey,
@@ -39,6 +42,18 @@ class LzTextField extends StatelessWidget {
   final ValueChanged<String>? onSubmitted;
   final int? minLines;
   final int? maxLines;
+
+  /// Caps input length. When set, [TextField] auto-installs a
+  /// `LengthLimitingTextInputFormatter` (per [maxLengthEnforcement], which
+  /// defaults to the platform's enforced behavior) so typing simply stops
+  /// accepting characters past the limit — no separate validation needed for
+  /// the common "hard cap" case.
+  final int? maxLength;
+
+  /// Overrides how [maxLength] is enforced. Left null (the default) to use
+  /// [TextField]'s own default (enforced/truncating), which is what every
+  /// current caller wants.
+  final MaxLengthEnforcement? maxLengthEnforcement;
   final bool autofocus;
   final bool enabled;
 
@@ -73,6 +88,8 @@ class LzTextField extends StatelessWidget {
           onSubmitted: onSubmitted,
           minLines: minLines,
           maxLines: obscureText ? 1 : maxLines,
+          maxLength: maxLength,
+          maxLengthEnforcement: maxLengthEnforcement,
           autofocus: autofocus,
           enabled: enabled,
           style: AppText.body,

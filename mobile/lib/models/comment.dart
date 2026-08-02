@@ -2,14 +2,22 @@ import 'dart:convert';
 
 import '../local/uuid.dart';
 
+/// Hard cap on a single comment's length, mirroring the server's
+/// `MAX_COMMENT_CHARS` (`lazyclaw/tasks/store.py`). The composer clamps input
+/// to this via [maxLength] on its field; [TasksNotifier.addComment] enforces
+/// it again defensively so an over-length comment can never slip past a UI
+/// that forgot to wire the cap (e.g. a future composer surface) and get
+/// optimistically appended only to be rejected + drained by the server later.
+const int kMaxCommentChars = 2000;
+
 /// One comment in a task's thread. Lives in the `task_cache.comments` TEXT
 /// column (and the server's encrypted `tasks.comments`) as a JSON array:
 /// `[{"id","ts","author","text","subtask_id"}]` — the canonical shape the
 /// server's `add_comment` emits. `subtask_id` null = task-level comment.
 class TaskComment {
   final String id;
-  final String ts;      // ISO-8601 UTC
-  final String author;  // 'user' | 'agent'
+  final String ts; // ISO-8601 UTC
+  final String author; // 'user' | 'agent'
   final String text;
   final String? subtaskId;
 
@@ -21,23 +29,27 @@ class TaskComment {
     this.subtaskId,
   });
 
-  TaskComment copyWith({String? id, String? ts, String? author, String? text,
-      String? subtaskId}) =>
-      TaskComment(
-        id: id ?? this.id,
-        ts: ts ?? this.ts,
-        author: author ?? this.author,
-        text: text ?? this.text,
-        subtaskId: subtaskId ?? this.subtaskId,
-      );
+  TaskComment copyWith({
+    String? id,
+    String? ts,
+    String? author,
+    String? text,
+    String? subtaskId,
+  }) => TaskComment(
+    id: id ?? this.id,
+    ts: ts ?? this.ts,
+    author: author ?? this.author,
+    text: text ?? this.text,
+    subtaskId: subtaskId ?? this.subtaskId,
+  );
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'ts': ts,
-        'author': author,
-        'text': text,
-        'subtask_id': subtaskId,
-      };
+    'id': id,
+    'ts': ts,
+    'author': author,
+    'text': text,
+    'subtask_id': subtaskId,
+  };
 
   static TaskComment? fromMap(Map<dynamic, dynamic> map) {
     final text = (map['text'] ?? '').toString().trim();

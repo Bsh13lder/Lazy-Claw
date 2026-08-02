@@ -268,6 +268,7 @@ class _SubtaskTileState extends State<_SubtaskTile> {
         focusNode: _focus,
         style: AppText.body,
         cursorColor: AppColors.accent,
+        maxLines: null,
         textInputAction: TextInputAction.done,
         onSubmitted: (_) => _commit(),
         decoration: const InputDecoration(

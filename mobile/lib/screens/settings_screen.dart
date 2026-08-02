@@ -544,6 +544,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _buildPermissionsSection(),
           AppSpacing.vGap(AppSpacing.xl),
 
+          // 8b. Guide — in-app tips & shortcuts
+          _buildGuideSection(),
+          AppSpacing.vGap(AppSpacing.xl),
+
           // 9. About
           _buildAboutSection(),
           AppSpacing.vGap(AppSpacing.xxl),
@@ -1879,6 +1883,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  // Extracted as a standalone widget (`SettingsGuideTile`, below) — mirrors
+  // `SettingsUpdateTile` — so the tile + the "Tips & shortcuts" dialog it
+  // opens can be pumped and asserted on in isolation.
+  Widget _buildGuideSection() {
+    return const LzSection(
+      title: 'Guide',
+      child: LzCard(
+        padding: EdgeInsets.zero,
+        child: SettingsGuideTile(),
+      ),
+    );
+  }
+
   Widget _buildAboutSection() {
     return LzSection(
       title: 'About',
@@ -1975,6 +1992,81 @@ class SettingsUpdateTile extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── Guide — "Tips & shortcuts" tile + dialog ────────────────────────────────
+
+/// The Settings → Guide "Tips & shortcuts" entry: a tappable list tile that
+/// opens an [LzDialog] listing [GuideStepsList]'s in-app tips.
+///
+/// Extracted as a public, stateless widget (mirrors [SettingsUpdateTile]) so
+/// the tile + the dialog it opens can be pumped and asserted on in isolation,
+/// without the full [SettingsScreen]'s auth/eco/permissions/secure-storage
+/// dependencies.
+class SettingsGuideTile extends StatelessWidget {
+  const SettingsGuideTile({super.key});
+
+  Future<void> _showGuide(BuildContext context) => LzDialog.show<void>(
+        context,
+        title: 'Tips & shortcuts',
+        content: const GuideStepsList(),
+        actions: [
+          LzButton.primary(
+            label: 'Got it',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return LzListTile(
+      key: const Key('settings-guide-tile'),
+      leading: const Icon(Icons.lightbulb_outline,
+          size: 20, color: AppColors.textSecondary),
+      title: 'Tips & shortcuts',
+      onTap: () => _showGuide(context),
+      trailing: const Icon(Icons.chevron_right,
+          size: 18, color: AppColors.textMuted),
+    );
+  }
+}
+
+/// The body of the "Tips & shortcuts" dialog: 6 numbered [_HelpStep] rows
+/// covering project shortcuts, links, subtask comments, and the Projects
+/// view's completed-task filter. Extracted as a public widget so its content
+/// can be asserted on directly, independent of [SettingsGuideTile]'s dialog
+/// plumbing.
+class GuideStepsList extends StatelessWidget {
+  const GuideStepsList({super.key});
+
+  /// Verbatim tip text, in display order.
+  static const List<String> steps = [
+    'Type /project or #project while adding a task — matching projects '
+        'appear; no match offers Create.',
+    'Or tap the PROJECT chip in Add Task to pick or create one manually.',
+    'Links: paste a URL or use the Add-link button in notes and comments — '
+        '[text](url) renders tappable.',
+    'Tap 💬 on a subtask for its own comment thread. Long-press any comment '
+        'to delete it.',
+    'The eye icon in Projects view hides completed tasks; section headers '
+        'collapse and remember their state.',
+    "Tap a task's notes preview to edit; links inside stay tappable.",
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (var i = 0; i < steps.length; i++) ...[
+          if (i > 0) const SizedBox(height: AppSpacing.md),
+          _HelpStep(n: '${i + 1}', text: steps[i]),
+        ],
+      ],
     );
   }
 }

@@ -277,6 +277,25 @@ void main() {
     },
   );
 
+  testWidgets(
+    'editing a sub-task allows multiple lines (maxLines: null) so a long '
+    "title wraps instead of scrolling off-screen",
+    (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub);
+
+      await tester.tap(find.byKey(const ValueKey('subtask-text-s1')));
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('subtask-edit-s1')),
+      );
+      expect(field.maxLines, isNull);
+      // The existing commit-on-done behavior is untouched.
+      expect(field.textInputAction, TextInputAction.done);
+    },
+  );
+
   testWidgets('removing the last sub-task writes an empty string (clears)', (
     tester,
   ) async {

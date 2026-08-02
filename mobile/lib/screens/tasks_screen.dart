@@ -43,32 +43,38 @@ enum _TasksView { list, overdue, calendar, projects }
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 
-/// The four section buckets rendered by [TasksScreen].
-enum _Section { overdue, today, upcoming, done }
+/// The four section buckets rendered by [TasksScreen]. Public so widget
+/// tests can pump [TaskSection] directly without going through the full
+/// screen.
+enum Section { overdue, today, upcoming, done }
 
-extension _SectionLabel on _Section {
+/// The section's default collapse state before any persisted preference has
+/// loaded: Done starts collapsed, everything else starts expanded.
+bool defaultSectionCollapsed(Section section) => section == Section.done;
+
+extension _SectionLabel on Section {
   String get label {
     switch (this) {
-      case _Section.overdue:
+      case Section.overdue:
         return 'Overdue';
-      case _Section.today:
+      case Section.today:
         return 'Today';
-      case _Section.upcoming:
+      case Section.upcoming:
         return 'Upcoming';
-      case _Section.done:
+      case Section.done:
         return 'Done';
     }
   }
 
   IconData get emptyIcon {
     switch (this) {
-      case _Section.overdue:
+      case Section.overdue:
         return Icons.warning_amber_rounded;
-      case _Section.today:
+      case Section.today:
         return Icons.today_outlined;
-      case _Section.upcoming:
+      case Section.upcoming:
         return Icons.event_outlined;
-      case _Section.done:
+      case Section.done:
         return Icons.check_circle_outline;
     }
   }
@@ -101,7 +107,7 @@ bool isOverdueTask(Task task, {DateTime? now}) {
 }
 
 /// Splits [tasks] into the four section buckets.
-Map<_Section, List<Task>> _groupTasks(List<Task> tasks) {
+Map<Section, List<Task>> _groupTasks(List<Task> tasks) {
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
 
@@ -137,10 +143,10 @@ Map<_Section, List<Task>> _groupTasks(List<Task> tasks) {
   }
 
   return {
-    _Section.overdue: overdue,
-    _Section.today: todayList,
-    _Section.upcoming: upcoming,
-    _Section.done: done,
+    Section.overdue: overdue,
+    Section.today: todayList,
+    Section.upcoming: upcoming,
+    Section.done: done,
   };
 }
 
@@ -184,6 +190,15 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// The Projects view's persisted "hide completed" toggle.
   bool _projectsHideCompleted = false;
 
+  /// The List view's per-section collapsed state, keyed by [Section]. Seeded
+  /// from [defaultSectionCollapsed] (Done collapsed, others expanded) so the
+  /// correct defaults render on the very first frame, before the persisted
+  /// values below have loaded.
+  Map<Section, bool> _sectionCollapsed = {
+    for (final section in Section.values)
+      section: defaultSectionCollapsed(section),
+  };
+
   @override
   void initState() {
     super.initState();
@@ -195,9 +210,11 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // The list (tap-the-chip project picker + Projects view) all need the
     // project list, so load the budgets store up front (cheap, offline-first).
     _ensureBudgetsLoaded();
-    // Restore the Projects view's persisted expansion + hide-completed state
-    // (client-local, see UiPrefsDao) — a single async read, applied once.
+    // Restore the Projects view's persisted expansion + hide-completed state,
+    // and the List view's per-section collapsed state (client-local, see
+    // UiPrefsDao) — a single async read, applied once.
     unawaited(_loadProjectsPrefs());
+    unawaited(_loadSectionCollapsedPrefs());
     // NOTE: the cold-start deep-link replay lives in [build] via
     // [drainPendingAction] (not a one-shot here) so it survives whichever frame
     // this screen first becomes visible on — see _myActions usage below.
@@ -223,13 +240,33 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     }
   }
 
+  /// One-shot restore of the List view's per-section collapsed state.
+  /// Best-effort, mirroring [_loadProjectsPrefs]: a failure here just leaves
+  /// the [defaultSectionCollapsed] seed in place.
+  Future<void> _loadSectionCollapsedPrefs() async {
+    try {
+      final prefs = ref.read(uiPrefsDaoProvider);
+      final loaded = <Section, bool>{};
+      for (final section in Section.values) {
+        loaded[section] = await prefs.getBool(
+          kPrefListSectionCollapsed(section.name),
+          fallback: defaultSectionCollapsed(section),
+        );
+      }
+      if (!mounted) return;
+      setState(() => _sectionCollapsed = loaded);
+    } catch (e) {
+      debugPrint('TasksScreen._loadSectionCollapsedPrefs failed: $e');
+    }
+  }
+
   /// Persists the Projects view's expanded-bucket set as it changes, and
   /// keeps the local copy in sync so a view remount (leaving and returning to
   /// Projects) restores it without waiting on another async DB read.
   void _onProjectsExpandedChanged(Set<String> expanded) {
     setState(() => _projectsExpanded = expanded);
     unawaited(
-      _persistProjectsPref(
+      _persistUiPref(
         () => ref
             .read(uiPrefsDaoProvider)
             .setStringSet(kPrefProjectsExpanded, expanded),
@@ -242,7 +279,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   void _onProjectsHideCompletedChanged(bool value) {
     setState(() => _projectsHideCompleted = value);
     unawaited(
-      _persistProjectsPref(
+      _persistUiPref(
         () => ref
             .read(uiPrefsDaoProvider)
             .setBool(kPrefProjectsHideCompleted, value),
@@ -250,9 +287,25 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     );
   }
 
+  /// Persists a single List-view section's collapsed flag as it changes, and
+  /// keeps the local copy in sync so a rebuild doesn't wait on another async
+  /// DB read. Mirrors [_onProjectsExpandedChanged].
+  void _onSectionCollapsedChanged(Section section, bool collapsed) {
+    setState(
+      () => _sectionCollapsed = {..._sectionCollapsed, section: collapsed},
+    );
+    unawaited(
+      _persistUiPref(
+        () => ref
+            .read(uiPrefsDaoProvider)
+            .setBool(kPrefListSectionCollapsed(section.name), collapsed),
+      ),
+    );
+  }
+
   /// Runs a fire-and-forget prefs write, swallowing (and logging) any
   /// failure — see [_loadProjectsPrefs] for why this stays best-effort.
-  Future<void> _persistProjectsPref(Future<void> Function() write) async {
+  Future<void> _persistUiPref(Future<void> Function() write) async {
     try {
       await write();
     } catch (e) {
@@ -789,12 +842,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           AppSpacing.xxxl, // leave room above the FAB
         ),
         children: [
-          for (final section in _Section.values)
-            _TaskSection(
+          for (final section in Section.values)
+            TaskSection(
               section: section,
               tasks: grouped[section] ?? const [],
               dirtyIds: state.dirtyIds,
               projects: projects,
+              initialCollapsed:
+                  _sectionCollapsed[section] ??
+                  defaultSectionCollapsed(section),
+              onCollapsedChanged: (collapsed) =>
+                  _onSectionCollapsedChanged(section, collapsed),
               onComplete: (id) =>
                   ref.read(tasksProvider.notifier).completeTask(id),
               onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
@@ -814,12 +872,15 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
 // ── Section widget ─────────────────────────────────────────────────────────────
 
-class _TaskSection extends StatefulWidget {
-  const _TaskSection({
+class TaskSection extends StatefulWidget {
+  const TaskSection({
+    super.key,
     required this.section,
     required this.tasks,
     required this.dirtyIds,
     required this.projects,
+    required this.initialCollapsed,
+    this.onCollapsedChanged,
     required this.onComplete,
     required this.onDelete,
     required this.onOpen,
@@ -831,10 +892,21 @@ class _TaskSection extends StatefulWidget {
     required this.onReschedule,
   });
 
-  final _Section section;
+  final Section section;
   final List<Task> tasks;
   final Set<String> dirtyIds;
   final List<Project> projects;
+
+  /// The section's collapsed state on first build — seeded by the caller
+  /// from its persisted preference (see [defaultSectionCollapsed] for the
+  /// fallback used before that preference has loaded).
+  final bool initialCollapsed;
+
+  /// Fired with the new collapsed state whenever the chevron is tapped, so
+  /// the caller can persist it. Optional — tests that only care about the
+  /// visual toggle can omit it.
+  final ValueChanged<bool>? onCollapsedChanged;
+
   final void Function(String id) onComplete;
   final void Function(String id) onDelete;
   final void Function(Task task) onOpen;
@@ -846,12 +918,13 @@ class _TaskSection extends StatefulWidget {
   final void Function(Task task) onReschedule;
 
   @override
-  State<_TaskSection> createState() => _TaskSectionState();
+  State<TaskSection> createState() => _TaskSectionState();
 }
 
-class _TaskSectionState extends State<_TaskSection> {
-  // "Done" section starts collapsed.
-  bool _collapsed = false;
+class _TaskSectionState extends State<TaskSection> {
+  // Seeded from the caller's persisted preference (or the built-in default —
+  // Done collapsed, others expanded) — see [TaskSection.initialCollapsed].
+  late bool _collapsed;
 
   // The staggered fade+slide entrance plays exactly once, on first mount. Once
   // the last row finishes we drop the Animate wrappers so subsequent rebuilds
@@ -861,7 +934,7 @@ class _TaskSectionState extends State<_TaskSection> {
   @override
   void initState() {
     super.initState();
-    _collapsed = widget.section == _Section.done;
+    _collapsed = widget.initialCollapsed;
   }
 
   void _markEntered() {
@@ -898,8 +971,8 @@ class _TaskSectionState extends State<_TaskSection> {
     // Never render the section header if there's nothing to show (and it's not
     // the upcoming section which always appears as the catch-all bucket).
     if (widget.tasks.isEmpty &&
-        widget.section != _Section.upcoming &&
-        widget.section != _Section.today) {
+        widget.section != Section.upcoming &&
+        widget.section != Section.today) {
       return const SizedBox.shrink();
     }
 
@@ -922,17 +995,19 @@ class _TaskSectionState extends State<_TaskSection> {
               countBadge,
               const SizedBox(width: AppSpacing.sm),
             ],
-            if (widget.section == _Section.done)
-              GestureDetector(
-                onTap: () => setState(() => _collapsed = !_collapsed),
-                child: Icon(
-                  _collapsed
-                      ? Icons.keyboard_arrow_down
-                      : Icons.keyboard_arrow_up,
-                  size: 18,
-                  color: AppColors.textMuted,
-                ),
+            GestureDetector(
+              onTap: () => setState(() {
+                _collapsed = !_collapsed;
+                widget.onCollapsedChanged?.call(_collapsed);
+              }),
+              child: Icon(
+                _collapsed
+                    ? Icons.keyboard_arrow_down
+                    : Icons.keyboard_arrow_up,
+                size: 18,
+                color: AppColors.textMuted,
               ),
+            ),
           ],
         ),
         child: _buildContent(),
@@ -982,11 +1057,11 @@ class _TaskSectionState extends State<_TaskSection> {
     );
   }
 
-  String _emptyTitle(_Section section) {
+  String _emptyTitle(Section section) {
     switch (section) {
-      case _Section.today:
+      case Section.today:
         return 'Nothing due today';
-      case _Section.upcoming:
+      case Section.upcoming:
         return 'No upcoming tasks';
       default:
         return 'All clear';

@@ -2180,6 +2180,124 @@ async def read_progress_log(
     return log
 
 
+# ---------------------------------------------------------------------------
+# Comments — encrypted JSON thread of {id, ts, author, text, subtask_id}.
+# Append/delete only; NEVER rides update_task (no full-replace surface).
+# ---------------------------------------------------------------------------
+
+MAX_COMMENTS_PER_TASK = 500
+MAX_COMMENT_CHARS = 2000
+_VALID_COMMENT_AUTHORS = frozenset({"user", "agent"})
+
+
+class CommentLimitReached(Exception):
+    """The per-task comment cap was hit; the append is refused loudly."""
+
+
+def decode_comments(raw: str | list | None) -> list[dict]:
+    """Decode a task's ``comments`` value into a list of dicts.
+
+    ``comments`` is an ENCRYPTED field, so ``_row_to_dict`` hands back the
+    decrypted JSON *string* (same contract as ``steps``). Malformed input
+    degrades to an empty thread, never raises.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Could not parse comments JSON; treating as empty thread")
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [c for c in parsed if isinstance(c, dict)]
+
+
+async def _write_comments(
+    config: Config, user_id: str, task_id: str, comments: list[dict], key: bytes,
+) -> None:
+    enc = encrypt(json.dumps(comments), key) if comments else None
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE tasks SET comments = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (enc, now, task_id, user_id),
+        )
+        await db.commit()
+
+
+async def add_comment(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    *,
+    text: str,
+    author: str = "user",
+    subtask_id: str | None = None,
+    comment_id: str | None = None,
+) -> dict | None:
+    """Append one comment. Returns the entry, or None when the task is missing.
+
+    Raises ValueError on bad input and CommentLimitReached at the cap. A
+    caller-supplied ``comment_id`` already present returns the existing entry
+    unchanged — the mobile outbox replays appends at-least-once.
+    """
+    task = await get_task(config, user_id, task_id)
+    if task is None:
+        return None
+
+    clean = (text or "").strip()
+    if not clean:
+        raise ValueError("Comment text is required")
+    if len(clean) > MAX_COMMENT_CHARS:
+        raise ValueError(f"Comment too long (max {MAX_COMMENT_CHARS} chars)")
+    if author not in _VALID_COMMENT_AUTHORS:
+        raise ValueError(f"Unknown comment author: {author!r}")
+    if subtask_id is not None:
+        step_ids = {s.get("id") for s in decode_steps(task.get("steps"))}
+        if subtask_id not in step_ids:
+            raise ValueError("Unknown subtask_id for this task")
+
+    current = decode_comments(task.get("comments"))
+    if comment_id:
+        for existing in current:
+            if existing.get("id") == comment_id:
+                return existing
+    if len(current) >= MAX_COMMENTS_PER_TASK:
+        raise CommentLimitReached(
+            f"Task already has {MAX_COMMENTS_PER_TASK} comments"
+        )
+
+    entry = {
+        "id": comment_id or f"c-{uuid4().hex[:12]}",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "author": author,
+        "text": clean,
+        "subtask_id": subtask_id,
+    }
+    key = await get_user_dek(config, user_id)
+    await _write_comments(config, user_id, task_id, [*current, entry], key)
+    return entry
+
+
+async def delete_comment(
+    config: Config, user_id: str, task_id: str, comment_id: str,
+) -> bool | None:
+    """Remove one comment by id. None = task missing, False = id not found."""
+    task = await get_task(config, user_id, task_id)
+    if task is None:
+        return None
+    current = decode_comments(task.get("comments"))
+    remaining = [c for c in current if c.get("id") != comment_id]
+    if len(remaining) == len(current):
+        return False
+    key = await get_user_dek(config, user_id)
+    await _write_comments(config, user_id, task_id, remaining, key)
+    return True
+
+
 async def get_task_changes(
     config: Config,
     user_id: str,

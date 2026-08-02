@@ -230,4 +230,122 @@ void main() {
     );
     expect(field.controller!.text, '[docs](https://a.io)');
   });
+
+  group('showSubtaskCommentsSheet', () {
+    // Regression test for the add-then-delete-in-same-session bug: the sheet
+    // used to synthesize its OWN local id for an optimistically-added comment
+    // instead of using the id the real persistence layer actually minted. A
+    // delete fired right after (before ever reopening the sheet) would then
+    // target that fake local id, which no persisted comment has — a silent
+    // no-op against the real store that only "looked" like it worked because
+    // the local list was filtered anyway. Fixed by having `onAdd` return the
+    // real persisted TaskComment (mirrors TasksNotifier.addComment's new
+    // Future<TaskComment?> return) and appending THAT to the local list.
+    Widget sheetHost({
+      required Future<TaskComment?> Function(String) onAdd,
+      required ValueChanged<String> onDelete,
+      List<TaskComment> comments = const [],
+    }) {
+      return MaterialApp(
+        theme: buildAppTheme(),
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => ElevatedButton(
+              onPressed: () => showSubtaskCommentsSheet(
+                ctx,
+                subtaskTitle: 'Draft outline',
+                comments: comments,
+                onAdd: onAdd,
+                onDelete: onDelete,
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    testWidgets(
+      'add then delete in the same session deletes the PERSISTED id, not a '
+      'locally-synthesized one',
+      (tester) async {
+        final deletedIds = <String>[];
+        var addedText = '';
+
+        await tester.pumpWidget(
+          sheetHost(
+            onAdd: (text) async {
+              addedText = text;
+              // Simulate TasksNotifier.addComment: mints its OWN id, which a
+              // locally-synthesized guess could never predict.
+              return const TaskComment(
+                id: 'server-minted-42',
+                ts: '2026-08-02T09:00:00Z',
+                author: 'user',
+                text: 'new note',
+                subtaskId: 'sub-1',
+              );
+            },
+            onDelete: (id) => deletedIds.add(id),
+          ),
+        );
+
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const Key('comment-input')),
+          'new note',
+        );
+        await tester.tap(find.byKey(const Key('comment-send')));
+        await tester.pumpAndSettle();
+
+        expect(addedText, 'new note');
+        // The appended comment carries the REAL (server-minted) id.
+        expect(
+          find.byKey(const ValueKey('comment-server-minted-42')),
+          findsOneWidget,
+        );
+
+        await tester.longPress(
+          find.byKey(const ValueKey('comment-server-minted-42')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete'));
+        await tester.pumpAndSettle();
+
+        // onDelete must fire with the SAME id the "server" minted — not a
+        // locally-synthesized guess that no persisted comment has.
+        expect(deletedIds, ['server-minted-42']);
+        expect(
+          find.byKey(const ValueKey('comment-server-minted-42')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('a failed add (onAdd resolves null) does not append locally', (
+      tester,
+    ) async {
+      final deletedIds = <String>[];
+      await tester.pumpWidget(
+        sheetHost(
+          onAdd: (text) async => null,
+          onDelete: (id) => deletedIds.add(id),
+        ),
+      );
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(const Key('comment-input')), 'ignored');
+      await tester.tap(find.byKey(const Key('comment-send')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byWidgetPredicate((w) => w is LinkText && w.text == 'ignored'),
+        findsNothing,
+      );
+    });
+  });
 }

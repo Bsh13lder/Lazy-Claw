@@ -48,21 +48,29 @@ class TaskCommentsSection extends StatelessWidget {
 /// helper renders exactly what it's given (no `subtaskId` re-filtering, unlike
 /// [TaskCommentsSection]'s task-level filter).
 ///
+/// [onAdd] returns the [TaskComment] that was actually persisted (e.g.
+/// `TasksNotifier.addComment`'s return) — see [_SubtaskCommentsSheetBody] for
+/// why this can't be a fire-and-forget `ValueChanged<String>` like
+/// [TaskCommentsSection.onAdd].
+///
 /// Live-update choice: this sheet is presented via `showModalBottomSheet` on
 /// its own route, disconnected from the detail sheet's `ref.watch(tasksProvider)`
 /// rebuild — so a fresh comment landing in the real (persisted) cache would
 /// never visibly appear here without extra plumbing. Rather than pull Riverpod
 /// into this otherwise provider-free widget, the sheet keeps a small local
-/// optimistic copy of [comments] (see [_SubtaskCommentsSheetBody]): every
-/// add/delete calls the real [onAdd]/[onDelete] for persistence AND updates
-/// the local copy immediately, so the thread visibly appends/removes without
-/// waiting on a provider round-trip. This mirrors the same optimistic-update
-/// pattern `TasksNotifier` already uses for the persisted store.
+/// optimistic copy of [comments] (see [_SubtaskCommentsSheetBody]): every add
+/// calls the real [onAdd] for persistence AND appends its RETURNED comment
+/// (not a locally-guessed one) to the local copy, so a later delete in the
+/// same session acts on a real, persisted id. Every delete calls the real
+/// [onDelete] AND removes locally, so the thread visibly appends/removes
+/// without waiting on a provider round-trip. This mirrors the same
+/// optimistic-update pattern `TasksNotifier` already uses for the persisted
+/// store.
 Future<void> showSubtaskCommentsSheet(
   BuildContext context, {
   required String subtaskTitle,
   required List<TaskComment> comments,
-  required ValueChanged<String> onAdd,
+  required Future<TaskComment?> Function(String text) onAdd,
   required ValueChanged<String> onDelete,
 }) {
   return LzBottomSheet.show<void>(
@@ -79,6 +87,15 @@ Future<void> showSubtaskCommentsSheet(
 /// Keeps its own optimistic copy of the sub-task's comments so the sheet
 /// (a separate route, see [showSubtaskCommentsSheet]) visibly updates the
 /// instant a comment is added or deleted, without depending on a provider.
+///
+/// [onAdd] MUST return the comment that was actually persisted (its real,
+/// server/DAO-minted id) — synthesizing a separate id locally here would
+/// silently diverge from what `onDelete` needs to target: a delete fired
+/// against a locally-guessed id that no persisted comment has is a no-op
+/// against the real store (plus a bogus dirty+outbox entry), while the UI
+/// here would optimistically show it gone — until the sheet is reopened and
+/// re-derives from the real (unmodified) store, resurrecting the "deleted"
+/// comment. See the fixed incident this class is named for in git history.
 class _SubtaskCommentsSheetBody extends StatefulWidget {
   const _SubtaskCommentsSheetBody({
     required this.comments,
@@ -87,7 +104,7 @@ class _SubtaskCommentsSheetBody extends StatefulWidget {
   });
 
   final List<TaskComment> comments;
-  final ValueChanged<String> onAdd;
+  final Future<TaskComment?> Function(String text) onAdd;
   final ValueChanged<String> onDelete;
 
   @override
@@ -104,18 +121,13 @@ class _SubtaskCommentsSheetBodyState extends State<_SubtaskCommentsSheetBody> {
     _comments = List.of(widget.comments);
   }
 
-  void _add(String text) {
-    widget.onAdd(text);
+  Future<void> _add(String text) async {
+    // Await the REAL persisted comment (real id) before appending locally —
+    // never synthesize a separate id here (see class doc).
+    final created = await widget.onAdd(text);
+    if (!mounted || created == null) return;
     setState(() {
-      _comments = [
-        ..._comments,
-        TaskComment(
-          id: newCommentId(),
-          ts: DateTime.now().toUtc().toIso8601String(),
-          author: 'user',
-          text: text,
-        ),
-      ];
+      _comments = [..._comments, created];
     });
   }
 

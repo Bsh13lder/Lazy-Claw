@@ -357,10 +357,23 @@ class TasksNotifier extends StateNotifier<TasksState> {
       updateTask(id, steps: serializeSubtasks(subtasks) ?? '');
 
   /// Append a comment (author=user) optimistically + queue the server append.
-  Future<void> addComment(String taskId, String text,
-      {String? subtaskId}) async {
+  ///
+  /// Returns the minted [TaskComment] (with the id this call actually
+  /// persisted) on success, or `null` when the text was blank or the write
+  /// failed. Additive: existing callers that only awaited the (formerly
+  /// `void`) future are unaffected — they simply ignore the return value.
+  /// Callers that need to act on the SAME comment a later delete must target
+  /// (e.g. an optimistic local list) should capture this return rather than
+  /// re-deriving an id client-side — [newCommentId] mints a fresh random id
+  /// on every call, so a second, separately-synthesized id would silently
+  /// diverge from the one actually persisted here.
+  Future<TaskComment?> addComment(
+    String taskId,
+    String text, {
+    String? subtaskId,
+  }) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return;
+    if (trimmed.isEmpty) return null;
     try {
       final comment = TaskComment(
         id: newCommentId(),
@@ -372,8 +385,10 @@ class TasksNotifier extends StateNotifier<TasksState> {
       await _dao.applyLocalAddComment(taskId, comment);
       await _refreshFromCache();
       unawaited(_syncThenRefresh());
+      return comment;
     } catch (e) {
       state = state.copyWith(error: e.toString());
+      return null;
     }
   }
 

@@ -12,7 +12,6 @@ import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/tasks_provider.dart';
 import '../../widgets/link_text.dart';
-import '../expenses/project_color_picker.dart';
 import '../settings/settings_prefs.dart';
 import 'add_link_dialog.dart';
 import 'chip_edit.dart';
@@ -588,7 +587,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           const SizedBox(height: AppSpacing.sm),
           Align(
             alignment: Alignment.centerLeft,
-            child: _ProjectChip(
+            child: ProjectChip(
+              fieldKey: const Key('task-detail-project'),
               projects: widget.projects,
               category: _category,
               onTap: _pickProject,
@@ -1064,80 +1064,6 @@ class _SectionLabel extends StatelessWidget {
         color: AppColors.textMuted,
         letterSpacing: 0.8,
         fontWeight: FontWeight.w700,
-      ),
-    );
-  }
-}
-
-/// The tappable project control: a color dot + project name (or "No project"),
-/// opening the project picker.
-class _ProjectChip extends StatelessWidget {
-  const _ProjectChip({
-    required this.projects,
-    required this.category,
-    required this.onTap,
-  });
-
-  final List<Project> projects;
-  final String? category;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final hasCategory = category != null && category!.isNotEmpty;
-    String? colorHex;
-    if (hasCategory) {
-      for (final p in projects) {
-        if (p.name.toLowerCase() == category!.toLowerCase()) {
-          colorHex = p.color;
-          break;
-        }
-      }
-    }
-
-    return Material(
-      color: Colors.transparent,
-      borderRadius: AppRadii.rPill,
-      child: InkWell(
-        key: const Key('task-detail-project'),
-        onTap: onTap,
-        borderRadius: AppRadii.rPill,
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.md,
-            vertical: AppSpacing.xs + 2,
-          ),
-          decoration: BoxDecoration(
-            color: AppColors.bgSurfaceElevated,
-            borderRadius: AppRadii.rPill,
-            border: Border.all(color: AppColors.borderDefault),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasCategory)
-                ProjectColorDot(hex: colorHex, size: 12)
-              else
-                Icon(
-                  Icons.folder_outlined,
-                  size: 15,
-                  color: AppColors.textMuted,
-                ),
-              const SizedBox(width: AppSpacing.sm),
-              Text(
-                hasCategory ? category! : 'No project',
-                style: AppText.caption.copyWith(
-                  color: hasCategory
-                      ? AppColors.textPrimary
-                      : AppColors.textMuted,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
-            ],
-          ),
-        ),
       ),
     );
   }

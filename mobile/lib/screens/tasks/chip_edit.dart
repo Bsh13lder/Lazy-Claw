@@ -130,32 +130,52 @@ Future<String?> showPriorityMenu(
 
 /// The outcome of [showProjectPicker]. A null [category] means "clear the
 /// project" (No project); a non-null value is the chosen project name.
+/// [createNew] flags that the user tapped the "＋ New project" affordance
+/// (only rendered when [showProjectPicker] is called with `allowCreate:
+/// true`) — [category] is null in that case and callers should open the
+/// project-creation flow instead of treating this as a "clear" result.
 class ProjectPickResult {
-  const ProjectPickResult(this.category);
+  const ProjectPickResult(this.category) : createNew = false;
+  const ProjectPickResult.createNew()
+      : category = null,
+        createNew = true;
+
   final String? category;
+  final bool createNew;
 }
 
 /// Show a bottom-sheet picker listing [projects] (name + color dot) plus a
 /// "No project" option. Returns the chosen [ProjectPickResult], or null when
 /// the sheet is dismissed without a choice. [current] (a category string) is
-/// highlighted.
+/// highlighted. When [allowCreate] is true, a trailing "＋ New project" row
+/// is rendered that pops [ProjectPickResult.createNew].
 Future<ProjectPickResult?> showProjectPicker(
   BuildContext context, {
   required List<Project> projects,
   String? current,
+  bool allowCreate = false,
 }) {
   return LzBottomSheet.show<ProjectPickResult>(
     context,
     title: 'Project',
-    builder: (ctx) => _ProjectPickerBody(projects: projects, current: current),
+    builder: (ctx) => _ProjectPickerBody(
+      projects: projects,
+      current: current,
+      allowCreate: allowCreate,
+    ),
   );
 }
 
 class _ProjectPickerBody extends StatelessWidget {
-  const _ProjectPickerBody({required this.projects, required this.current});
+  const _ProjectPickerBody({
+    required this.projects,
+    required this.current,
+    this.allowCreate = false,
+  });
 
   final List<Project> projects;
   final String? current;
+  final bool allowCreate;
 
   @override
   Widget build(BuildContext context) {
@@ -192,7 +212,104 @@ class _ProjectPickerBody extends StatelessWidget {
               onTap: () =>
                   Navigator.of(context).pop(ProjectPickResult(p.name)),
             ),
+          if (allowCreate)
+            LzListTile(
+              key: const Key('project-pick-create'),
+              leading: Icon(Icons.add_rounded,
+                  size: 16, color: AppColors.accent),
+              title: '＋ New project',
+              titleStyle: AppText.body.copyWith(
+                color: AppColors.accent,
+                fontWeight: FontWeight.w600,
+              ),
+              onTap: () => Navigator.of(context)
+                  .pop(const ProjectPickResult.createNew()),
+            ),
         ],
+      ),
+    );
+  }
+}
+
+/// The tappable project control: a color dot + project name (or "No
+/// project"), opening the project picker. Shared by the task detail sheet
+/// and (via [fieldKey]) the Add Task sheet.
+class ProjectChip extends StatelessWidget {
+  const ProjectChip({
+    super.key,
+    required this.projects,
+    required this.category,
+    required this.onTap,
+    required this.fieldKey,
+  });
+
+  final List<Project> projects;
+  final String? category;
+  final VoidCallback onTap;
+
+  /// The [Key] applied to the tappable [InkWell] itself (distinct from
+  /// [key], the widget's own key). The detail sheet passes its original
+  /// `Key('task-detail-project')` explicitly at its call site so existing
+  /// finders keep working; the Add Task sheet passes
+  /// `Key('add-task-project')`.
+  final Key fieldKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasCategory = category != null && category!.isNotEmpty;
+    String? colorHex;
+    if (hasCategory) {
+      for (final p in projects) {
+        if (p.name.toLowerCase() == category!.toLowerCase()) {
+          colorHex = p.color;
+          break;
+        }
+      }
+    }
+
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AppRadii.rPill,
+      child: InkWell(
+        key: fieldKey,
+        onTap: onTap,
+        borderRadius: AppRadii.rPill,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.xs + 2,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rPill,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasCategory)
+                ProjectColorDot(hex: colorHex, size: 12)
+              else
+                Icon(
+                  Icons.folder_outlined,
+                  size: 15,
+                  color: AppColors.textMuted,
+                ),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                hasCategory ? category! : 'No project',
+                style: AppText.caption.copyWith(
+                  color: hasCategory
+                      ? AppColors.textPrimary
+                      : AppColors.textMuted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
+            ],
+          ),
+        ),
       ),
     );
   }

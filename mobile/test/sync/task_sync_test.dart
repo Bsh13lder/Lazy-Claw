@@ -687,7 +687,9 @@ void main() {
       expect(result.pulled, 1);
       final stored = await dao.getById('srv');
       expect(stored!.title, 'Hello');
-      expect(await dao.getCursor(), '2026-06-05T12:00:00Z');
+      // 2s overlap window, not the bare server clock — see the dedicated
+      // "cursor advance stores `now` minus a 2s overlap" test below.
+      expect(await dao.getCursor(), '2026-06-05T11:59:58.000Z');
     });
 
     test('passes the stored cursor as ?since', () async {
@@ -969,6 +971,38 @@ void main() {
       expect(result.pullFailed, isFalse);
       expect(result.pulled, 2);
       expect(await dao.getCursor(), '2026-06-05T13:00:00Z');
+    });
+
+    // ── cursor overlap window ──
+
+    test(
+        'cursor advance stores `now` minus a 2s overlap, not the bare '
+        'server clock', () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': [],
+        'now': '2026-08-03T10:00:00.000Z',
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+      expect(result.pullFailed, isFalse);
+      expect(await dao.getCursor(), '2026-08-03T09:59:58.000Z',
+          reason: 'a row committed between the server\'s now_iso stamp and '
+              'its SELECT must stay inside the next since= window instead '
+              'of being permanently skipped');
+    });
+
+    test('an unparseable `now` is stored verbatim (never crashes the sync)',
+        () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': [],
+        'now': 'not-a-real-timestamp',
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+      expect(result.pullFailed, isFalse);
+      expect(await dao.getCursor(), 'not-a-real-timestamp');
     });
   });
 

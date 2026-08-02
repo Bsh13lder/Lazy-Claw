@@ -520,17 +520,38 @@ class TaskSync {
     );
   }
 
-  /// The cursor to advance to: the server `now` when present, else the newest
-  /// `updated_at` across the page's tasks (so we never re-fetch from scratch on
-  /// a server that omitted `now`). Null/empty → caller treats as a pull failure.
+  /// The cursor to advance to: the server `now` when present (shifted back by
+  /// [_cursorOverlap] — see [_withOverlap]), else the newest `updated_at`
+  /// across the page's tasks (so we never re-fetch from scratch on a server
+  /// that omitted `now`). Null/empty → caller treats as a pull failure.
   String? _resolveCursor(TaskChanges changes) {
-    if (changes.now.isNotEmpty) return changes.now;
+    if (changes.now.isNotEmpty) return _withOverlap(changes.now);
     String best = '';
     for (final st in changes.tasks) {
       final ua = st.updatedAt ?? '';
       if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
     }
     return best.isEmpty ? null : best;
+  }
+
+  /// Small overlap window subtracted from the server clock before it is
+  /// persisted as the next `since=`. The server filters `updated_at > since`,
+  /// so advancing the cursor to the EXACT moment the page was read can strand
+  /// a row that committed between the server's `now_iso` stamp
+  /// (tasks/store.py:2351) and its SELECT (:2355) — permanently, since every
+  /// later pull's `since` is already past it. Re-delivery of an
+  /// already-applied row is a harmless no-op (`_mergeServerTask` is
+  /// idempotent — upsert + last-write-wins), so a small overlap can only
+  /// cause a few rows to be re-checked, never a duplicate or a loss.
+  static const Duration _cursorOverlap = Duration(seconds: 2);
+
+  /// Parse [rawNow], subtract [_cursorOverlap], and re-serialise. Falls back
+  /// to the raw string verbatim when it can't be parsed as a date — a clock
+  /// format hiccup from the server must never crash the sync.
+  String _withOverlap(String rawNow) {
+    final parsed = DateTime.tryParse(rawNow);
+    if (parsed == null) return rawNow;
+    return parsed.subtract(_cursorOverlap).toIso8601String();
   }
 
   /// Best-effort: cancel the local reminder alarms of a freshly tombstoned

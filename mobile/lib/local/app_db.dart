@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import 'task_dao.dart' show kTaskEntity;
 import 'uuid.dart';
 
 /// Schema version for the local cache DB. Bump + add a branch in
@@ -48,7 +49,13 @@ import 'uuid.dart';
 ///     LWW would propagate the loss.
 /// v12: adds task_cache.comments (comment-thread JSON) + the ui_prefs KV
 ///     table (persisted collapse/hide-completed UI state).
-const int kAppDbVersion = 12;
+/// v13: one-time rewind of the 'task' sync cursor (`kTaskEntity`), mirroring
+///     the v9→v10 'budgets' rewind. A cursor that ever got ahead of an
+///     undelivered row orphans it forever (the server filters
+///     `updated_at > since`), which is how server-minted recurring respawns
+///     and agent/web edits went permanently missing from the phone while
+///     local-only rows kept showing (2026-08-03 incident).
+const int kAppDbVersion = 13;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -398,6 +405,41 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
     }
     await db.execute(
         'CREATE TABLE IF NOT EXISTS ui_prefs (key TEXT PRIMARY KEY, value TEXT)');
+  }
+  // v12 → v13: rewind the 'task' sync cursor ONCE.
+  //
+  // The server filters tasks/changes by `updated_at > since`. A cursor that
+  // ever advanced PAST a row that hadn't been delivered yet — a server-minted
+  // recurring respawn, or an edit made from the web/agent side — orphans that
+  // row FOREVER: every future delta pull's `since` is already past it, so it
+  // can never satisfy the `>` filter again. That's exactly what happened in
+  // the 2026-08-03 incident: 5 dated/recurring open tasks sat in the gap
+  // between the last pull and the cursor's parked position, so
+  // GET /api/tasks/changes kept answering "nothing new" while the app's
+  // Calendar and widget both correctly rendered the (now dated-empty)
+  // task_cache they were given.
+  //
+  // Deleting the 'task' cursor row (`kTaskEntity`) makes the next
+  // `getCursor()` return null, so the following sync does a FULL snapshot
+  // pull (since=null) that backfills every stranded row. One-time; harmless
+  // when the row is absent (fresh installs never reach here). Mirrors the
+  // v9→v10 'budgets' rewind — deliberately scoped to ONLY the 'task' entity,
+  // leaving 'budgets' (and any other cursor) untouched.
+  //
+  // Guarded on the table itself existing (clones the PRAGMA-table_info guard
+  // every earlier branch uses): on-device `sync_state` has existed since v1,
+  // so this is a no-op check in production, but it keeps this branch from
+  // throwing when an OLDER migration is exercised directly against a
+  // hand-built partial schema (every migrateAppDb branch here is gated only
+  // on `oldVersion`, so a direct call still runs every later branch too).
+  if (oldVersion < 13) {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_state'",
+    );
+    if (tables.isNotEmpty) {
+      await db.delete('sync_state',
+          where: 'entity = ?', whereArgs: [kTaskEntity]);
+    }
   }
 }
 

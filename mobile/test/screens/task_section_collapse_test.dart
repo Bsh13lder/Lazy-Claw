@@ -27,7 +27,7 @@ Task _task(String id, String title) => Task(
 /// Builds a [TaskSection] with every quick-edit callback stubbed as a no-op —
 /// this suite only exercises collapse/expand, never those affordances.
 Widget _section({
-  required Section section,
+  required TaskListSection section,
   required List<Task> tasks,
   required bool initialCollapsed,
   ValueChanged<bool>? onCollapsedChanged,
@@ -68,7 +68,7 @@ void main() {
         _host(
           Column(
             children: [
-              for (final section in Section.values)
+              for (final section in TaskListSection.values)
                 _section(
                   section: section,
                   tasks: [
@@ -97,7 +97,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           _section(
-            section: Section.today,
+            section: TaskListSection.today,
             tasks: [_task('t1', 'Water the plants')],
             initialCollapsed: false,
             onCollapsedChanged: (v) => reported = v,
@@ -119,10 +119,10 @@ void main() {
 
   group('TaskSection default collapse wiring', () {
     test('defaultSectionCollapsed: Done is collapsed, others are not', () {
-      expect(defaultSectionCollapsed(Section.overdue), isFalse);
-      expect(defaultSectionCollapsed(Section.today), isFalse);
-      expect(defaultSectionCollapsed(Section.upcoming), isFalse);
-      expect(defaultSectionCollapsed(Section.done), isTrue);
+      expect(defaultSectionCollapsed(TaskListSection.overdue), isFalse);
+      expect(defaultSectionCollapsed(TaskListSection.today), isFalse);
+      expect(defaultSectionCollapsed(TaskListSection.upcoming), isFalse);
+      expect(defaultSectionCollapsed(TaskListSection.done), isTrue);
     });
 
     testWidgets(
@@ -132,9 +132,9 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.done,
+              section: TaskListSection.done,
               tasks: [_task('d1', 'Filed taxes')],
-              initialCollapsed: defaultSectionCollapsed(Section.done),
+              initialCollapsed: defaultSectionCollapsed(TaskListSection.done),
             ),
           ),
         );
@@ -163,7 +163,7 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.today,
+              section: TaskListSection.today,
               tasks: [_task('t1', 'Water the plants')],
               initialCollapsed: false,
             ),
@@ -179,7 +179,7 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.today,
+              section: TaskListSection.today,
               tasks: [_task('t1', 'Water the plants')],
               initialCollapsed: true,
             ),
@@ -198,7 +198,7 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.done,
+              section: TaskListSection.done,
               tasks: [_task('d1', 'Filed taxes')],
               initialCollapsed: true,
             ),
@@ -211,7 +211,7 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.done,
+              section: TaskListSection.done,
               tasks: [_task('d1', 'Filed taxes')],
               initialCollapsed: false,
             ),
@@ -231,9 +231,11 @@ void main() {
         await tester.pumpWidget(
           _host(
             _section(
-              section: Section.overdue,
+              section: TaskListSection.overdue,
               tasks: const [],
-              initialCollapsed: defaultSectionCollapsed(Section.overdue),
+              initialCollapsed: defaultSectionCollapsed(
+                TaskListSection.overdue,
+              ),
             ),
           ),
         );
@@ -249,9 +251,9 @@ void main() {
       await tester.pumpWidget(
         _host(
           _section(
-            section: Section.today,
+            section: TaskListSection.today,
             tasks: const [],
-            initialCollapsed: defaultSectionCollapsed(Section.today),
+            initialCollapsed: defaultSectionCollapsed(TaskListSection.today),
           ),
         ),
       );

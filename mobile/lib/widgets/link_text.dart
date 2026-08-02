@@ -110,23 +110,50 @@ class LinkText extends StatefulWidget {
 }
 
 class _LinkTextState extends State<LinkText> {
-  final List<TapGestureRecognizer> _recognizers = [];
+  List<TapGestureRecognizer> _recognizers = [];
+
+  // Cached span list, rebuilt only when `widget.text`/`widget.style`
+  // actually change (see [_rebuildSpans]) — NOT on every `build()`.
+  late List<InlineSpan> _spans;
 
   @override
-  void dispose() {
-    for (final r in _recognizers) {
-      r.dispose();
-    }
-    _recognizers.clear();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _rebuildSpans();
   }
 
   @override
-  Widget build(BuildContext context) {
-    for (final r in _recognizers) {
+  void didUpdateWidget(LinkText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Only rebuild (and dispose the old batch of) recognizers when the
+    // content they were built from actually changed. Previously `build()`
+    // unconditionally disposed + recreated every recognizer on EVERY
+    // rebuild, including ones triggered by an unrelated ancestor's setState.
+    // If a tap was in-flight (the gesture arena still holding a reference to
+    // the OLD recognizer) during one of those unrelated rebuilds, that
+    // recognizer would be disposed out from under the live gesture — a
+    // use-after-dispose path. Gating on an actual text/style change means
+    // unrelated rebuilds simply reuse the same recognizer instances.
+    if (widget.text != oldWidget.text || widget.style != oldWidget.style) {
+      _rebuildSpans();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers(_recognizers);
+    super.dispose();
+  }
+
+  void _disposeRecognizers(List<TapGestureRecognizer> recognizers) {
+    for (final r in recognizers) {
       r.dispose();
     }
-    _recognizers.clear();
+  }
+
+  void _rebuildSpans() {
+    _disposeRecognizers(_recognizers);
+    final recognizers = <TapGestureRecognizer>[];
 
     final tokens = tokenizeLinks(widget.text);
     final linkStyle = (widget.style ?? const TextStyle()).copyWith(
@@ -143,15 +170,19 @@ class _LinkTextState extends State<LinkText> {
       }
       final recognizer = TapGestureRecognizer()
         ..onTap = () => _open(token.url!);
-      _recognizers.add(recognizer);
-      children.add(TextSpan(
-        text: token.text,
-        style: linkStyle,
-        recognizer: recognizer,
-      ));
+      recognizers.add(recognizer);
+      children.add(
+        TextSpan(text: token.text, style: linkStyle, recognizer: recognizer),
+      );
     }
 
-    return Text.rich(TextSpan(children: children), style: widget.style);
+    _recognizers = recognizers;
+    _spans = children;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text.rich(TextSpan(children: _spans), style: widget.style);
   }
 
   Future<void> _open(String url) async {
@@ -162,8 +193,9 @@ class _LinkTextState extends State<LinkText> {
           launchUrl(uri, mode: LaunchMode.externalApplication));
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('Could not open link.')));
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(const SnackBar(content: Text('Could not open link.')));
       }
     }
   }

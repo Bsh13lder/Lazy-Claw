@@ -23,6 +23,7 @@ class LzTextField extends StatelessWidget {
     this.maxLines = 1,
     this.maxLength,
     this.maxLengthEnforcement,
+    this.buildCounter,
     this.autofocus = false,
     this.enabled = true,
     this.fieldKey,
@@ -54,6 +55,12 @@ class LzTextField extends StatelessWidget {
   /// [TextField]'s own default (enforced/truncating), which is what every
   /// current caller wants.
   final MaxLengthEnforcement? maxLengthEnforcement;
+
+  /// Overrides how the [maxLength] counter is rendered below the field.
+  /// Passed straight through to [TextField.buildCounter] — e.g. a caller
+  /// can return `null` to enforce the cap silently, with no visible
+  /// "n / max" counter (handy in a tight [Row]-hosted composer).
+  final InputCounterWidgetBuilder? buildCounter;
   final bool autofocus;
   final bool enabled;
 
@@ -90,6 +97,7 @@ class LzTextField extends StatelessWidget {
           maxLines: obscureText ? 1 : maxLines,
           maxLength: maxLength,
           maxLengthEnforcement: maxLengthEnforcement,
+          buildCounter: buildCounter,
           autofocus: autofocus,
           enabled: enabled,
           style: AppText.body,

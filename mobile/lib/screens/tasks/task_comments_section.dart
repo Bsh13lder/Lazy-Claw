@@ -329,6 +329,16 @@ class _CommentInputRowState extends State<_CommentInputRow> {
             minLines: 1,
             maxLines: 4,
             maxLength: kMaxCommentChars,
+            // Enforcement stays (the field still hard-caps at 2000 chars) —
+            // only the default "n / 2000" counter row is suppressed; it's
+            // visual noise under this tight composer Row.
+            buildCounter:
+                (
+                  _, {
+                  required currentLength,
+                  required isFocused,
+                  required maxLength,
+                }) => null,
             textInputAction: TextInputAction.send,
             onSubmitted: (_) => _submit(),
           ),

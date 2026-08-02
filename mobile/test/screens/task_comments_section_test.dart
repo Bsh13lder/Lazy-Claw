@@ -151,6 +151,41 @@ void main() {
     expect(field.controller!.text, 'a' * 2000);
   });
 
+  testWidgets(
+    'the maxLength counter ("n / 2000") is hidden — enforcement stays but '
+    'the default counter text never renders (visual noise in a tight Row)',
+    (tester) async {
+      await tester.pumpWidget(
+        host(comments: const [], onAdd: (_) {}, onDelete: (_) {}),
+      );
+
+      // Nothing typed yet — a visible default counter would already read
+      // "0/2000" at this point.
+      expect(find.text('0/2000'), findsNothing);
+
+      await tester.enterText(find.byKey(const Key('comment-input')), 'hello');
+      await tester.pump();
+
+      // Still capped/enforced (see the 2100-char test above)...
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('comment-input')),
+      );
+      expect(field.maxLength, kMaxCommentChars);
+      expect(field.buildCounter, isNotNull);
+      expect(
+        field.buildCounter!(
+          tester.element(find.byKey(const Key('comment-input'))),
+          currentLength: 5,
+          maxLength: kMaxCommentChars,
+          isFocused: false,
+        ),
+        isNull,
+      );
+      // ...but no counter text is rendered anywhere in the tree.
+      expect(find.text('5/2000'), findsNothing);
+    },
+  );
+
   testWidgets('an empty submit is a no-op', (tester) async {
     var calls = 0;
     await tester.pumpWidget(
@@ -347,23 +382,22 @@ void main() {
       );
     }
 
-    testWidgets(
-      'the sheet body built WITH onAddLink shows the add-link icon',
-      (tester) async {
-        await tester.pumpWidget(
-          sheetHost(
-            onAdd: (_) async => null,
-            onDelete: (_) {},
-            onAddLink: () async => '[docs](https://a.io)',
-          ),
-        );
+    testWidgets('the sheet body built WITH onAddLink shows the add-link icon', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        sheetHost(
+          onAdd: (_) async => null,
+          onDelete: (_) {},
+          onAddLink: () async => '[docs](https://a.io)',
+        ),
+      );
 
-        await tester.tap(find.text('open'));
-        await tester.pumpAndSettle();
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
 
-        expect(find.byIcon(Icons.add_link), findsOneWidget);
-      },
-    );
+      expect(find.byIcon(Icons.add_link), findsOneWidget);
+    });
 
     testWidgets(
       'add then delete in the same session deletes the PERSISTED id, not a '

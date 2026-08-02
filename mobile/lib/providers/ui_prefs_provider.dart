@@ -16,8 +16,9 @@ const String kPrefProjectsExpanded = 'tasks.projects.expanded';
 const String kPrefProjectsHideCompleted = 'tasks.projects.hideCompleted';
 
 /// The Tasks → List view's per-section collapsed flag (a bool), keyed by
-/// section name. Not yet consumed by a screen — reserved for the List-view
-/// section-collapse feature.
+/// section name. Consumed by `TaskSection` in tasks_screen.dart (loaded via
+/// `TasksScreen._loadSectionCollapsedPrefs`, persisted via
+/// `TasksScreen._onSectionCollapsedChanged`).
 String kPrefListSectionCollapsed(String section) =>
     'tasks.list.$section.collapsed';
 

@@ -142,6 +142,42 @@ void main() {
     expect(find.text('1/2'), findsOneWidget);
   });
 
+  // Regression test mirroring TaskSection's didUpdateWidget fix in
+  // tasks_screen.dart: the List view renders its sections/buckets
+  // synchronously on the very first build, before the screen's async prefs
+  // load (UiPrefsDao) resolves — so this State is already mounted with the
+  // "pre-load" seed by the time the parent rebuilds with the real persisted
+  // `initialExpanded`. Flutter reuses the mounted State for the same widget
+  // type/slot (no key), so `initState` does NOT re-run on that second
+  // build — without a didUpdateWidget resync, the persisted value would be
+  // silently ignored forever.
+  testWidgets(
+    'a persisted initialExpanded arriving AFTER first mount (same widget '
+    'slot, no key) resyncs the expanded set',
+    (tester) async {
+      // First frame: pre-load default (nothing expanded yet).
+      await tester.pumpWidget(
+        _host(tasks: tasks, projects: projects, initialExpanded: const {}),
+      );
+      await tester.pump();
+      expect(find.text('Buy stamps'), findsNothing);
+
+      // Same widget slot, no key — simulates the parent's setState once its
+      // async UiPrefsDao read resolves with the real persisted set.
+      await tester.pumpWidget(
+        _host(
+          tasks: tasks,
+          projects: projects,
+          initialExpanded: const {'Errands'},
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Buy stamps'), findsOneWidget);
+      expect(find.text('Post letter'), findsOneWidget);
+    },
+  );
+
   testWidgets('an eye toggle is present and fires onHideCompletedChanged', (
     tester,
   ) async {

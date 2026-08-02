@@ -87,7 +87,23 @@ class _TasksProjectViewState extends State<TasksProjectView> {
   /// Names of the currently-expanded project buckets, seeded from the
   /// caller's persisted set. A fresh copy — never mutates [widget.initialExpanded]
   /// itself.
-  late final Set<String> _expanded = {...widget.initialExpanded};
+  late Set<String> _expanded = {...widget.initialExpanded};
+
+  @override
+  void didUpdateWidget(TasksProjectView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Resync when the persisted pref arrives after first mount: the caller
+    // (TasksScreen) renders this view synchronously on the very first
+    // build, before its async UiPrefsDao load resolves — so this State is
+    // already mounted with the "pre-load" seed by the time the parent
+    // rebuilds with the real persisted `initialExpanded`. `initState` does
+    // NOT re-run on that rebuild (same widget type/slot, no key), so without
+    // this the view would be silently stuck on the seed forever. Mirrors
+    // `TaskSection`'s `didUpdateWidget` in tasks_screen.dart.
+    if (!_setEquals(widget.initialExpanded, oldWidget.initialExpanded)) {
+      _expanded = {...widget.initialExpanded};
+    }
+  }
 
   void _toggle(String name) {
     HapticFeedback.selectionClick();
@@ -265,6 +281,15 @@ class _TasksProjectViewState extends State<TasksProjectView> {
     child: child,
   );
 }
+
+/// Unordered content equality for two [Set]s of [String]s — used by
+/// [_TasksProjectViewState.didUpdateWidget] to detect a genuine change in
+/// the persisted `initialExpanded` set (as opposed to an equal-but-distinct
+/// instance arriving on every rebuild). Avoids pulling in `package:collection`
+/// (a transitive dependency only, not declared in pubspec.yaml) for a single
+/// two-line check.
+bool _setEquals(Set<String> a, Set<String> b) =>
+    a.length == b.length && a.containsAll(b);
 
 /// One bucket: a tappable header that expands to reveal the bucket's tasks. The
 /// leading glyph adapts to the bucket kind — a project color dot for a real

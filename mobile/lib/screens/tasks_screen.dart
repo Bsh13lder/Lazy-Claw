@@ -46,35 +46,36 @@ enum _TasksView { list, overdue, calendar, projects }
 /// The four section buckets rendered by [TasksScreen]. Public so widget
 /// tests can pump [TaskSection] directly without going through the full
 /// screen.
-enum Section { overdue, today, upcoming, done }
+enum TaskListSection { overdue, today, upcoming, done }
 
 /// The section's default collapse state before any persisted preference has
 /// loaded: Done starts collapsed, everything else starts expanded.
-bool defaultSectionCollapsed(Section section) => section == Section.done;
+bool defaultSectionCollapsed(TaskListSection section) =>
+    section == TaskListSection.done;
 
-extension _SectionLabel on Section {
+extension _SectionLabel on TaskListSection {
   String get label {
     switch (this) {
-      case Section.overdue:
+      case TaskListSection.overdue:
         return 'Overdue';
-      case Section.today:
+      case TaskListSection.today:
         return 'Today';
-      case Section.upcoming:
+      case TaskListSection.upcoming:
         return 'Upcoming';
-      case Section.done:
+      case TaskListSection.done:
         return 'Done';
     }
   }
 
   IconData get emptyIcon {
     switch (this) {
-      case Section.overdue:
+      case TaskListSection.overdue:
         return Icons.warning_amber_rounded;
-      case Section.today:
+      case TaskListSection.today:
         return Icons.today_outlined;
-      case Section.upcoming:
+      case TaskListSection.upcoming:
         return Icons.event_outlined;
-      case Section.done:
+      case TaskListSection.done:
         return Icons.check_circle_outline;
     }
   }
@@ -107,7 +108,7 @@ bool isOverdueTask(Task task, {DateTime? now}) {
 }
 
 /// Splits [tasks] into the four section buckets.
-Map<Section, List<Task>> _groupTasks(List<Task> tasks) {
+Map<TaskListSection, List<Task>> _groupTasks(List<Task> tasks) {
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
 
@@ -143,10 +144,10 @@ Map<Section, List<Task>> _groupTasks(List<Task> tasks) {
   }
 
   return {
-    Section.overdue: overdue,
-    Section.today: todayList,
-    Section.upcoming: upcoming,
-    Section.done: done,
+    TaskListSection.overdue: overdue,
+    TaskListSection.today: todayList,
+    TaskListSection.upcoming: upcoming,
+    TaskListSection.done: done,
   };
 }
 
@@ -190,12 +191,12 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// The Projects view's persisted "hide completed" toggle.
   bool _projectsHideCompleted = false;
 
-  /// The List view's per-section collapsed state, keyed by [Section]. Seeded
+  /// The List view's per-section collapsed state, keyed by [TaskListSection]. Seeded
   /// from [defaultSectionCollapsed] (Done collapsed, others expanded) so the
   /// correct defaults render on the very first frame, before the persisted
   /// values below have loaded.
-  Map<Section, bool> _sectionCollapsed = {
-    for (final section in Section.values)
+  Map<TaskListSection, bool> _sectionCollapsed = {
+    for (final section in TaskListSection.values)
       section: defaultSectionCollapsed(section),
   };
 
@@ -246,8 +247,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   Future<void> _loadSectionCollapsedPrefs() async {
     try {
       final prefs = ref.read(uiPrefsDaoProvider);
-      final loaded = <Section, bool>{};
-      for (final section in Section.values) {
+      final loaded = <TaskListSection, bool>{};
+      for (final section in TaskListSection.values) {
         loaded[section] = await prefs.getBool(
           kPrefListSectionCollapsed(section.name),
           fallback: defaultSectionCollapsed(section),
@@ -290,7 +291,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// Persists a single List-view section's collapsed flag as it changes, and
   /// keeps the local copy in sync so a rebuild doesn't wait on another async
   /// DB read. Mirrors [_onProjectsExpandedChanged].
-  void _onSectionCollapsedChanged(Section section, bool collapsed) {
+  void _onSectionCollapsedChanged(TaskListSection section, bool collapsed) {
     setState(
       () => _sectionCollapsed = {..._sectionCollapsed, section: collapsed},
     );
@@ -850,7 +851,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           AppSpacing.xxxl, // leave room above the FAB
         ),
         children: [
-          for (final section in Section.values)
+          for (final section in TaskListSection.values)
             TaskSection(
               section: section,
               tasks: grouped[section] ?? const [],
@@ -878,7 +879,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   }
 }
 
-// ── Section widget ─────────────────────────────────────────────────────────────
+// ── TaskListSection widget ───────────────────────────────────────────────────
 
 class TaskSection extends StatefulWidget {
   const TaskSection({
@@ -900,7 +901,7 @@ class TaskSection extends StatefulWidget {
     required this.onReschedule,
   });
 
-  final Section section;
+  final TaskListSection section;
   final List<Task> tasks;
   final Set<String> dirtyIds;
   final List<Project> projects;
@@ -996,8 +997,8 @@ class _TaskSectionState extends State<TaskSection> {
     // Never render the section header if there's nothing to show (and it's not
     // the upcoming section which always appears as the catch-all bucket).
     if (widget.tasks.isEmpty &&
-        widget.section != Section.upcoming &&
-        widget.section != Section.today) {
+        widget.section != TaskListSection.upcoming &&
+        widget.section != TaskListSection.today) {
       return const SizedBox.shrink();
     }
 
@@ -1082,11 +1083,11 @@ class _TaskSectionState extends State<TaskSection> {
     );
   }
 
-  String _emptyTitle(Section section) {
+  String _emptyTitle(TaskListSection section) {
     switch (section) {
-      case Section.today:
+      case TaskListSection.today:
         return 'Nothing due today';
-      case Section.upcoming:
+      case TaskListSection.upcoming:
         return 'No upcoming tasks';
       default:
         return 'All clear';

@@ -141,6 +141,9 @@ async def init_db(config: Config) -> None:
             # Progress tracking — encrypted JSON timeline of {ts, kind, text, source}
             # entries. Drives /progress, ask_about_task summaries, EOD nudges.
             ("tasks", "progress_log", "ALTER TABLE tasks ADD COLUMN progress_log TEXT"),
+            # Comment thread — encrypted JSON list of {id, ts, author, text, subtask_id}.
+            # Append-only via add_comment / delete_comment.
+            ("tasks", "comments", "ALTER TABLE tasks ADD COLUMN comments TEXT"),
             # Pulse cadence — cron expression set when user opts a task into
             # check-in pulses. Heartbeat creates/manages a paired agent_jobs row.
             ("tasks", "check_every", "ALTER TABLE tasks ADD COLUMN check_every TEXT"),

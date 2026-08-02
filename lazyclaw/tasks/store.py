@@ -18,7 +18,7 @@ from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
 
-ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps"})
+ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps", "comments"})
 
 # Encrypted fields whose value is a JSON list rather than a plain string.
 # ``create_task`` ``json.dumps`` these before encrypting; ``update_task`` must
@@ -62,6 +62,10 @@ TASK_COLUMNS = [
     # Progress tracking — encrypted JSON timeline. Each entry is
     # {ts, kind, text, source}. Append-only via append_progress_entry.
     "progress_log",
+    # Comment thread — encrypted JSON list, canonical entry shape
+    # {id, ts, author: user|agent, text, subtask_id|null}. Append-only via
+    # add_comment / delete_comment; NEVER rides update_task/PATCH.
+    "comments",
     # Pulse cadence (cron expression) + template FK + state-machine
     # fields used by the heartbeat stale detector and pulse cooldown.
     "check_every",
@@ -420,6 +424,7 @@ _RESPAWN_RESET_COLUMNS: frozenset[str] = frozenset({
     "attempt_count",
     "last_attempted_at",
     "progress_log",          # the timeline belongs to the occurrence
+    "comments",              # the thread belongs to the occurrence (progress_log precedent)
     "lazybrain_note_id",     # create_task mirrors a new note
 })
 
@@ -729,6 +734,7 @@ async def create_task(
                 None,  # nag_fired_at — set atomically by daemon on first nag
                 reminder_offset_minutes,
                 None,  # progress_log — populated by append_progress_entry
+                None,  # comments — populated by add_comment
                 None,  # check_every — set when user opts in to pulses
                 None,  # progress_template_id
                 None,  # nudge_sent_at

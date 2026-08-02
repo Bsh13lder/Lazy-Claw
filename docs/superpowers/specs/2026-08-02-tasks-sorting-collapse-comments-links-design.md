@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-02
 **Scope:** Mobile-first (Flutter app + Python backend). Web UI untouched this pass; backend endpoints are built web-ready.
-**Status:** Approved by user (design conversation 2026-08-02)
+**Status:** Approved & implemented (2026-08-02)
 
 ## Goals
 

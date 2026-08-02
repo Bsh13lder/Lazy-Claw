@@ -46,7 +46,9 @@ import 'uuid.dart';
 ///     frame, plaintext `YYYY-MM-DD` or null). All three round-trip through the
 ///     offline sync; a missed mapping point would silently drop the field and
 ///     LWW would propagate the loss.
-const int kAppDbVersion = 11;
+/// v12: adds task_cache.comments (comment-thread JSON) + the ui_prefs KV
+///     table (persisted collapse/hide-completed UI state).
+const int kAppDbVersion = 12;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -90,6 +92,7 @@ const List<String> kAppDbSchema = [
     trace_session_id TEXT,
     lazybrain_note_id TEXT,
     steps TEXT,
+    comments TEXT,
     allocated_budget REAL,
     updated_at TEXT,
     dirty INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +248,14 @@ const List<String> kAppDbSchema = [
     last_synced_at TEXT
   )
   ''',
+  // Tiny KV store for client-local UI state (collapse/expand, hide-completed).
+  // Deliberately NOT synced — this is per-device preference, not user data.
+  '''
+  CREATE TABLE IF NOT EXISTS ui_prefs (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )
+  ''',
 ];
 
 /// Apply the full schema to [db]. Used by both [openAppDb] (via onCreate) and
@@ -374,6 +385,19 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
     if (!projPresent.contains('due_date')) {
       await db.execute('ALTER TABLE project_cache ADD COLUMN due_date TEXT');
     }
+  }
+  // v11 → v12: add the comment-thread column to task_cache and the ui_prefs
+  // KV table. Idempotent — the column is only ALTERed in when genuinely
+  // absent (clones the v10→v11 pattern), and the table uses
+  // CREATE TABLE IF NOT EXISTS, so a re-run can't throw.
+  if (oldVersion < 12) {
+    final taskCols = await db.rawQuery("PRAGMA table_info('task_cache')");
+    final taskPresent = taskCols.map((c) => c['name']).toSet();
+    if (!taskPresent.contains('comments')) {
+      await db.execute('ALTER TABLE task_cache ADD COLUMN comments TEXT');
+    }
+    await db.execute(
+        'CREATE TABLE IF NOT EXISTS ui_prefs (key TEXT PRIMARY KEY, value TEXT)');
   }
 }
 

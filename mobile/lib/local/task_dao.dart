@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../models/comment.dart';
 import '../models/subtask.dart';
 import '../models/task.dart';
 import 'app_db.dart';
@@ -13,6 +14,8 @@ class OutboxOp {
   static const update = 'update';
   static const complete = 'complete';
   static const delete = 'delete';
+  static const commentAdd = 'comment_add';
+  static const commentDelete = 'comment_delete';
 }
 
 const String kTaskEntity = 'task';
@@ -444,6 +447,60 @@ class TaskDao {
     return true;
   }
 
+  /// Append one comment locally + enqueue a `comment_add`. The op replays as a
+  /// server-side APPEND (idempotent by comment id), so offline comments from two
+  /// devices merge instead of last-write-wins clobbering.
+  Future<Task?> applyLocalAddComment(String taskId, TaskComment comment) async {
+    final existing = await getById(taskId);
+    if (existing == null) return null;
+    final now = _now();
+    final next = serializeComments([...existing.taskComments, comment]);
+    await _db.transaction((txn) async {
+      await txn.update(
+        'task_cache',
+        {'comments': next, 'updated_at': now, 'dirty': 1},
+        where: 'id = ?',
+        whereArgs: [taskId],
+      );
+      await _enqueueTxn(txn, OutboxOp.commentAdd, taskId,
+          {'id': taskId, 'comment': comment.toJson()}, now);
+    });
+    // `next` is never null here (we just appended), so copyWith's "null means
+    // unchanged" convention is safe.
+    return existing.copyWith(comments: next);
+  }
+
+  /// Remove one comment locally + enqueue a `comment_delete` (idempotent).
+  Future<Task?> applyLocalDeleteComment(String taskId, String commentId) async {
+    final existing = await getById(taskId);
+    if (existing == null) return null;
+    final now = _now();
+    final remaining =
+        [for (final c in existing.taskComments) if (c.id != commentId) c];
+    final next = serializeComments(remaining);
+    await _db.transaction((txn) async {
+      await txn.update(
+        'task_cache',
+        {'comments': next, 'updated_at': now, 'dirty': 1},
+        where: 'id = ?',
+        whereArgs: [taskId],
+      );
+      await _enqueueTxn(txn, OutboxOp.commentDelete, taskId,
+          {'id': taskId, 'comment_id': commentId}, now);
+    });
+    // `Task.copyWith(comments: null)` can't CLEAR the field — a null argument
+    // means "leave alone" for every copyWith field (see task.dart). When the
+    // last comment is removed, `next` is null and the cache column must read
+    // back as a real SQL NULL (handled by the `txn.update` map entry above,
+    // which sqflite writes as NULL). The RETURNED Task must reflect the same
+    // clear, so it's rebuilt via fromJson(toJson()+override) instead of
+    // copyWith.
+    if (next == null) {
+      return Task.fromJson({...existing.toJson(), 'comments': null});
+    }
+    return existing.copyWith(comments: next);
+  }
+
   /// Mark a row clean after its mutation pushed successfully. For a delete that
   /// pushed, the tombstone can be hard-removed (server now owns the delete).
   ///
@@ -782,6 +839,7 @@ class TaskDao {
     traceSessionId: row['trace_session_id'] as String?,
     lazybrainNoteId: row['lazybrain_note_id'] as String?,
     steps: row['steps'] as String?,
+    comments: row['comments'] as String?,
     allocatedBudget: (row['allocated_budget'] as num?)?.toDouble(),
   );
 
@@ -808,6 +866,7 @@ class TaskDao {
     'trace_session_id': t.traceSessionId,
     'lazybrain_note_id': t.lazybrainNoteId,
     'steps': t.steps,
+    'comments': t.comments,
     'allocated_budget': t.allocatedBudget,
   };
 }

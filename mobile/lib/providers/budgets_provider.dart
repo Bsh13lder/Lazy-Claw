@@ -165,6 +165,19 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Get-or-create a project by [name] (case-insensitive). No-op for an
+  /// empty/whitespace-only name or when a project with the same name already
+  /// exists in any casing — tasks link to projects by name, so a near-match
+  /// casing must not spawn a duplicate project.
+  Future<void> ensureProject(String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    final lower = trimmed.toLowerCase();
+    final exists = state.projects.any((p) => p.name.toLowerCase() == lower);
+    if (exists) return;
+    await createProject(trimmed);
+  }
+
   /// Rename an existing project (optimistic). Returns true on success, false
   /// (with `state.error` set) when the local write throws.
   Future<bool> renameProject(String id, String name) async {

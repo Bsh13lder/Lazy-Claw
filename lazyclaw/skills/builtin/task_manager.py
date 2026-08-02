@@ -804,6 +804,110 @@ class UpdateTaskSkill(BaseSkill):
         return f"Updated: {match['title']}"
 
 
+class AddTaskCommentSkill(BaseSkill):
+    """Append an agent-authored comment to a task's thread."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "add_task_comment"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Add a comment to a task's comment thread (author=agent). Use for "
+            "progress notes, findings, or follow-ups the user should see on the "
+            "task itself. Matches the task by name (partial match works). "
+            "Optionally target one sub-task by its title via subtask_name. "
+            "This is a COMMENT — it never edits the task's description."
+        )
+
+    @property
+    def category(self) -> str:
+        return "tasks"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "Task name or partial name to match",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The comment text (max 2000 chars)",
+                },
+                "subtask_name": {
+                    "type": "string",
+                    "description": "Optional sub-task title to attach the comment to",
+                },
+            },
+            "required": ["task_name", "text"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.notifications import spine
+        from lazyclaw.tasks.store import (
+            CommentLimitReached, add_comment, decode_steps, list_tasks,
+        )
+
+        task_name = params.get("task_name", "").strip()
+        text = params.get("text", "").strip()
+        if not task_name or not text:
+            return "Both task_name and text are required."
+
+        tasks = await list_tasks(self._config, user_id, status="todo")
+        tasks += await list_tasks(self._config, user_id, status="in_progress")
+        match = _fuzzy_match_task(tasks, task_name)
+        if not match:
+            available = ", ".join(t.get("title", "?") for t in tasks[:5])
+            return f"No task matching '{task_name}'. Active tasks: {available}"
+
+        subtask_id = None
+        subtask_name = (params.get("subtask_name") or "").strip()
+        if subtask_name:
+            wanted = subtask_name.casefold()
+            for step in decode_steps(match.get("steps")):
+                if wanted in str(step.get("title", "")).casefold():
+                    subtask_id = step.get("id")
+                    break
+            if subtask_id is None:
+                return f"No sub-task matching '{subtask_name}' on '{match['title']}'."
+
+        try:
+            entry = await add_comment(
+                self._config, user_id, match["id"],
+                text=text, author="agent", subtask_id=subtask_id,
+            )
+        except CommentLimitReached:
+            return f"'{match['title']}' already has the maximum number of comments."
+        except ValueError as e:
+            return f"Could not add comment: {e}"
+        if entry is None:
+            return "Task disappeared before the comment could be added."
+
+        # Quiet feed entry — visible in the app's notification feed, no
+        # Telegram push, no sound.
+        try:
+            await spine.notify(
+                self._config, user_id,
+                kind="task_comment",
+                title=f"💬 {match['title']}",
+                body=text[:200],
+                telegram=False,
+                silent=True,
+                deep_link={"type": "task", "id": match["id"]},
+            )
+        except Exception:
+            logger.debug("task_comment notify failed", exc_info=True)
+
+        return f"Commented on '{match['title']}': {text[:80]}"
+
+
 class DeleteTaskSkill(BaseSkill):
     """Delete a task by name."""
 

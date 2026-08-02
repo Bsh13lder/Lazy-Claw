@@ -186,7 +186,7 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.task_manager import (
             AddTaskSkill, ListTasksSkill, CompleteTaskSkill,
             FailTaskSkill,
-            UpdateTaskSkill, DeleteTaskSkill, DailyBriefingSkill,
+            UpdateTaskSkill, AddTaskCommentSkill, DeleteTaskSkill, DailyBriefingSkill,
             WorkTodosSkill, StopBackgroundSkill,
         )
 
@@ -195,6 +195,7 @@ class SkillRegistry:
         self.register(CompleteTaskSkill(config=config))
         self.register(FailTaskSkill(config=config))
         self.register(UpdateTaskSkill(config=config))
+        self.register(AddTaskCommentSkill(config=config))
         self.register(DeleteTaskSkill(config=config))
         self.register(DailyBriefingSkill(config=config))
         self.register(WorkTodosSkill(config=config))

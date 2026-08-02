@@ -306,6 +306,75 @@ void main() {
     },
   );
 
+  testWidgets(
+    'the Add-link button inserts the dialog result and Save persists it',
+    (tester) async {
+      final stub = _stub();
+      // Empty notes open straight in the editor, so the "Add link" button is
+      // visible without first tapping a preview — and the controller's
+      // selection is still the default collapsed-at--1, exercising the
+      // append-when-invalid-selection fallback.
+      const noNotes = Task(
+        id: 'task-add-link',
+        userId: 'u1',
+        title: 'Needs a link',
+        priority: 'medium',
+        status: 'todo',
+        owner: 'user',
+        nagCount: 0,
+        createdAt: '2026-06-06T00:00:00Z',
+      );
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 2200);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          child: MaterialApp(
+            theme: buildAppTheme(),
+            home: Consumer(
+              builder: (ctx, ref, _) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => showTaskDetailSheet(ctx, ref, noNotes),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('task-detail-notes-add-link')));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('add-link-text')),
+        'docs',
+      );
+      await tester.enterText(
+        find.byKey(const Key('add-link-url')),
+        'https://a.io',
+      );
+      await tester.tap(find.byKey(const Key('add-link-insert')));
+      await tester.pumpAndSettle();
+
+      final notesField = tester.widget<TextField>(
+        find.byKey(const Key('task-detail-notes')),
+      );
+      expect(notesField.controller!.text, '[docs](https://a.io)');
+
+      await tester.ensureVisible(find.byKey(const Key('task-detail-save')));
+      await tester.tap(find.byKey(const Key('task-detail-save')));
+      await tester.pumpAndSettle();
+
+      expect(stub.updateCalls.single['description'], '[docs](https://a.io)');
+    },
+  );
+
   testWidgets('editing the title + tapping Save invokes updateTask', (
     tester,
   ) async {

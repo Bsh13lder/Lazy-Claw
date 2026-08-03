@@ -21,10 +21,19 @@
 /// `project.dart`) plus the shared `smart_add/collector.dart`. They are
 /// `part of` this library so they can share [Raw], [_weekdayDate], and
 /// [_safeDate] without re-exporting internals.
+///
+/// `#project`/`/project` recognition itself (the regex + [removeProjectToken])
+/// lives one level up, in `smart_add/project_token.dart` — a plain (non-`part
+/// of`) file imported (and re-exported) here so the sibling expense parser
+/// (`smart_add_expense_parser.dart`) can match against the exact same pattern
+/// without forking it.
 library;
 
 import 'due_date.dart';
 import 'recurrence.dart';
+import 'smart_add/project_token.dart';
+
+export 'smart_add/project_token.dart' show removeProjectToken;
 
 part 'smart_add/collector.dart';
 part 'smart_add/dates.dart';
@@ -34,7 +43,11 @@ part 'smart_add/recurrence_patterns.dart';
 part 'smart_add/project.dart';
 
 /// What a recognized [SmartToken] represents. Drives the live highlight color.
-enum SmartTokenKind { date, time, priority, project, recurrence }
+/// `amount` is only ever produced by the sibling expense parser
+/// (`smart_add_expense_parser.dart`) — [parseSmartAdd] never emits it — but
+/// the enum is shared so both parsers hand [SmartAddController] the same
+/// [SmartToken] type.
+enum SmartTokenKind { date, time, priority, project, recurrence, amount }
 
 /// A recognized token's half-open character range `[start, end)` into the
 /// *original* input string, plus its [kind]. Immutable.
@@ -127,6 +140,11 @@ ParsedTask parseSmartAdd(String input, {DateTime? now}) {
           recurrence = r.recurrence;
           recurrenceDay = r.recurrenceDate;
         }
+      case SmartTokenKind.amount:
+      // parseSmartAdd's own `_collect` never emits `amount` — only the
+      // sibling expense parser (`smart_add_expense_parser.dart`) does — but
+      // the switch must stay exhaustive so a real future addition to this
+      // enum can't silently skip a case here.
     }
   }
 
@@ -253,24 +271,6 @@ List<Raw> _collect(String input, DateTime ref, DateTime today) {
 DateTime _weekdayDate(DateTime today, int weekday, {required bool nextWeek}) {
   final delta = (weekday - today.weekday) % 7; // 0..6, 0 = today
   return today.add(Duration(days: delta + (nextWeek ? 7 : 0)));
-}
-
-/// Remove the first `#token`/`/token` project reference from [title] — the
-/// same token [_project] (in `smart_add/project.dart`) recognizes as
-/// `SmartTokenKind.project` — collapsing the leftover double space and
-/// trimming the ends. A no-op (returns [title] unchanged) when no token is
-/// present.
-///
-/// Kept next to [_project] so the two can't drift apart. Used by the Add Task
-/// sheet's project-suggestion strip: picking a suggested (or newly created)
-/// project clears the raw token from the title text since the picked project
-/// becomes the task's category instead.
-String removeProjectToken(String title) {
-  final m = _project.firstMatch(title);
-  if (m == null) return title;
-  final start = m.start + (m.group(1)?.length ?? 0);
-  final stripped = title.replaceRange(start, m.end, '');
-  return stripped.replaceAll(_whitespace, ' ').trim();
 }
 
 /// Build a date, returning null for out-of-range month/day rather than letting

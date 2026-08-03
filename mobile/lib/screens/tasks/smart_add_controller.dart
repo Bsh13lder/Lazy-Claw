@@ -86,6 +86,8 @@ class SmartAddController extends TextEditingController {
         return AppColors.accent;
       case SmartTokenKind.project:
         return AppColors.info;
+      case SmartTokenKind.amount:
+        return AppColors.success;
       case SmartTokenKind.priority:
         final start = t.start.clamp(0, src.length);
         final end = t.end.clamp(0, src.length);
@@ -93,7 +95,7 @@ class SmartAddController extends TextEditingController {
     }
   }
 
-  /// Map a raw priority token (`!p1`, `!1`, `p2`, `!`, `!!`, `!!!`) to its color.
+  /// Map a raw priority token (`!p1`, `!1`, `!!`, `!!!`) to its color.
   static Color _priorityColor(String raw) {
     final digit = RegExp(r'[1-4]').firstMatch(raw)?.group(0);
     switch (digit) {
@@ -106,10 +108,11 @@ class SmartAddController extends TextEditingController {
       case '4':
         return AppColors.textMuted; // low
     }
-    final bangs = '!'.allMatches(raw).length; // bare-bang shorthand
-    if (bangs >= 3) return AppColors.error; // urgent
-    if (bangs == 2) return AppColors.warn; // high
-    return AppColors.info; // medium (single bang)
+    // No digit means this came from `_priorityBangs`, which only ever matches
+    // 2 or 3 bangs (G1 #2 deleted the bare single-`!` match, so a one-bang
+    // "medium" fallback can no longer reach here).
+    final bangs = '!'.allMatches(raw).length;
+    return bangs >= 3 ? AppColors.error : AppColors.warn; // urgent : high
   }
 
   static bool _sameSpans(List<SmartToken> a, List<SmartToken> b) {

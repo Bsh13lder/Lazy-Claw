@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lazyclaw_mobile/core/project_resolver.dart';
 import 'package:lazyclaw_mobile/core/smart_add_expense_parser.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import 'expense_project_suggestion_strip.dart';
 import 'project_color_picker.dart';
 import 'project_date_chips.dart';
 
@@ -103,17 +105,6 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     if (mounted) setState(() {});
   }
 
-  /// The project matching [name] case-insensitively, or null when no project
-  /// carries that exact name — an "unambiguous match" per the plan's project-
-  /// resolution semantics.
-  Project? _matchProjectByName(String name) {
-    final needle = name.toLowerCase();
-    for (final p in _projects) {
-      if (p.name.toLowerCase() == needle) return p;
-    }
-    return null;
-  }
-
   /// Format a parsed amount for the Amount field: whole numbers show with no
   /// decimals ("25"), everything else with exactly two ("45.50") — matching
   /// what the user is most likely to have typed.
@@ -139,7 +130,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
         _applyParsedAmount(parsed.amount!);
       }
       if (!_projectTouched && parsed.project != null) {
-        final match = _matchProjectByName(parsed.project!);
+        final match = resolveProjectMatch(parsed.project!, _projects);
         if (match != null) _projectId = match.id;
       }
     });
@@ -151,7 +142,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   /// the Add Task sheet (which strips the token from the title because there
   /// the project becomes a separate category, not part of the task text).
   void _applyProjectSuggestion(String projectName) {
-    final match = _matchProjectByName(projectName);
+    final match = resolveProjectMatch(projectName, _projects);
     setState(() {
       if (match != null) _projectId = match.id;
       _projectTouched = true;
@@ -229,7 +220,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     final showSuggestions = suggestToken != null &&
         _descFocusNode.hasFocus &&
         !_projectTouched &&
-        _matchProjectByName(suggestToken) == null;
+        resolveProjectMatch(suggestToken, _projects) == null;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -266,7 +257,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
           onChanged: _onDescriptionChanged,
         ),
         if (showSuggestions)
-          _ExpenseProjectSuggestionStrip(
+          ExpenseProjectSuggestionStrip(
             token: suggestToken,
             projects: _projects,
             onSelect: _applyProjectSuggestion,
@@ -307,91 +298,6 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
           onPressed: _loading ? null : _submit,
         ),
       ],
-    );
-  }
-}
-
-/// Live `#`/`/` project suggestions for the expense Description field, shown
-/// only while the parsed token has no unambiguous existing-project match (see
-/// `_AddExpenseSheetState.build`). Rows are case-insensitive prefix/substring
-/// matches over [projects] (max 4), deduped by lowercased name, plus a
-/// trailing "Create project '{token}'" row — mirrors
-/// `add_task_sheet.dart:_ProjectSuggestionStrip`'s pattern (trimmed: no
-/// "exact match" bucket here since an exact match is never shown alongside
-/// this strip in the first place).
-class _ExpenseProjectSuggestionStrip extends StatelessWidget {
-  const _ExpenseProjectSuggestionStrip({
-    required this.token,
-    required this.projects,
-    required this.onSelect,
-    required this.onCreate,
-  });
-
-  /// The raw token text parsed from the description (no leading `#`/`/`).
-  final String token;
-  final List<Project> projects;
-
-  /// Called with the matched project's name.
-  final ValueChanged<String> onSelect;
-
-  /// Called with [token] when the "Create project" row is tapped.
-  final ValueChanged<String> onCreate;
-
-  @override
-  Widget build(BuildContext context) {
-    final needle = token.toLowerCase();
-    final prefix = <Project>[];
-    final substring = <Project>[];
-    final seenNames = <String>{};
-    for (final p in projects) {
-      final name = p.name.toLowerCase();
-      if (!name.contains(needle)) continue;
-      if (!seenNames.add(name)) continue;
-      if (name.startsWith(needle)) {
-        prefix.add(p);
-      } else {
-        substring.add(p);
-      }
-    }
-    final matches = [...prefix, ...substring].take(4).toList();
-
-    return Container(
-      margin: const EdgeInsets.only(top: AppSpacing.xs),
-      constraints: const BoxConstraints(maxHeight: 168),
-      decoration: BoxDecoration(
-        color: AppColors.bgSurfaceElevated,
-        borderRadius: AppRadii.rMd,
-        border: Border.all(color: AppColors.borderDefault),
-      ),
-      child: ListView(
-        shrinkWrap: true,
-        padding: EdgeInsets.zero,
-        children: [
-          for (final p in matches)
-            LzListTile(
-              key: ValueKey('expense-project-suggest-${p.name}'),
-              dense: true,
-              leading: ProjectColorDot(hex: p.color, size: 12),
-              title: p.name,
-              onTap: () => onSelect(p.name),
-            ),
-          LzListTile(
-            key: const Key('expense-project-suggest-create'),
-            dense: true,
-            leading: Icon(
-              Icons.add_rounded,
-              size: 16,
-              color: AppColors.accent,
-            ),
-            title: "Create project '$token'",
-            titleStyle: AppText.body.copyWith(
-              color: AppColors.accent,
-              fontWeight: FontWeight.w600,
-            ),
-            onTap: () => onCreate(token),
-          ),
-        ],
-      ),
     );
   }
 }

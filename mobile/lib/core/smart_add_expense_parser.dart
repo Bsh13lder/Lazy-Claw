@@ -16,7 +16,11 @@
 /// (`parking !2`, `25,50 groceries`, `6/10 dinner`).
 ///
 /// Pure Dart (no I/O, no async), never throws — an unrecognized amount just
-/// leaves [ParsedExpense.amount] null and the description untouched.
+/// leaves [ParsedExpense.amount] null. The `#`/`/` project matcher runs
+/// UNCONDITIONALLY regardless of whether an amount was found (see
+/// [parseSmartExpense]'s doc), so e.g. `coffee #cafe` still resolves a
+/// project with a null amount — deliberate: it lets the project pre-fill
+/// while the user is still mid-typing the amount.
 library;
 
 import 'smart_add/project_token.dart';
@@ -28,10 +32,14 @@ class ParsedExpense {
   /// removed and whitespace collapsed.
   final String cleanDescription;
 
-  /// The parsed money amount, or null when no amount token matched. Amount is
-  /// the mandatory anchor: nothing else about the input is even inspected for
-  /// tokens the field itself couldn't need, so a line with no recognizable
-  /// number simply parses to an all-null result.
+  /// The parsed money amount, or null when no amount token matched. "Amount
+  /// is the mandatory anchor" describes the MASKING order (amount is found
+  /// and masked out FIRST, before the project matcher runs, so the two spans
+  /// can never overlap) — it does NOT mean project detection is skipped when
+  /// there's no amount. The project matcher always runs, amount or not: e.g.
+  /// `coffee #cafe` (no number anywhere) still resolves `project: 'cafe'`
+  /// with `amount: null`, so a `#project` token can pre-fill while the user
+  /// is still mid-typing the amount.
   final double? amount;
 
   /// The ISO currency code (`EUR`/`USD`/`GBP`/`JPY`) carried by an explicit

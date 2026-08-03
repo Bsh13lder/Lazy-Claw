@@ -151,3 +151,104 @@ protection the task parser already had, reused unchanged).
   all explicitly DEFERRED by the plan.
 - No currency picker/field added to the sheet (none exists today; out of
   scope per the plan's 3-item scope list).
+
+---
+
+## Review round 2 — fixes
+
+### 1. Project resolution widened to mirror the agent-side resolver (Important)
+
+`_matchProjectByName` was exact-match only, narrower than the plan's binding
+"match the agent side" requirement. Read `lazyclaw/budgets/resolver.py:
+resolve_project` (used by `lazyclaw/skills/builtin/budget_manager.py:349`)
+and mirrored its exact tier order and single-hit-only rule in a new file,
+`mobile/lib/core/project_resolver.dart` (`resolveProjectMatch`):
+
+- **exact** → normalized name == normalized query, single hit resolves.
+- **substring** → normalized query is contained in normalized name, single
+  hit resolves.
+- **fuzzy** → similarity ratio >= 0.85 (same threshold the Python resolver
+  uses), single hit resolves.
+- More than one hit at ANY tier stops resolution right there (ambiguous,
+  never falls through to a looser tier) — mirrors the Python resolver's
+  `"multi"` reason short-circuiting. Zero hits at a tier falls through to the
+  next; zero hits everywhere (or an empty query) resolves to null.
+
+**Fuzzy metric used, and why it's a faithful stand-in:** Dart has no
+built-in equivalent of `difflib.SequenceMatcher.ratio()` (Ratcliff/
+Obershelp), and porting that specific algorithm wasn't the actual
+requirement — what the single-hit-only gating needs is "how close are these
+two short strings," not a particular formula. Used a normalized Levenshtein
+(edit-distance) ratio instead: `1 - editDistance / max(len(a), len(b))`, a
+standard, well-understood similarity measure. Verified by hand for the test
+fixtures (e.g. `"clubbay"` vs `"clubbey"`: one substitution / 7 chars =
+ratio ≈ 0.857, clears 0.85) rather than assumed.
+
+`add_expense_sheet.dart`'s three call sites (`_onDescriptionChanged`,
+`_applyProjectSuggestion`, the strip's `showSuggestions` gate) now call
+`resolveProjectMatch(token, _projects)` instead of the old exact-only helper,
+which was deleted.
+
+**New tests:**
+- `mobile/test/core/project_resolver_test.dart` (10 tests) — exact,
+  substring single/ambiguous, fuzzy single/ambiguous/distant, no-match,
+  empty-query, empty-list, and tier precedence (exact wins before substring
+  even runs).
+- `mobile/test/screens/add_expense_sheet_test.dart` — 3 new widget tests
+  pinning the exact scenarios from review: `"Clubbay VIP"` + `#clubbay`
+  auto-applies (no strip); two projects both containing `"club"` + `#club`
+  → strip shown (ambiguous, no silent guess — note: didn't assert the
+  dropdown's value against a specific project id here, since with no
+  `initialProjectId` the picker's own default-first-project seed already
+  lands on `p1` for unrelated reasons; the real signal is the strip
+  appearing); no match at all → strip shown.
+
+### 2. `ParsedExpense.amount`'s docstring corrected (Important)
+
+The doc claimed a line with no amount "simply parses to an all-null
+result" — false: `projectTokenPattern.firstMatch(masked)` runs
+UNCONDITIONALLY (`masked` falls back to the raw input when there's no
+amount token), so `parseSmartExpense('coffee #cafe')` returns
+`project: 'cafe'` with `amount: null`. Kept the runtime behavior (it's the
+better UX — `#project` can pre-fill while the user is still typing the
+amount) and rewrote both the library-level doc comment and the
+`ParsedExpense.amount` field doc to describe it accurately: "mandatory
+anchor" refers to the MASKING ORDER (amount is found and masked first, so
+its span and the project's span can never overlap), not a gate that skips
+project detection. Added a pinning test: `coffee #cafe` → `amount: null`,
+`project: 'cafe'`, `cleanDescription: 'coffee'`.
+
+### 3. Minors
+
+- (a) `removeProjectToken` now reuses a cached top-level `_whitespace`
+  RegExp in `smart_add/project_token.dart` instead of compiling a fresh one
+  per call (it runs on every keystroke of a smart-add field).
+- (b) The masking test in `smart_add_expense_parser_test.dart` now checks
+  `t.kind == SmartTokenKind.amount`/`.project` directly (imported
+  `SmartTokenKind` from `smart_add_parser.dart`) instead of
+  `t.kind.toString().contains('amount')`.
+- (c) Extracted `_ExpenseProjectSuggestionStrip` to its own file,
+  `mobile/lib/screens/expenses/expense_project_suggestion_strip.dart`
+  (renamed public `ExpenseProjectSuggestionStrip` since it now crosses a
+  file boundary) — a clean, self-contained lift with no shared private
+  state. `add_expense_sheet.dart` is now 501 lines (was 595).
+
+### Gates re-run after all of the above
+
+- `flutter test test/core/ test/screens/` → **1071 tests, 1 failure** — the
+  same documented pre-existing `expenses_range_filter_test.dart` failure
+  (unrelated file, untouched). `home_screen_test.dart` did not fail.
+- `flutter analyze` → **65 issues**, matching baseline exactly, zero new
+  (confirmed by grepping the full issue list for every file this round
+  touched or added — no hits).
+- All new/changed test files individually re-run and green:
+  `project_resolver_test.dart` (10/10), `smart_add_expense_parser_test.dart`
+  (18/18), `add_expense_sheet_test.dart` (8/8).
+
+### Still true from round 1, unaffected by these fixes
+
+- Concurrent-agent boundary respected: `dates.dart`/`times.dart`/
+  `priority.dart`/`recurrence_patterns.dart` and their tests untouched this
+  round either (verified via `git status` before committing — only the
+  files listed above are modified/new).
+- Currency still not surfaced in the UI (unchanged, still out of v1 scope).

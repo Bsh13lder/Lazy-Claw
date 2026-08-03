@@ -12,6 +12,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/smart_add_expense_parser.dart';
+import 'package:lazyclaw_mobile/core/smart_add_parser.dart' show SmartTokenKind;
 
 /// Asserts [parsed]'s token spans (as parsed from [input]) are well-formed:
 /// each is non-empty and in-bounds, and the whole list is ascending by
@@ -133,6 +134,17 @@ void main() {
       expect(r.project, isNull);
       expect(r.cleanDescription, 'just a note');
     });
+
+    test(
+        'coffee #cafe — the project matcher runs UNCONDITIONALLY, with or '
+        'without an amount (pins ParsedExpense.amount\'s doc: "mandatory '
+        'anchor" describes masking ORDER, not a gate on project detection)',
+        () {
+      final r = parse('coffee #cafe');
+      expect(r.amount, isNull);
+      expect(r.project, 'cafe');
+      expect(r.cleanDescription, 'coffee');
+    });
   });
 
   group('anti-patterns that must NOT misfire (no date/time/priority/'
@@ -178,10 +190,10 @@ void main() {
     test('masking keeps the amount span and the project span disjoint', () {
       final r = parse('spent on #clubbay 25');
       final amountTok = r.tokens.firstWhere(
-        (t) => t.kind.toString().contains('amount'),
+        (t) => t.kind == SmartTokenKind.amount,
       );
       final projectTok = r.tokens.firstWhere(
-        (t) => t.kind.toString().contains('project'),
+        (t) => t.kind == SmartTokenKind.project,
       );
       expect(amountTok.start >= projectTok.end, isTrue);
     });

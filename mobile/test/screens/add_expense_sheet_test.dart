@@ -159,6 +159,73 @@ void main() {
   );
 
   testWidgets(
+    '"Clubbay VIP" + #clubbay auto-applies via a single substring hit — '
+    'matches the agent-side resolver (lazyclaw/budgets/resolver.py), not '
+    'just an exact-name match',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'Clubbay VIP')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      await tester.enterText(descriptionField(), 'spent on #clubbay 25');
+      await tester.pump();
+
+      final dropdown = tester
+          .widget<DropdownButton<String>>(find.byType(DropdownButton<String>));
+      expect(dropdown.value, 'p1');
+      // Auto-applied — no disambiguation strip shown.
+      expect(
+        find.byKey(const Key('expense-project-suggest-create')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'two projects both containing "club" — ambiguous, shows the strip '
+    'instead of silently guessing',
+    (tester) async {
+      // No `initialProjectId` and TWO candidate projects means the picker's
+      // own default-first-project seed lands on 'p1' regardless of anything
+      // the parser does — that default is unrelated to project RESOLUTION,
+      // so the behavior actually under test is the strip appearing (proof
+      // `resolveProjectMatch` returned null for the ambiguous "club" query,
+      // rather than silently picking `p1` or `p2`).
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'Clubhouse'), _project('p2', 'Nightclub')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      await tester.enterText(descriptionField(), '25 #club drinks');
+      await tester.pump();
+
+      expect(
+        find.byKey(const Key('expense-project-suggest-create')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'no match at all — shows the strip (create-project offer)',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'Marketing')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      await tester.enterText(descriptionField(), '25 #nima lunch');
+      await tester.pump();
+
+      expect(
+        find.byKey(const Key('expense-project-suggest-create')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
     'a manual amount edit wins over a later re-parse',
     (tester) async {
       await tester.pumpWidget(host(

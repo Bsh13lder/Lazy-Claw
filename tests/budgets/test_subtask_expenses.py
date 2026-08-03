@@ -191,6 +191,41 @@ async def test_update_expense_accepts_valid_subtask_id(cfg) -> None:
 
 
 # ---------------------------------------------------------------------------
+# "task not found" branch of _validate_subtask_link (review follow-up:
+# every other invariant test above uses a REAL task with either a valid or
+# unknown STEP id — none of them exercises task_id itself pointing at
+# nothing / a soft-deleted row).
+# ---------------------------------------------------------------------------
+
+
+async def test_create_expense_rejects_nonexistent_task_id(cfg) -> None:
+    pid = await _project(cfg)
+    with pytest.raises(ValueError):
+        await store.create_expense(
+            cfg, "u1", pid, amount=10.0,
+            task_id="does-not-exist", subtask_id="s-1",
+        )
+
+
+async def test_create_expense_rejects_soft_deleted_task_id(cfg) -> None:
+    pid = await _project(cfg)
+    task, steps = await _task_with_steps(cfg, "buy tiles")
+    step_id = steps[0]["id"]
+
+    assert await task_store.delete_task(cfg, "u1", task["id"]) is True
+
+    # get_task filters deleted_at IS NULL, so a soft-deleted task must
+    # degrade the same way as a genuinely missing one — a clean ValueError,
+    # never a 500 — even though the subtask_id it names was valid before the
+    # delete.
+    with pytest.raises(ValueError):
+        await store.create_expense(
+            cfg, "u1", pid, amount=10.0,
+            task_id=task["id"], subtask_id=step_id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # list_expenses(subtask_id=...) exact-match filter
 # ---------------------------------------------------------------------------
 

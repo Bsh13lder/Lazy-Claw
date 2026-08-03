@@ -38,15 +38,54 @@ void main() {
       expect(picked.map((t) => t.id), ['b']);
     });
 
-    test('a "Today" widget NEVER shows future tasks when something is due now',
-        () {
+    test(
+        'due-now no longer hides every future task — a spare row fills with '
+        'the soonest upcoming task', () {
       final tasks = [
         _task(id: 'future', dueDate: '2026-06-20'),
         _task(id: 'today', dueDate: '2026-06-07T09:00:00'),
         _task(id: 'overdue', dueDate: '2026-06-01'),
       ];
       final picked = pickWidgetTasks(tasks, now: now);
-      expect(picked.map((t) => t.id), ['overdue', 'today']);
+      expect(picked.map((t) => t.id), ['overdue', 'today', 'future']);
+    });
+
+    test(
+        '3 due-now + 2 future + 4 undated, 3-row cap: rows are exactly the '
+        '3 due-now tasks and the footer counts everything hidden (+6 more)',
+        () {
+      final tasks = [
+        _task(id: 'overdue', dueDate: '2026-06-01'),
+        _task(id: 'today_am', dueDate: '2026-06-07T08:00:00'),
+        _task(id: 'today_pm', dueDate: '2026-06-07T17:00:00'),
+        _task(id: 'future1', dueDate: '2026-06-09'),
+        _task(id: 'future2', dueDate: '2026-06-10'),
+        for (var i = 0; i < 4; i++) _task(id: 'undated$i'),
+      ];
+      final picked = pickWidgetTasks(tasks, now: now);
+      expect(
+        picked.map((t) => t.id),
+        ['overdue', 'today_am', 'today_pm'],
+      );
+      final tier = relevantWidgetTasks(tasks, now: now);
+      expect(widgetMoreLabel(tier.length), '+6 more');
+    });
+
+    test(
+        '1 due-now + 2 future: rows are due-now then the 2 soonest future, '
+        'and nothing is hidden (empty footer)', () {
+      final tasks = [
+        _task(id: 'overdue', dueDate: '2026-06-01'),
+        _task(id: 'future_far', dueDate: '2026-06-20'),
+        _task(id: 'future_near', dueDate: '2026-06-09'),
+      ];
+      final picked = pickWidgetTasks(tasks, now: now);
+      expect(
+        picked.map((t) => t.id),
+        ['overdue', 'future_near', 'future_far'],
+      );
+      final tier = relevantWidgetTasks(tasks, now: now);
+      expect(widgetMoreLabel(tier.length), '');
     });
 
     test('overdue + today sort soonest-first within the tier', () {
@@ -59,14 +98,16 @@ void main() {
       expect(picked.map((t) => t.id), ['overdue', 'today_am', 'today_pm']);
     });
 
-    test('falls back to soonest upcoming when nothing is due today', () {
+    test(
+        'upcoming tasks fill first (soonest first), then undated tasks fill '
+        'any remaining rows', () {
       final tasks = [
         _task(id: 'later', dueDate: '2026-06-20'),
         _task(id: 'sooner', dueDate: '2026-06-09'),
         _task(id: 'undated'),
       ];
       final picked = pickWidgetTasks(tasks, now: now);
-      expect(picked.map((t) => t.id), ['sooner', 'later']);
+      expect(picked.map((t) => t.id), ['sooner', 'later', 'undated']);
     });
 
     test('falls back to undated open tasks when no dated tasks exist', () {
@@ -95,16 +136,19 @@ void main() {
     });
   });
 
-  group('relevantWidgetTasks (uncapped tier — drives the "+N more" footer)', () {
-    test('returns the FULL today tier so the footer counts today overflow only',
-        () {
+  group('relevantWidgetTasks (uncapped — drives the "+N more" footer)', () {
+    test(
+        'returns EVERY open task (due-now + upcoming + undated) so the '
+        'footer always counts hidden future/undated work', () {
       final tasks = [
         for (var i = 0; i < 5; i++)
           _task(id: 'today$i', dueDate: '2026-06-07T0$i:00:00'),
         _task(id: 'future', dueDate: '2026-06-20'),
       ];
       final tier = relevantWidgetTasks(tasks, now: now);
-      expect(tier.length, 5); // future task NOT counted in "+N more"
+      // The future task is hidden by the 3-row cap but must still be
+      // counted — that's the whole point of the fix.
+      expect(tier.length, 6);
     });
 
     test('returns the upcoming tier when today is clear', () {

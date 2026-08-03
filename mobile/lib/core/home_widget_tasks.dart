@@ -42,8 +42,9 @@ Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
       await HomeWidget.saveWidgetData<String>('task_${i}_title', title);
       await HomeWidget.saveWidgetData<String>('task_${i}_due', due);
     }
-    // "+N more" counts the overflow of the SAME tier the rows came from —
-    // "+12 more" under a today-only list would be a lie.
+    // "+N more" counts EVERY open task not shown — dated and undated alike —
+    // so a hidden future-dated task always produces a hint (never silently
+    // starved out by the 3-row cap, see relevantWidgetTasks below).
     await HomeWidget.saveWidgetData<String>(
       'task_more', widgetMoreLabel(tier.length),
     );
@@ -83,16 +84,22 @@ Future<void> clearTasksWidget() async {
 
 // ── Pure selection / labeling (no plugin — unit-testable) ────────────────────
 
-/// The FULL relevance tier the "Today tasks" widget draws from — mirrors the
-/// home screen's Today section so the widget honors its own title:
+/// EVERY open task the "Today tasks" widget draws from, in priority order —
+/// mirrors the home screen's Today section so the widget honors its own
+/// title while never hiding the rest of the user's work:
 ///   1. overdue + due-today tasks, soonest first (the headline set);
-///   2. ELSE the upcoming dated tasks, soonest first (so the widget isn't
-///      blank for users who do set due dates — the date pill says "Tomorrow"
-///      / "Jun 15" so the rows can't masquerade as today's);
-///   3. ELSE open undated tasks in their incoming order.
+///   2. then upcoming dated tasks, soonest first (so a spare row always
+///      surfaces the next thing due — the date pill says "Tomorrow" /
+///      "Jun 15" so a row can't masquerade as today's);
+///   3. then open undated tasks, in their incoming order.
 /// Done tasks are excluded everywhere. Pure + deterministic via [now].
-/// Uncapped — [pickWidgetTasks] caps the rows; the uncapped length drives the
-/// "+N more" footer so it counts only THIS tier (not every open task).
+///
+/// Uncapped and NEVER drops a task — [pickWidgetTasks] caps the ROWS, but
+/// this full list is also what [widgetMoreLabel] counts, so a task pushed
+/// past the row cap (dated OR undated) always contributes to "+N more"
+/// instead of vanishing with no hint (the widget only ever had 3 rows;
+/// previously a full `dueNow` tier hid every future-dated task with zero
+/// footer, since `widgetMoreLabel` only saw that one tier's length).
 List<Task> relevantWidgetTasks(List<Task> tasks, {DateTime? now}) {
   final ref = now ?? DateTime.now();
   final today = DateTime(ref.year, ref.month, ref.day);
@@ -120,13 +127,14 @@ List<Task> relevantWidgetTasks(List<Task> tasks, {DateTime? now}) {
   }
   int byDue(Task a, Task b) =>
       _dueInstant(a.dueDate)!.compareTo(_dueInstant(b.dueDate)!);
-  if (dueNow.isNotEmpty) return dueNow..sort(byDue);
-  if (upcoming.isNotEmpty) return upcoming..sort(byDue);
-  return undated;
+  dueNow.sort(byDue);
+  upcoming.sort(byDue);
+  return [...dueNow, ...upcoming, ...undated];
 }
 
-/// The OPEN tasks to surface in the widget rows: the relevance tier from
-/// [relevantWidgetTasks], capped at [kTasksWidgetRowCount].
+/// The OPEN tasks to surface in the widget rows: due-now first, then
+/// upcoming (soonest first), then undated fill any rows still spare —
+/// the first [kTasksWidgetRowCount] of [relevantWidgetTasks].
 List<Task> pickWidgetTasks(List<Task> tasks, {DateTime? now}) =>
     relevantWidgetTasks(tasks, now: now).take(kTasksWidgetRowCount).toList();
 

@@ -63,6 +63,55 @@ void main() {
     expect(dueDateDisplay('2026-06-08T17:00:00'), '2026-06-08 · 5:00 PM');
   });
 
+  group('localDueDay (D1 — the shared .toLocal() day-derivation)', () {
+    // Shared by task_calendar_utils.dart's expandRecurringForRange AND
+    // tasks_screen.dart's _isOverdueOn/_groupTasks — a single tested
+    // implementation instead of three copies of the same
+    // DateTime.parse(...).toLocal() dance.
+    test('a UTC-aware +02:00 due date resolves to the same LOCAL day, not '
+        'the UTC day', () {
+      // 2026-08-04T00:00:00+02:00 is 2026-08-03T22:00:00Z. Reading the day
+      // off the raw (UTC) parse gives Aug 3 — one day early. `.toLocal()`
+      // must resolve it back to Aug 4 on this worktree/CI's Europe/Madrid
+      // (+2h CEST) clock. Derive the expected day the same way `.toLocal()`
+      // would, so the assertion is a real behavioral check on any machine
+      // TZ, not a tautology.
+      final expectedLocal =
+          DateTime.parse('2026-08-04T00:00:00+02:00').toLocal();
+      final expected =
+          DateTime(expectedLocal.year, expectedLocal.month, expectedLocal.day);
+      expect(localDueDay('2026-08-04T00:00:00+02:00'), expected);
+    });
+
+    test('pinned to Europe/Madrid: resolves to Aug 4, not Aug 3', () {
+      final localOffsetHours = DateTime.now().timeZoneOffset.inHours;
+      if (localOffsetHours != 2 && localOffsetHours != 1) {
+        return; // Not Europe/Madrid (CEST +2 / CET +1) — skip the pin.
+      }
+      expect(localDueDay('2026-08-04T00:00:00+02:00'), DateTime(2026, 8, 4));
+    });
+
+    test('a naive/local datetime is left as-is (no-op .toLocal())', () {
+      expect(localDueDay('2026-06-08T23:30:00'), DateTime(2026, 6, 8));
+    });
+
+    test('a date-only string resolves to that day', () {
+      expect(localDueDay('2026-06-08'), DateTime(2026, 6, 8));
+    });
+
+    test('null is null', () {
+      expect(localDueDay(null), isNull);
+    });
+
+    test('empty string is null', () {
+      expect(localDueDay(''), isNull);
+    });
+
+    test('unparseable string is null (never throws)', () {
+      expect(localDueDay('not-a-date'), isNull);
+    });
+  });
+
   group('composeDueDate', () {
     test('day only when no time', () {
       expect(composeDueDate(DateTime(2026, 6, 8)), '2026-06-08');

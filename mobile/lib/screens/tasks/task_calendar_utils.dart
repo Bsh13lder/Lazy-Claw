@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/due_date.dart';
 import '../../core/recurrence.dart';
 import '../../models/project.dart';
 import '../../models/task.dart';
@@ -76,16 +77,30 @@ const int kMaxGhostsPerTask = 60;
 /// bucketed the same way [groupTasksByDay] does) is skipped — the real
 /// [TaskRow] already renders there, so a ghost would duplicate it.
 ///
+/// Ghosts are a forward-looking "here's the next repeat" hint, never a
+/// history — no ghost is ever generated for a day before [now]'s local
+/// calendar day (defaults to the wall clock; pass it explicitly for
+/// deterministic tests). Paging the calendar back to a month before the
+/// task existed must not paint ghost dots on every matching day in that
+/// month, which would read as phantom repeats that never happened. A ghost
+/// exactly on today IS allowed — today isn't "the past" yet — and the
+/// real-vs-ghost dedup above still applies on top of this clamp.
+///
 /// Capped at [kMaxGhostsPerTask] generated ghosts per task.
 Map<DateTime, List<Task>> expandRecurringForRange(
   List<Task> tasks,
   DateTime rangeStart,
-  DateTime rangeEnd,
-) {
+  DateTime rangeEnd, {
+  DateTime? now,
+}) {
   final start = DateTime(rangeStart.year, rangeStart.month, rangeStart.day);
   final end = DateTime(rangeEnd.year, rangeEnd.month, rangeEnd.day);
   final out = <DateTime, List<Task>>{};
   if (end.isBefore(start)) return out;
+
+  final today = _localDay(now ?? DateTime.now());
+  final loopStart = start.isBefore(today) ? today : start;
+  if (loopStart.isAfter(end)) return out;
 
   for (final task in tasks) {
     final cron = task.recurring;
@@ -118,9 +133,9 @@ Map<DateTime, List<Task>> expandRecurringForRange(
       }
     }
 
-    final realDay = _localDueDay(task.dueDate);
+    final realDay = localDueDay(task.dueDate);
 
-    var day = start;
+    var day = loopStart;
     var generated = 0;
     while (!day.isAfter(end) && generated < kMaxGhostsPerTask) {
       final matches = switch (recurrence.kind) {
@@ -150,15 +165,13 @@ List<String>? _cronFields(String cron) {
   return fields.length == 5 ? fields : null;
 }
 
-/// The local calendar day a task's `dueDate` falls on, or null when absent /
-/// unparseable — same `.toLocal()` + date-only-key convention as
-/// [groupTasksByDay], kept in lock-step so a task's real materialised day
-/// never also gets ghosted.
-DateTime? _localDueDay(String? due) {
-  if (due == null || due.isEmpty) return null;
-  final parsed = DateTime.tryParse(due);
-  if (parsed == null) return null;
-  final local = parsed.toLocal();
+/// [instant]'s local calendar day — `.toLocal()` then drop the time. Unlike
+/// [localDueDay] (which parses a `String?`), this takes an already-parsed
+/// [DateTime] — used to resolve [expandRecurringForRange]'s `now` (defaulted
+/// to [DateTime.now], which is already local, but a test-injected `now`
+/// could be UTC-aware).
+DateTime _localDay(DateTime instant) {
+  final local = instant.toLocal();
   return DateTime(local.year, local.month, local.day);
 }
 

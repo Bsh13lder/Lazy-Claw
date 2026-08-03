@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../core/actions/app_actions.dart';
+import '../core/due_date.dart';
 import '../core/reminder_lead.dart';
 import '../models/project.dart';
 import '../models/subtask.dart';
@@ -88,18 +89,15 @@ extension _SectionLabel on TaskListSection {
 /// "overdue" — shared by [_groupTasks] (the inline section) and the dedicated
 /// Overdue view ([isOverdueTask] re-exports it).
 bool _isOverdueOn(Task task, DateTime today) {
-  if (task.isDone || task.dueDate == null) return false;
-  final DateTime dueDay;
-  try {
-    // `.toLocal()` before reading the calendar day — matches
-    // `task_calendar_utils.dart`'s `groupTasksByDay` (D1): a UTC-aware due
-    // date must resolve to the same wall-clock day everywhere, or a task
-    // can read as overdue here while its calendar cell disagrees.
-    final d = DateTime.parse(task.dueDate!).toLocal();
-    dueDay = DateTime(d.year, d.month, d.day);
-  } catch (_) {
-    return false;
-  }
+  if (task.isDone) return false;
+  // `localDueDay` (core/due_date.dart) is the single `.toLocal()`
+  // day-derivation shared with `task_calendar_utils.dart`'s
+  // `expandRecurringForRange` (D1): a UTC-aware due date must resolve to the
+  // same wall-clock day everywhere, or a task can read as overdue here while
+  // its calendar cell disagrees. Null covers both "no due date" and
+  // "unparseable" — neither is overdue.
+  final dueDay = localDueDay(task.dueDate);
+  if (dueDay == null) return false;
   return dueDay.isBefore(today);
 }
 
@@ -126,16 +124,10 @@ Map<TaskListSection, List<Task>> _groupTasks(List<Task> tasks) {
       done.add(task);
       continue;
     }
-    if (task.dueDate == null) {
-      upcoming.add(task);
-      continue;
-    }
-    final DateTime dueDay;
-    try {
-      // `.toLocal()` — same idiom as `_isOverdueOn` above / D1.
-      final d = DateTime.parse(task.dueDate!).toLocal();
-      dueDay = DateTime(d.year, d.month, d.day);
-    } catch (_) {
+    // `localDueDay` — same shared helper as `_isOverdueOn` above / D1. Null
+    // covers both "no due date" and "unparseable" — both fall to Upcoming.
+    final dueDay = localDueDay(task.dueDate);
+    if (dueDay == null) {
       upcoming.add(task);
       continue;
     }

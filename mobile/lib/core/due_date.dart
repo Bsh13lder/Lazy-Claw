@@ -50,6 +50,27 @@ String? formatDueTimeLabel(String? due) {
   return formatClock12(parts.hour, parts.minute);
 }
 
+/// The local **calendar day** [due] falls on, as a date-only [DateTime] at
+/// local midnight (`DateTime(y, m, d)`), or null when [due] is absent, empty,
+/// or unparseable (never throws).
+///
+/// `.toLocal()`s the parsed instant before reading `.year/.month/.day` — a
+/// UTC-aware [due] (the server emits this for a recurring template whose
+/// anchor was tz-aware; see `tasks/store.py`) must resolve to the same
+/// wall-clock day everywhere it's bucketed, or the same task reads as "today"
+/// on the calendar and "yesterday" in the List view's overdue check. This is
+/// the single implementation behind that day-derivation — previously
+/// duplicated across `task_calendar_utils.dart`'s `expandRecurringForRange`
+/// and `tasks_screen.dart`'s `_isOverdueOn`/`_groupTasks`. A no-op on an
+/// already-naive/local value.
+DateTime? localDueDay(String? due) {
+  if (due == null || due.isEmpty) return null;
+  final parsed = DateTime.tryParse(due);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  return DateTime(local.year, local.month, local.day);
+}
+
 /// A human display for [due]: the date, plus ` · 5:00 PM` when a time is set.
 String dueDateDisplay(String due) {
   final label = formatDueTimeLabel(due);

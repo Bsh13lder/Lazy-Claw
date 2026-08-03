@@ -85,6 +85,17 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
       _amountError = null;
     });
 
+    // Re-derive the SUBMITTABLE sub-task id from the current provider state
+    // (never the raw `_subtaskId` field) — see [_effectiveSubtaskId]. A
+    // sub-task deleted (locally or server-side) since this sheet's `initState`
+    // ran must never be re-sent: the server validates `subtask_id` exists
+    // among the task's current steps and 400s the WHOLE patch otherwise,
+    // silently discarding this amount/description/etc edit along with it.
+    final projects = ref.read(budgetsProvider).projects;
+    final allTasks = ref.read(tasksProvider).tasks;
+    final availableTasks = _tasksForCurrentProject(projects, allTasks);
+    final effectiveSubtaskId = _effectiveSubtaskId(availableTasks);
+
     final vendor = _vendorController.text.trim();
     await ref.read(budgetsProvider.notifier).updateExpense(
           widget.expense.id,
@@ -94,7 +105,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           projectId: _projectId,
           taskId: _taskId,
           taskIdSet: true,
-          subtaskId: _subtaskId,
+          subtaskId: effectiveSubtaskId,
           subtaskIdSet: true,
           spentAt: _spentAt,
         );
@@ -142,11 +153,43 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
     return const [];
   }
 
+  /// [_subtaskId] once confirmed to still be among the currently-selected
+  /// task's live sub-tasks, else null (a "ghost" link — its sub-task was
+  /// deleted, whether locally just now or already server-side before this
+  /// sheet was even opened). This is the ONLY value that may ever reach
+  /// [_SubtaskPicker]'s display or [BudgetsNotifier.updateExpense]'s
+  /// `subtaskId` argument — never the raw field. The picker's own stale-id
+  /// guard is display-only (it just swaps in `null` for the DropdownButton's
+  /// `value` so its assert doesn't fire); without also gating here, Save
+  /// would still submit the raw ghost id, and the server's `subtask_id`
+  /// existence check 400s the ENTIRE patch, silently dropping every other
+  /// edit (amount, description, ...) in it too.
+  String? _effectiveSubtaskId(List<Task> tasks) {
+    final subtasks = _subtasksForSelectedTask(tasks);
+    return subtasks.any((s) => s.id == _subtaskId) ? _subtaskId : null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final projects = ref.watch(budgetsProvider).projects;
     final allTasks = ref.watch(tasksProvider).tasks;
     final availableTasks = _tasksForCurrentProject(projects, allTasks);
+    final effectiveSubtaskId = _effectiveSubtaskId(availableTasks);
+
+    // Reconcile a detected ghost into STATE (not just this frame's display) —
+    // once corrected, `_subtaskId` itself can never be resubmitted on a later
+    // Save even if the user never touches the picker again. Scheduled for
+    // after this frame (mutating state mid-build would throw); the
+    // `_subtaskId != effectiveSubtaskId` re-check inside the callback (in
+    // addition to the one already gating this block) makes it a strict
+    // one-time correction, not a rebuild loop.
+    if (effectiveSubtaskId != _subtaskId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _subtaskId != effectiveSubtaskId) {
+          setState(() => _subtaskId = effectiveSubtaskId);
+        }
+      });
+    }
 
     return SingleChildScrollView(
       child: Column(
@@ -229,7 +272,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           // ── Sub-task picker (optional; only meaningful with a task) ─────
           _SubtaskPicker(
             subtasks: _subtasksForSelectedTask(availableTasks),
-            selectedId: _subtaskId,
+            selectedId: effectiveSubtaskId,
             enabled: _taskId != null,
             onChanged: (id) => setState(() => _subtaskId = id),
           ),

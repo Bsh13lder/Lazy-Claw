@@ -623,7 +623,12 @@ void main() {
 
     testWidgets(
         'falls back to no-selection when the linked sub-task no longer '
-        'exists on the task', (tester) async {
+        'exists on the task, AND Save never resubmits the ghost id (the id '
+        'must be sanitized in STATE, not just the dropdown\'s display — '
+        'reconciling only the display would let Save silently emit the '
+        'stale id, and the server 400s the WHOLE patch on an unknown '
+        'subtask_id, dropping this amount edit along with it)',
+        (tester) async {
       final stub = _stub();
       const withGhostSubtask = Expense(
         id: 'exp-94',
@@ -643,6 +648,63 @@ void main() {
         ],
         expense: withGhostSubtask,
       );
+
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        isNull,
+      );
+
+      // Edit an unrelated field WITHOUT ever touching the sub-task dropdown
+      // — this is exactly the real-world path: the user just wants to fix
+      // the amount, never noticing (or caring) that the linked sub-task was
+      // deleted elsewhere.
+      await tester.enterText(
+          find.byKey(const Key('expense-detail-amount')), '9');
+      await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+
+      // The ghost id must NOT ride along, but the rest of the edit must
+      // still go through — a stale `subtaskId` would 400 the whole PATCH on
+      // the real server and silently drop this amount change too.
+      expect(stub.updateCalls, hasLength(1));
+      expect(stub.updateCalls.single['subtaskId'], isNull);
+      expect(stub.updateCalls.single['subtaskIdSet'], isTrue);
+      expect(stub.updateCalls.single['amount'], 9.0);
+    });
+
+    testWidgets(
+        'a ghost sub-task id is reconciled into state even before Save — a '
+        'second frame after the ghost is detected already shows a clean '
+        'dropdown build (proves the fix touches state, not just the '
+        'emitted patch)', (tester) async {
+      final stub = _stub();
+      const withGhostSubtask = Expense(
+        id: 'exp-95',
+        projectId: 'proj-1',
+        taskId: 't1',
+        subtaskId: 'ghost-subtask-2',
+        amount: 5,
+        currency: 'USD',
+        description: 'Flour',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+        ],
+        expense: withGhostSubtask,
+      );
+
+      // Let the post-frame reconciliation callback fire and settle.
+      await tester.pump();
+      await tester.pumpAndSettle();
 
       expect(
         tester

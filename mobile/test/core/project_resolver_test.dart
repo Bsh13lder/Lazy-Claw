@@ -62,6 +62,28 @@ void main() {
       final projects = [_project('p1', 'Marketing')];
       expect(resolveProjectMatch('clubbay', projects), isNull);
     });
+
+    test(
+        'regression (review round 3): an insertion-class near-duplicate pair '
+        'must NOT silently resolve — this is the exact case where a cheaper '
+        'Levenshtein stand-in diverged from Python\'s SequenceMatcher and '
+        'would have written the expense to the wrong project', () {
+      // query "clubay" vs "clubhay" (a single INSERTION, not a substitution)
+      // and "clubbzay" (a single insertion + is also one substitution away
+      // from "clubbay"-shaped names). Under difflib.SequenceMatcher these
+      // score 0.923 and 0.857 — BOTH clear 0.85, so the real agent-side
+      // resolver treats this as ambiguous ("multi") and asks back. A
+      // normalized-Levenshtein approximation instead scored 0.857 and 0.75
+      // — only ONE hit — and would have silently picked "clubhay". Neither
+      // name is an exact or substring match for "clubay", so both fall
+      // through to the fuzzy tier, which must find BOTH hits and refuse to
+      // guess.
+      final projects = [
+        _project('p1', 'clubhay'),
+        _project('p2', 'clubbzay'),
+      ];
+      expect(resolveProjectMatch('clubay', projects), isNull);
+    });
   });
 
   group('no match / empty query', () {

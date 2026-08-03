@@ -252,3 +252,76 @@ project detection. Added a pinning test: `coffee #cafe` → `amount: null`,
   round either (verified via `git status` before committing — only the
   files listed above are modified/new).
 - Currency still not surfaced in the UI (unchanged, still out of v1 scope).
+
+---
+
+## Review round 3 — faithful SequenceMatcher port (Important)
+
+**Finding:** the normalized-Levenshtein stand-in from round 2 could silently
+auto-resolve where Python's `difflib.SequenceMatcher.ratio()` would ask back.
+The two formulas coincide for pure single-character substitutions (why the
+round-2 ambiguous-fuzzy test never caught it) but diverge for insertions/
+deletions/transpositions, where `SequenceMatcher` is consistently more
+generous. Reviewer's repro: query `clubay` vs candidates `clubhay` (a single
+insertion) and `clubbzay` — Python scores both ≥0.85 (ambiguous, asks back);
+Levenshtein scored only one ≥0.85 (silently resolves to the wrong project —
+a wrong-money write).
+
+**Fix chosen: (a) faithful port**, not the asymmetric-safety-band option.
+Replaced `_similarity`/`_levenshtein` in `mobile/lib/core/project_resolver.dart`
+with `_sequenceMatcherRatio`/`_totalMatchingLength`/`_findLongestMatch` — a
+direct port of `SequenceMatcher.ratio()`'s Ratcliff/Obershelp algorithm
+(recursive longest-matching-block search via the same `b2j` index +
+`j2len` DP recurrence CPython's `difflib` uses), not an approximation of it.
+`kProjectFuzzyMinRatio = 0.85` is unchanged (already the exact
+`FUZZY_MIN_RATIO` value). Chose the real port over the asymmetric-band
+option because it removes the discrepancy by construction — no residual
+question of "how much more conservative is mobile than the agent" to reason
+about later, and it's a self-contained ~90-line addition with no external
+dependency.
+
+**Verified, not assumed:** cross-checked both the reviewer's repro pair AND
+every existing fixture pair against real Python
+(`python3 -c "from difflib import SequenceMatcher; ..."`), then ran the
+IDENTICAL algorithm as a throwaway Dart script outside the package to
+compare outputs directly (not just via the ≥0.85 threshold in a test) —
+`clubay`/`clubhay` → 0.9230769..., `clubay`/`clubbzay` → 0.8571428...,
+matching Python bit-for-bit on both. The three pre-existing fixture pairs
+(`clubbay`/`clubbey`, `clubbaz`/`clubbax`, `clubbaz`/`clubbay`) all land on
+0.857142... under both implementations too — the round-2 fuzzy tests
+needed no changes, they just now run on the real algorithm instead of the
+approximation.
+
+**New regression test** in `project_resolver_test.dart`: the reviewer's
+exact repro (`clubay` vs `[clubhay, clubbzay]` → `resolveProjectMatch`
+returns null, i.e. ambiguous/ask-back, not a silent resolve to `clubhay`).
+
+**Autojunk noted, not ported:** Python's `SequenceMatcher` has an "autojunk"
+heuristic that only engages on sequences longer than 200 characters
+(popular-element suppression) — project names never approach that length,
+so omitting it is exact for this input size, not a second approximation
+smuggled back in. Documented in the function's doc comment.
+
+**Grapheme-cluster note (no code change, as requested):** `_findLongestMatch`
+indexes `a`/`b` by Dart `String`'s UTF-16 code unit, not grapheme cluster.
+For the ASCII project names this app expects this is a no-op. For a name
+containing an emoji or another non-BMP character, a surrogate pair would be
+scored as two separate units instead of one grapheme. I looked for a clean
+"this can only make the ratio lower, never higher" argument to put in the
+code comment, but talked myself out of asserting it: two DIFFERENT
+non-BMP characters that happen to share the same UTF-16 lead surrogate
+(common within the same ~1024-codepoint plane block) could register a
+spurious 1-code-unit match at the code-unit level that a grapheme-aware
+comparison would score as zero — i.e. the bias isn't provably one-directional.
+Left the code comment purely factual (states what happens, not which
+direction it skews) rather than risk shipping another inaccurate claim, and
+put the full reasoning here instead.
+
+### Gates re-run after this fix
+
+- `flutter test test/core/ test/screens/` → **1072 tests, 1 failure** — same
+  documented pre-existing `expenses_range_filter_test.dart` failure.
+  `home_screen_test.dart` did not fail.
+- `flutter analyze` → **65 issues**, matching baseline exactly, zero new.
+- `project_resolver_test.dart` individually: 11/11 (10 from round 2 + the
+  new round-3 regression test), all green with the real algorithm.

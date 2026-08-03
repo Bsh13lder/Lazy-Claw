@@ -596,6 +596,155 @@ void main() {
     });
   });
 
+  // ── G4: absolute calendar dates ─────────────────────────────────────────────
+  //
+  // Before this, there was NO way to type an absolute date except ISO
+  // (2026-06-10) or US-style M/D (6/10) -- the only genuinely missing
+  // capability in the whole parser plan.
+
+  group('month day / day month (G4)', () {
+    test('"month day" resolves with the short or long month name', () {
+      expect(parse('meet june 10').dueDate, '2026-06-10');
+      expect(parse('meet jun 10').dueDate, '2026-06-10');
+    });
+
+    test('"day month" resolves too, with an optional ordinal suffix', () {
+      expect(parse('meet 10 june').dueDate, '2026-06-10');
+      expect(parse('meet 10th june').dueDate, '2026-06-10');
+    });
+
+    test('cleans the whole phrase out of the title', () {
+      final r = parse('meet june 10');
+      expect(r.cleanTitle, 'meet');
+    });
+
+    test('an explicit 4-digit year is taken verbatim (comma optional)', () {
+      expect(parse('meet june 10, 2027').dueDate, '2027-06-10');
+      expect(parse('meet 10 june 2027').dueDate, '2027-06-10');
+    });
+
+    test('with no year, a past-this-year date rolls to next year', () {
+      // "now" is Sat 6 June 2026 -- Jan 1/15 this year have already passed.
+      expect(parse('call jan 1').dueDate, '2027-01-01');
+      expect(parse('call jan 15').dueDate, '2027-01-15');
+    });
+
+    test('with no year, a future-this-year date stays this year', () {
+      expect(parse('meet june 10').dueDate, '2026-06-10');
+      expect(parse('call dec 25').dueDate, '2026-12-25');
+    });
+
+    test('combines with a time-of-day token', () {
+      final r = parse('meet 10 june 2027 3pm');
+      expect(r.cleanTitle, 'meet');
+      expect(r.dueDate, '2027-06-10T15:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('rejects an impossible calendar date rather than clamping', () {
+      // Feb 30 never exists, in any year -- must stay a non-match, not
+      // silently roll into March.
+      final r = parse('meet feb 30');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'meet feb 30');
+    });
+
+    test(
+      'anti-patterns: a month name with no adjacent digit is never a date',
+      () {
+        // The required `\s+\d` (day-month) / `\d\s+` (month-day) is what saves
+        // these -- none of them has a digit directly touching the month word.
+        for (final input in [
+          'Marching band practice',
+          'may need to call back',
+          'a march to the sea',
+          'summon the may queen',
+        ]) {
+          final r = parse(input);
+          expect(r.dueDate, isNull, reason: input);
+          expect(r.cleanTitle, input, reason: input);
+        }
+      },
+    );
+
+    test(
+      '"5 june 6" — overlapping day-month/month-day both fire; rank/earliest-start pick one deterministically',
+      () {
+        final r = parse('5 june 6');
+        // `_dayMonth` ("5 june") starts earlier than the alternative `_monthDay`
+        // reading ("june 6") on the same text, so it wins outright via
+        // `_resolveOverlaps`' primary earliest-start rule; the different ranks
+        // (`_rankDayMonth` > `_rankExplicitDate`) exist as the deterministic
+        // backstop for a genuine start+length tie elsewhere, not because this
+        // particular case needs it.
+        expect(r.tokens.length, 1);
+        expect(r.tokens.single.kind, SmartTokenKind.date);
+        expect(
+          '5 june 6'.substring(r.tokens.single.start, r.tokens.single.end),
+          '5 june',
+        );
+        // "5 june" this year (2026-06-05) is BEFORE today (2026-06-06), so it
+        // rolls to next year's occurrence.
+        expect(r.dueDate, '2027-06-05');
+      },
+    );
+  });
+
+  group('separated D-M-YYYY / D.M.YYYY / D/M/YYYY (G4)', () {
+    test(
+      'all three separators resolve day-first, disambiguated by the 4-digit year',
+      () {
+        expect(parse('meet 5-6-2026').dueDate, '2026-06-05');
+        expect(parse('meet 5.6.2026').dueDate, '2026-06-05');
+        expect(parse('meet 5/6/2026').dueDate, '2026-06-05');
+      },
+    );
+
+    test('a mismatched separator on each side does not match', () {
+      final r = parse('meet 5-6.2026');
+      expect(r.dueDate, isNull);
+    });
+
+    test('strips cleanly from the title', () {
+      expect(parse('meet 5/6/2026').cleanTitle, 'meet');
+    });
+  });
+
+  group('_mdDate both-orderings rescue (G4)', () {
+    test('a European day/month reading is accepted when M/D is impossible', () {
+      expect(parse('meet 15/03').dueDate, '2026-03-15');
+      expect(parse('meet 25/12').dueDate, '2026-12-25');
+    });
+
+    test(
+      'M/D is kept when BOTH orderings would be valid (regression guard)',
+      () {
+        final r = parse('report 6/10');
+        expect(r.cleanTitle, 'report');
+        expect(r.dueDate, '2026-06-10'); // June 10, NOT October 6
+      },
+    );
+
+    test('bare 12/31 is unaffected (regression guard)', () {
+      expect(parse('12/31').dueDate, '2026-12-31');
+    });
+
+    test('still rejects when NEITHER ordering is valid (regression guard)', () {
+      final r = parse('mix 13/45 ratio');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'mix 13/45 ratio');
+    });
+
+    test(
+      'the chapter/page/etc lookbehind still applies regardless of ordering (regression guard)',
+      () {
+        final r = parse('aspect ratio 16/9');
+        expect(r.dueDate, isNull);
+        expect(r.cleanTitle, 'aspect ratio 16/9');
+      },
+    );
+  });
+
   group('single-letter am/pm clock', () {
     test('9a -> 09:00, 9p -> 21:00', () {
       expect(parse('gym 9a').dueDate, '2026-06-06T09:00:00');

@@ -25,6 +25,42 @@ const Map<String, int> _weekdays = {
   'sunday': 7,
 };
 
+// G4: month name/abbreviation lookup for `_monthDay`/`_dayMonth` below.
+const Map<String, int> _months = {
+  'jan': 1,
+  'january': 1,
+  'feb': 2,
+  'february': 2,
+  'mar': 3,
+  'march': 3,
+  'apr': 4,
+  'april': 4,
+  'may': 5,
+  'jun': 6,
+  'june': 6,
+  'jul': 7,
+  'july': 7,
+  'aug': 8,
+  'august': 8,
+  'sep': 9,
+  'sept': 9,
+  'september': 9,
+  'oct': 10,
+  'october': 10,
+  'nov': 11,
+  'november': 11,
+  'dec': 12,
+  'december': 12,
+};
+
+// The `?:`-grouped alternatives (e.g. `jan(?:uary)?`) mean the SHORT form
+// always matches first for a short input and the regex engine only reaches
+// for the long suffix when the text actually continues that way — no
+// ordering hazard the way a flat `jan|january` list would have.
+const String _monthPattern =
+    r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
+    r'aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+
 final RegExp _isoDate = RegExp(r'(^|\s)(\d{4})-(\d{2})-(\d{2})(?=\s|$)');
 // M/D calendar date. Two guards keep this off ordinary fraction-shaped text:
 //   - a negative VARIABLE-LENGTH lookbehind rejects a preceding "chapter"/
@@ -35,6 +71,30 @@ final RegExp _isoDate = RegExp(r'(^|\s)(\d{4})-(\d{2})-(\d{2})(?=\s|$)');
 //     never even reach the lookbehind.
 final RegExp _mdDate = RegExp(
   r'(^|\s)(?<!\b(?:chapter|page|part|section|step|round|ratio|version|v|split|half)\s)(\d{1,2})/(\d{1,2})(?=\s|$)',
+  caseSensitive: false,
+);
+// G4: `D-M-YYYY` / `D.M.YYYY` / `D/M/YYYY` — the 4-digit year removes all
+// ambiguity, so this is unconditionally day-first (the `\3` backreference
+// forces the SAME separator on both sides, so "5-6.2026" doesn't match).
+final RegExp _dmySeparatedDate = RegExp(
+  r'(^|\s)(\d{1,2})([-./])(\d{1,2})\3(\d{4})(?=\s|$)',
+);
+// G4: "june 5" / "5 june" (+ optional ordinal suffix and/or a 4-digit year).
+// The only genuinely missing capability before this: no way to type an
+// absolute date except ISO or US M/D. Anti-patterns this must NOT match —
+// "Marching band practice", "may need to call back", "a march to the sea",
+// "summon the may queen" — are saved entirely by the required `\s+\d`: none
+// of them has a digit directly after the month word.
+final RegExp _monthDay = RegExp(
+  r'(^|\s)(' +
+      _monthPattern +
+      r')\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?(?=\s|$)',
+  caseSensitive: false,
+);
+final RegExp _dayMonth = RegExp(
+  r'(^|\s)(\d{1,2})(?:st|nd|rd|th)?\s+(' +
+      _monthPattern +
+      r')(?:,?\s+(\d{4}))?(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _inNDays = RegExp(
@@ -216,10 +276,62 @@ void _collectDates(_Collector c) {
     if (g2.length != 2 && g3.length != 2) {
       return null; // require >=1 two-digit component (kills "1/2", "3/4")
     }
-    final d = _safeDate(today.year, int.parse(g2), int.parse(g3));
+    // G4: try M/D first (the historical American default) and keep it when
+    // valid; only fall back to D/M when M/D is impossible. This rescues
+    // "15/03"/"25/12" for a European user with no setting to flip, while
+    // leaving every currently-valid M/D reading (e.g. pinned "6/10") exactly
+    // as it was.
+    final asMonthDay = _safeDate(today.year, int.parse(g2), int.parse(g3));
+    if (asMonthDay != null) {
+      return Raw(
+        s,
+        m.end,
+        SmartTokenKind.date,
+        rank: _rankExplicitDate,
+        date: asMonthDay,
+      );
+    }
+    final asDayMonth = _safeDate(today.year, int.parse(g3), int.parse(g2));
+    return asDayMonth == null
+        ? null
+        : Raw(
+            s,
+            m.end,
+            SmartTokenKind.date,
+            rank: _rankExplicitDate,
+            date: asDayMonth,
+          );
+  });
+  c.scan(_dmySeparatedDate, (m, s) {
+    final day = int.parse(m.group(2)!);
+    final month = int.parse(m.group(4)!);
+    final year = int.parse(m.group(5)!);
+    final d = _safeDate(year, month, day);
     return d == null
         ? null
         : Raw(s, m.end, SmartTokenKind.date, rank: _rankExplicitDate, date: d);
+  });
+  c.scan(_monthDay, (m, s) {
+    final month = _months[m.group(2)!.toLowerCase()];
+    if (month == null) return null;
+    final day = int.parse(m.group(3)!);
+    final explicitYear = m.group(4) != null ? int.parse(m.group(4)!) : null;
+    final year = explicitYear ?? _defaultYearFor(today, month, day);
+    final d = _safeDate(year, month, day);
+    return d == null
+        ? null
+        : Raw(s, m.end, SmartTokenKind.date, rank: _rankExplicitDate, date: d);
+  });
+  c.scan(_dayMonth, (m, s) {
+    final day = int.parse(m.group(2)!);
+    final month = _months[m.group(3)!.toLowerCase()];
+    if (month == null) return null;
+    final explicitYear = m.group(4) != null ? int.parse(m.group(4)!) : null;
+    final year = explicitYear ?? _defaultYearFor(today, month, day);
+    final d = _safeDate(year, month, day);
+    return d == null
+        ? null
+        : Raw(s, m.end, SmartTokenKind.date, rank: _rankDayMonth, date: d);
   });
   c.scan(
     _inNDays,
@@ -456,4 +568,17 @@ DateTime _addMonths(DateTime date, int months) {
   final lastDayOfMonth = DateTime(year, month + 1, 0).day;
   final day = date.day > lastDayOfMonth ? lastDayOfMonth : date.day;
   return DateTime(year, month, day);
+}
+
+/// G4: the year for a `_monthDay`/`_dayMonth` match that carried no explicit
+/// year — the next occurrence of [month]/[day] on or after [today]. Tries
+/// THIS year first (via `_safeDate`, so an impossible combination like a
+/// non-leap Feb 29 never silently rolls over); falls back to next year both
+/// when this year's occurrence has already passed and when this year's
+/// combination is flat-out invalid (in which case the final `_safeDate` call
+/// in the caller rejects the match if next year is ALSO invalid).
+int _defaultYearFor(DateTime today, int month, int day) {
+  final thisYear = _safeDate(today.year, month, day);
+  if (thisYear != null && !thisYear.isBefore(today)) return today.year;
+  return today.year + 1;
 }

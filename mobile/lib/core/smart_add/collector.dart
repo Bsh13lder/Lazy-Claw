@@ -14,6 +14,12 @@ const int _rankRecurrence = 70;
 const int _rankTime = 50;
 const int _rankPriority = 30;
 const int _rankProject = 20;
+// G4: `_dayMonth` and `_monthDay` (smart_add/dates.dart) both live in the
+// explicitDate family but need DISTINCT ranks — "5 june 6" can produce
+// partially overlapping spans from the two matchers, and a genuine
+// start+length tie needs a deterministic winner. `_dayMonth` reads one tick
+// above the shared `_rankExplicitDate` tier so it wins such a tie.
+const int _rankDayMonth = 91;
 
 /// Token-start helper shared by every matcher family: excludes the leading
 /// `(^|\s)` boundary group (group 1) so a highlight covers exactly the token

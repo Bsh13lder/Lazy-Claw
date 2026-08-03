@@ -170,3 +170,24 @@ ALSO: add a shared test helper `expectWellFormedSpans(input, parsed)` asserting 
 - [ ] `mobile/pubspec.yaml` → `1.25.0+126` AND `mobile/lib/core/constants/app_constants.dart` (`kAppVersion`/`kAppBuild`) in the SAME commit; then run `flutter test test/core/app_version_constants_test.dart`.
 - [ ] DOCS.md: one tight subsection per phase. TODO.md: Phase 27 summary + tick what closed.
 - [ ] Commit `chore(mobile): bump to 1.25.0+126; phase 27 notes`
+
+---
+
+### Task 10: Expense quick-typing — `spent on #clubbay 25` (P5, added 2026-08-03)
+
+**User ask (verbatim intent):** "expenses slick typing — 'spent on #clubbay 25' for example, and auto add. slick typing is very important."
+
+**Design (from the discovery pass — binding):**
+- **A SIBLING parser, not an extension of `parseSmartAdd`.** Expense lines are dominated by digits, so the task grammar misfires on them: `parking !2` → priority=high, `taxi 25 in 2 days` fights over which number is money, `my p1 project` → urgent. The expense parser must run ONLY: amount, currency, project (`#`/`/`). NO date/time/priority/recurrence matchers in v1.
+- **Reuse, don't fork, the shared machinery:** hoist the `#`/`/` project regex + `removeProjectToken` + the span/de-overlap types out of `smart_add_parser.dart` into a small shared file both parsers import, so `#project` behaviour can never drift. Add ONE enum value `SmartTokenKind.amount` (compile-breaks `smart_add_controller.dart:_colorFor` by design — add its colour in the same commit). `SmartAddController` otherwise needs no changes; it already renders any `SmartToken` list.
+- **New:** `ParsedExpense { cleanDescription, amount, currency, project, tokens }` + `parseSmartExpense(String, {DateTime? now})` in `mobile/lib/core/smart_add_expense_parser.dart`.
+- **Amount regex (deliberately narrow):** `(^|\s)(€|\$|£)?(\d{1,6}(?:\.\d{1,2})?)\s*(EUR|USD|GBP|JPY|€|\$|£)?(?=\s|$)` — ≤6 integer digits, ≤2 decimals, token-bounded. Amount is detected FIRST and its span masked before any other matcher runs (amount is the mandatory anchor; project is optional).
+- **Decimal separator:** only `.` is a decimal point in free text — `25,50` must NOT parse as 25.50 (sentence-comma ambiguity: "spent 25, groceries"). SEPARATELY fix the existing numeric-only Amount field (`add_expense_sheet.dart`, bare `double.tryParse`) to normalise `,`→`.`, where there is no competing meaning.
+- **UI:** the Description field of `add_expense_sheet.dart` becomes the smart field (`SmartAddController`-backed), mirroring `add_task_sheet.dart`'s title field. Parsed amount + project PRE-FILL the existing Amount field and project picker, with manual-override-wins semantics (`_amountTouched`/`_projectTouched`, mirroring `_categoryTouched`). The sheet is already wired to the launcher shortcut + home-widget deep link (`AppAction.addExpense`), so quick-add works from outside the app with no new plumbing.
+- **Project resolution semantics (match the agent side):** unambiguous match → use it; no match → offer create (reuse the Task-4 suggestion-strip pattern from `add_task_sheet.dart`); nothing typed → existing default/General behaviour, unchanged.
+- **Subtasks are NOT addressable in text** (no short unique handle — a subtask is a title inside a task's steps). Picker only; do not invent a sigil.
+- **Currency default hazard to verify, not fix:** mobile JSON fallbacks default `'USD'` while the server's `create_project` defaults `'EUR'`. Add one test asserting a typed bare-amount expense lands the same currency as today's form-based add, so quick-typing introduces no NEW divergence.
+
+**Anti-patterns that must NOT misfire:** `parking !2` (no priority matcher loaded); `25,50 groceries` (no comma-decimal); `6/10 dinner` (no date matchers in v1); a URL must not become a project (the existing `_project` boundary already handles this — keep it).
+
+**Scope for this pass, in order:** (1) amount + `#`/`/` project — the user's literal example; (2) currency symbol/code; (3) the `,`→`.` fix on the numeric Amount field. DEFER: vendor via `@`/`from`, `spentAt` date parsing (biggest digit-collision source; expenses default to today anyway), subtask-in-text (never).

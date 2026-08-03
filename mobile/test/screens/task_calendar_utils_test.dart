@@ -352,4 +352,73 @@ void main() {
       expect(colorForTask(task, map, fallback), fallback);
     });
   });
+
+  // Regression coverage for the 2026-08 "every day says ○ ○ ○ +37" report:
+  // ghosts are speculative, never real work, so they must never inflate the
+  // "+N" overflow badge, and at most ONE ghost marker should ever render
+  // regardless of how many recurring tasks ghost on the same day.
+  group('pickDayMarkers', () {
+    test('2 real tasks + 40 ghosts: shows both real dots, exactly one ghost, '
+        'and overflow reflects ONLY the real tasks (no +40)', () {
+      final tasks = [
+        _task('r1', status: 'todo'),
+        _task('r2', status: 'todo'),
+      ];
+      final ghosts = [for (var i = 0; i < 40; i++) _task('g$i')];
+
+      final picked = pickDayMarkers(tasks, ghosts, maxDots: 3);
+
+      expect(picked.shown.map((t) => t.id), ['r1', 'r2']);
+      expect(picked.ghost?.id, 'g0');
+      expect(picked.overflow, 0);
+    });
+
+    test('maxDots real tasks (no free slot) render NO ghost marker even '
+        'with many ghosts, and overflow still counts only the real '
+        'overflow', () {
+      final tasks = [for (var i = 0; i < 5; i++) _task('r$i', status: 'todo')];
+      final ghosts = [for (var i = 0; i < 40; i++) _task('g$i')];
+
+      final picked = pickDayMarkers(tasks, ghosts, maxDots: 3);
+
+      expect(picked.shown.length, 3);
+      expect(picked.ghost, isNull);
+      expect(picked.overflow, 2); // 5 real - 3 shown, never +42
+    });
+
+    test('0 real + 5 ghosts renders exactly one ghost marker and no '
+        'overflow badge', () {
+      final ghosts = [for (var i = 0; i < 5; i++) _task('g$i')];
+
+      final picked = pickDayMarkers(const [], ghosts, maxDots: 3);
+
+      expect(picked.shown, isEmpty);
+      expect(picked.ghost?.id, 'g0');
+      expect(picked.overflow, 0);
+    });
+
+    test('no ghosts at all yields a null ghost regardless of free slots', () {
+      final tasks = [_task('r1', status: 'todo')];
+
+      final picked = pickDayMarkers(tasks, const [], maxDots: 3);
+
+      expect(picked.ghost, isNull);
+      expect(picked.overflow, 0);
+    });
+
+    test('exactly maxDots-1 real tasks still leaves exactly one ghost slot',
+        () {
+      final tasks = [
+        _task('r1', status: 'todo'),
+        _task('r2', status: 'todo'),
+      ];
+      final ghosts = [_task('g1'), _task('g2')];
+
+      final picked = pickDayMarkers(tasks, ghosts, maxDots: 3);
+
+      expect(picked.shown.length, 2);
+      expect(picked.ghost?.id, 'g1'); // first ghost, deterministic order
+      expect(picked.overflow, 0);
+    });
+  });
 }

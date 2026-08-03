@@ -43,6 +43,20 @@ Task _task(
 Widget _host(Widget child) =>
     MaterialApp(theme: buildAppTheme(), home: Scaffold(body: child));
 
+/// A finder matching any [_TaskDot] marker rendered for a ghost occurrence —
+/// keyed `ghost-marker-<taskId>` in `_DayMarkers.build` — anywhere in the
+/// tree. Deliberately day-agnostic: it counts markers across the WHOLE
+/// rendered month grid, not just the selected day. TableCalendar builds every
+/// visible day cell at once, so a task whose cron matches several days in
+/// range renders several markers (one per day, correctly) — tests using this
+/// finder to assert "exactly one marker" must pin the fixture cron (e.g. a
+/// yearly cron) so it matches only a single day within the visible range,
+/// or the count reflects matched-days, not "ghosts on one day".
+final Finder _ghostMarkerFinder = find.byWidgetPredicate(
+  (w) => w.key is ValueKey<String> &&
+      (w.key! as ValueKey<String>).value.startsWith('ghost-marker-'),
+);
+
 Widget _calendar({
   required List<Task> tasks,
   required DateTime focusedDay,
@@ -53,6 +67,8 @@ Widget _calendar({
   // ghosts before this day) so a ghost-on-a-hardcoded-day assertion doesn't
   // silently start failing once the real wall clock catches up to that day.
   DateTime? now,
+  bool showRepeats = true,
+  ValueChanged<bool>? onShowRepeatsChanged,
 }) =>
     TaskCalendarView(
       tasks: tasks,
@@ -67,6 +83,8 @@ Widget _calendar({
       onOpen: (_) {},
       onAddOnDay: (_) {},
       ghostsNow: now,
+      showRepeats: showRepeats,
+      onShowRepeatsChanged: onShowRepeatsChanged,
     );
 
 void main() {
@@ -210,6 +228,170 @@ void main() {
 
         expect(find.text('Nothing due this day'), findsOneWidget);
         expect(find.byIcon(Icons.repeat_rounded), findsNothing);
+      },
+    );
+  });
+
+  // Regression coverage for the 2026-08 "every day says ○ ○ ○ +37" report:
+  // ~37 recurring tasks all ghosting on the same day used to inflate the
+  // "+N" overflow badge with the ghost count and render one ring PER ghost.
+  // Ghosts must never contribute to overflow, and at most one ghost marker
+  // may ever render per day. `'0 9 15 8 *'` (yearly, Aug 15) is used so every
+  // ghost-producing task lands on exactly ONE day within the widget's ~3
+  // month visible range — keeping the marker-count assertion unambiguous.
+  group('ghost overflow regression (2026-08)', () {
+    testWidgets(
+      '2 real tasks + 40 recurring tasks all landing on the same day '
+      'renders both real dots, exactly ONE ghost marker, and no "+40" '
+      'overflow badge',
+      (tester) async {
+        final tasks = [
+          _task('r1', dueDate: '2026-08-15', title: 'Real one'),
+          _task('r2', dueDate: '2026-08-15', title: 'Real two'),
+          for (var i = 0; i < 40; i++)
+            _task('g$i', recurring: '0 9 15 8 *', title: 'Recurring $i'),
+        ];
+
+        await tester.pumpWidget(_host(_calendar(
+          tasks: tasks,
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 15),
+          now: DateTime(2026, 8, 1),
+        )));
+        await tester.pumpAndSettle();
+
+        expect(_ghostMarkerFinder, findsOneWidget);
+        expect(find.textContaining('+40'), findsNothing);
+        // 2 real tasks fit within maxDots(3) with room for the one ghost
+        // slot left over, so there is no overflow badge for this day at all.
+        expect(find.textContaining('+'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'maxDots (3) real tasks already fill every dot slot: no ghost marker '
+      'renders even though 40 recurring tasks ghost the same day, and '
+      'overflow reflects only the real tasks',
+      (tester) async {
+        final tasks = [
+          _task('r1', dueDate: '2026-08-15', title: 'Real one'),
+          _task('r2', dueDate: '2026-08-15', title: 'Real two'),
+          _task('r3', dueDate: '2026-08-15', title: 'Real three'),
+          _task('r4', dueDate: '2026-08-15', title: 'Real four'),
+          for (var i = 0; i < 40; i++)
+            _task('g$i', recurring: '0 9 15 8 *', title: 'Recurring $i'),
+        ];
+
+        await tester.pumpWidget(_host(_calendar(
+          tasks: tasks,
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 15),
+          now: DateTime(2026, 8, 1),
+        )));
+        await tester.pumpAndSettle();
+
+        expect(_ghostMarkerFinder, findsNothing);
+        // 4 real tasks, maxDots 3 shown → real overflow is 1, never 41.
+        expect(find.textContaining('+1'), findsOneWidget);
+        expect(find.textContaining('+40'), findsNothing);
+        expect(find.textContaining('+41'), findsNothing);
+      },
+    );
+  });
+
+  group('Show repeats toggle', () {
+    testWidgets(
+      'OFF: no ghost marker and no ghost row anywhere, even for a day that '
+      'would otherwise be a pure-ghost day',
+      (tester) async {
+        final tasks = [
+          _task('a', recurring: '0 9 * * 1', title: 'Weekly standup'),
+        ];
+
+        await tester.pumpWidget(_host(_calendar(
+          tasks: tasks,
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 10), // pure-ghost Monday
+          now: DateTime(2026, 8, 3),
+          showRepeats: false,
+        )));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Weekly standup'), findsNothing);
+        expect(_ghostMarkerFinder, findsNothing);
+        expect(find.text('Nothing due this day'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'ON (default): the ghost marker and ghost row both return',
+      (tester) async {
+        // Yearly (not weekly) so the cron matches exactly one day within the
+        // widget's ~3-month visible range — a weekly cron here would ghost
+        // on every Monday in range, and _ghostMarkerFinder (deliberately
+        // day-agnostic — see its doc) would then find one marker per
+        // matching day instead of the single one this test means to assert.
+        final tasks = [
+          _task('a', recurring: '0 9 15 8 *', title: 'Weekly standup'),
+        ];
+
+        await tester.pumpWidget(_host(_calendar(
+          tasks: tasks,
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 15),
+          now: DateTime(2026, 8, 1),
+        )));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Weekly standup'), findsOneWidget);
+        expect(_ghostMarkerFinder, findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'the toggle affordance is absent when onShowRepeatsChanged is null '
+      '(the default — mirrors TasksProjectView.onHideCompletedChanged)',
+      (tester) async {
+        await tester.pumpWidget(_host(_calendar(
+          tasks: const [],
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 1),
+        )));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('calendar-show-repeats-toggle')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'the toggle is present when wired, swaps its icon glyph by state, and '
+      'fires onShowRepeatsChanged with the flipped value on tap',
+      (tester) async {
+        bool? toggled;
+        await tester.pumpWidget(_host(_calendar(
+          tasks: const [],
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 8, 1),
+          showRepeats: true,
+          onShowRepeatsChanged: (v) => toggled = v,
+        )));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('calendar-show-repeats-toggle')),
+          findsOneWidget,
+        );
+        expect(find.byIcon(Icons.repeat_on_rounded), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('calendar-show-repeats-toggle')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(toggled, isFalse);
       },
     );
   });

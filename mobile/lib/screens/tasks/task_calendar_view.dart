@@ -29,6 +29,8 @@ class TaskCalendarView extends StatelessWidget {
     required this.onOpen,
     required this.onAddOnDay,
     this.ghostsNow,
+    this.showRepeats = true,
+    this.onShowRepeatsChanged,
   });
 
   final List<Task> tasks;
@@ -55,6 +57,19 @@ class TaskCalendarView extends StatelessWidget {
   /// wall clock caught up to that day.
   final DateTime? ghostsNow;
 
+  /// Master "Show repeats" toggle for the recurrence-ghost projection below
+  /// (persisted one level up in `TasksScreen` via `UiPrefsDao` /
+  /// `kPrefCalendarShowRepeats`). Defaults to true, matching the behavior
+  /// before this toggle existed. When false, [expandRecurringForRange] is
+  /// not even called — the work is skipped, not just its rendering — so the
+  /// selected-day list shows no ghost rows either.
+  final bool showRepeats;
+
+  /// Fired with the new value when the "Show repeats" toggle is tapped. Null
+  /// hides the toggle affordance entirely — mirrors
+  /// `TasksProjectView.onHideCompletedChanged`.
+  final ValueChanged<bool>? onShowRepeatsChanged;
+
   /// How many colored dots to render under a day before collapsing to "+N".
   static const int _maxDots = 3;
 
@@ -69,16 +84,15 @@ class TaskCalendarView extends StatelessWidget {
     // would otherwise occupy a single calendar cell. Project the visible
     // range (generously padded a month either side of the focused month, so
     // table_calendar's leading/trailing grid days stay covered too) into
-    // GHOST entries and merge them in alongside the real day map.
+    // GHOST entries and merge them in alongside the real day map — unless
+    // the user has turned ghosts off, in which case skip the projection
+    // entirely rather than computing it and discarding the result.
     final rangeStart = DateTime(focusedDay.year, focusedDay.month - 1, 1);
     final rangeEnd = DateTime(focusedDay.year, focusedDay.month + 2, 1)
         .subtract(const Duration(days: 1));
-    final ghostGrouped = expandRecurringForRange(
-      tasks,
-      rangeStart,
-      rangeEnd,
-      now: ghostsNow,
-    );
+    final ghostGrouped = showRepeats
+        ? expandRecurringForRange(tasks, rangeStart, rangeEnd, now: ghostsNow)
+        : const <DateTime, List<Task>>{};
 
     List<Task> eventsFor(DateTime day) =>
         grouped[DateTime(day.year, day.month, day.day)] ?? const [];
@@ -89,6 +103,7 @@ class TaskCalendarView extends StatelessWidget {
     final selected = selectedDay ?? DateTime(now.year, now.month, now.day);
     final dayTasks = eventsFor(selected);
     final dayGhosts = ghostsFor(selected);
+    final repeatsToggle = _repeatsToggle();
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -98,6 +113,12 @@ class TaskCalendarView extends StatelessWidget {
         AppSpacing.xxxl, // leave room above the FAB
       ),
       children: [
+        // ── "Show repeats" toggle ────────────────────────────────────────────
+        if (repeatsToggle != null) ...[
+          Align(alignment: Alignment.centerRight, child: repeatsToggle),
+          const SizedBox(height: AppSpacing.sm),
+        ],
+
         // ── Month calendar ─────────────────────────────────────────────────
         LzCard(
           padding: const EdgeInsets.symmetric(
@@ -255,6 +276,37 @@ class TaskCalendarView extends StatelessWidget {
     );
   }
 
+  /// The recurrence-ghost "Show repeats" toggle — mirrors
+  /// `TasksProjectView`'s hide-completed eye toggle: a small muted icon
+  /// button that swaps glyph on the current state and reports the flipped
+  /// value to the caller, which owns persistence (`UiPrefsDao` /
+  /// `kPrefCalendarShowRepeats`). Returns null (hides the affordance
+  /// entirely) when [onShowRepeatsChanged] is null.
+  Widget? _repeatsToggle() {
+    final onChanged = onShowRepeatsChanged;
+    if (onChanged == null) return null;
+    return GestureDetector(
+      key: const ValueKey('calendar-show-repeats-toggle'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!showRepeats),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            showRepeats ? Icons.repeat_on_rounded : Icons.repeat_rounded,
+            size: 18,
+            color: AppColors.textMuted,
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          Text(
+            'Show repeats',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+        ],
+      ),
+    );
+  }
+
   static const _months = [
     'January', 'February', 'March', 'April', 'May', 'June', 'July',
     'August', 'September', 'October', 'November', 'December',
@@ -285,11 +337,13 @@ class TaskCalendarView extends StatelessWidget {
 ///    whole day reads as "done" at a glance instead of blank space.
 ///  * **Everything else** → a neatly spaced row of up to
 ///    [TaskCalendarView._maxDots] dots: open tasks lead as filled
-///    project-colored dots, done tasks trail as hollow dimmed rings, ghosts
-///    trail last as dimmer hollow rings (visually distinct from a "done"
-///    ring — never counted toward done/undone math), and the remainder
-///    collapses into a muted "+N". Each dot carries its own gap so no dot
-///    ever overlaps another.
+///    project-colored dots, done tasks trail as hollow dimmed rings, and (only
+///    when a slot remains) AT MOST ONE ghost trails last as a dimmer hollow
+///    ring (visually distinct from a "done" ring — never counted toward
+///    done/undone math, and never inflating the overflow count below — see
+///    [pickDayMarkers]). The remainder of the REAL tasks collapses into a
+///    muted "+N"; ghosts never contribute to that number. Each dot carries
+///    its own gap so no dot ever overlaps another.
 class _DayMarkers extends StatelessWidget {
   const _DayMarkers({
     required this.tasks,
@@ -325,13 +379,12 @@ class _DayMarkers extends StatelessWidget {
       );
     }
 
-    // Open work leads as filled dots; done work trails as hollow rings; any
-    // remaining slots go to ghost dots (dimmer hollow rings).
-    final picked = pickDayMarkerTasks(tasks, maxDots: TaskCalendarView._maxDots);
-    final ghostSlots =
-        (TaskCalendarView._maxDots - picked.shown.length).clamp(0, TaskCalendarView._maxDots);
-    final shownGhosts = ghosts.take(ghostSlots).toList();
-    final overflow = picked.overflow + (ghosts.length - shownGhosts.length);
+    // Open work leads as filled dots; done work trails as hollow rings. At
+    // most one ghost occupies a remaining slot (never inflating overflow —
+    // see pickDayMarkers) — ghosts are a speculative hint, not real work, so
+    // a day full of them must never look identical to every other day.
+    final picked =
+        pickDayMarkers(tasks, ghosts, maxDots: TaskCalendarView._maxDots);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: _bandBottom),
@@ -346,20 +399,19 @@ class _DayMarkers extends StatelessWidget {
               done: picked.shown[i].isDone,
             ),
           ],
-          for (int i = 0; i < shownGhosts.length; i++) ...[
-            if (i > 0 || picked.shown.isNotEmpty) const SizedBox(width: _dotGap),
+          if (picked.ghost != null) ...[
+            if (picked.shown.isNotEmpty) const SizedBox(width: _dotGap),
             _TaskDot(
-              key: ValueKey('ghost-marker-${shownGhosts[i].id}'),
-              color:
-                  colorForTask(shownGhosts[i], colorByName, AppColors.accent),
+              key: ValueKey('ghost-marker-${picked.ghost!.id}'),
+              color: colorForTask(picked.ghost!, colorByName, AppColors.accent),
               done: false,
               ghost: true,
             ),
           ],
-          if (overflow > 0) ...[
+          if (picked.overflow > 0) ...[
             const SizedBox(width: _dotGap),
             Text(
-              '+$overflow',
+              '+${picked.overflow}',
               style: AppText.caption.copyWith(
                 color: AppColors.textMuted,
                 fontSize: 9,

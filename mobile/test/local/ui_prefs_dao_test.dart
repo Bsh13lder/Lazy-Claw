@@ -5,6 +5,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/ui_prefs_dao.dart';
+import 'package:lazyclaw_mobile/providers/ui_prefs_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 int _dbCounter = 0;
@@ -75,6 +76,31 @@ void main() {
       await dao.setStringSet('collapsed_projects', {'p1', 'p2'});
       await dao.setStringSet('collapsed_projects', {'p3'});
       expect(await dao.getStringSet('collapsed_projects'), {'p3'});
+    });
+
+    // The Calendar view's "Show repeats" toggle (fix for the 2026-08
+    // "every day says +37" ghost-noise regression) — default-ON, persisted
+    // under kPrefCalendarShowRepeats exactly like every other Tasks-tab UI
+    // pref.
+    test('round-trips kPrefCalendarShowRepeats, defaulting to true (ON) '
+        'when never set', () async {
+      final dao = await _freshDao();
+      expect(
+        await dao.getBool(kPrefCalendarShowRepeats, fallback: true),
+        isTrue,
+      );
+
+      await dao.setBool(kPrefCalendarShowRepeats, false);
+      expect(
+        await dao.getBool(kPrefCalendarShowRepeats, fallback: true),
+        isFalse,
+      );
+
+      await dao.setBool(kPrefCalendarShowRepeats, true);
+      expect(
+        await dao.getBool(kPrefCalendarShowRepeats, fallback: true),
+        isTrue,
+      );
     });
   });
 }

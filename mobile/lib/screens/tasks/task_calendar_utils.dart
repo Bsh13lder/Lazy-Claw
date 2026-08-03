@@ -259,6 +259,34 @@ bool isDayAllDone(List<Task> dayTasks) {
   return (shown: shown, overflow: ordered.length - shown.length);
 }
 
+/// Combines a day's real [tasks] (via [pickDayMarkerTasks]) with its
+/// recurrence [ghosts] into what the day's marker row should actually
+/// render — the fix for the 2026-08 "every day says ○ ○ ○ +37" report,
+/// where ~37 recurring tasks made every future day render identically and
+/// carry zero information.
+///
+/// Ghosts are purely speculative — a "a repeat lands here" hint, never real
+/// work — so two rules keep them from drowning out the real signal:
+///  * They NEVER inflate [overflow]. That count is about real tasks the user
+///    actually has this day; a ghost is not one of them.
+///  * At most ONE ghost ever renders ([ghost], nullable), and only when a
+///    dot slot is free after the real tasks ([maxDots] - `shown.length` > 0).
+///    A row of N hollow rings says nothing more than a single one does.
+///
+/// When a slot is free, [ghost] is deterministically [ghosts].first (the
+/// same task that would have led the old unbounded ghost row) — not a
+/// random pick — so which task's color renders is stable across rebuilds.
+({List<Task> shown, Task? ghost, int overflow}) pickDayMarkers(
+  List<Task> tasks,
+  List<Task> ghosts, {
+  required int maxDots,
+}) {
+  final picked = pickDayMarkerTasks(tasks, maxDots: maxDots);
+  final hasGhostSlot = picked.shown.length < maxDots;
+  final ghost = hasGhostSlot && ghosts.isNotEmpty ? ghosts.first : null;
+  return (shown: picked.shown, ghost: ghost, overflow: picked.overflow);
+}
+
 /// Parses a `"#RRGGBB"` (or bare `"RRGGBB"` / `"#AARRGGBB"`) hex string into an
 /// opaque [Color]. Returns null when the string isn't a valid hex color.
 Color? parseHexColor(String hex) {

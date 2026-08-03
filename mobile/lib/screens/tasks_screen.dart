@@ -188,6 +188,10 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// The Projects view's persisted "hide completed" toggle.
   bool _projectsHideCompleted = false;
 
+  /// The Calendar view's persisted "show repeats" toggle (recurrence
+  /// ghosts) — default ON, matching the behavior before this toggle existed.
+  bool _calendarShowRepeats = true;
+
   /// The List view's per-section collapsed state, keyed by [TaskListSection]. Seeded
   /// from [defaultSectionCollapsed] (Done collapsed, others expanded) so the
   /// correct defaults render on the very first frame, before the persisted
@@ -213,6 +217,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // UiPrefsDao) — a single async read, applied once.
     unawaited(_loadProjectsPrefs());
     unawaited(_loadSectionCollapsedPrefs());
+    unawaited(_loadCalendarPrefs());
     // NOTE: the cold-start deep-link replay lives in [build] via
     // [drainPendingAction] (not a one-shot here) so it survives whichever frame
     // this screen first becomes visible on — see _myActions usage below.
@@ -256,6 +261,36 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     } catch (e) {
       debugPrint('TasksScreen._loadSectionCollapsedPrefs failed: $e');
     }
+  }
+
+  /// One-shot restore of the Calendar view's persisted "show repeats"
+  /// toggle. Best-effort, mirroring [_loadProjectsPrefs] — a failure here
+  /// just leaves the default-ON seed in place.
+  Future<void> _loadCalendarPrefs() async {
+    try {
+      final prefs = ref.read(uiPrefsDaoProvider);
+      final showRepeats = await prefs.getBool(
+        kPrefCalendarShowRepeats,
+        fallback: true,
+      );
+      if (!mounted) return;
+      setState(() => _calendarShowRepeats = showRepeats);
+    } catch (e) {
+      debugPrint('TasksScreen._loadCalendarPrefs failed: $e');
+    }
+  }
+
+  /// Persists the Calendar view's "show repeats" toggle, mirroring
+  /// [_onProjectsHideCompletedChanged].
+  void _onCalendarShowRepeatsChanged(bool value) {
+    setState(() => _calendarShowRepeats = value);
+    unawaited(
+      _persistUiPref(
+        () => ref
+            .read(uiPrefsDaoProvider)
+            .setBool(kPrefCalendarShowRepeats, value),
+      ),
+    );
   }
 
   /// Persists the Projects view's expanded-bucket set as it changes, and
@@ -708,6 +743,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
         onOpen: (task) => _openDetail(task, projects),
         onAddOnDay: (day) => _openAddSheet(initialDueDate: day),
+        showRepeats: _calendarShowRepeats,
+        onShowRepeatsChanged: _onCalendarShowRepeatsChanged,
       ),
     );
   }

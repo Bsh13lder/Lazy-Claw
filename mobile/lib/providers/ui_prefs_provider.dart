@@ -22,6 +22,15 @@ const String kPrefProjectsHideCompleted = 'tasks.projects.hideCompleted';
 String kPrefListSectionCollapsed(String section) =>
     'tasks.list.$section.collapsed';
 
+/// The Tasks → Calendar view's "Show repeats" toggle (a bool) — whether
+/// recurring tasks' projected ghost occurrences render at all. Default-ON
+/// (true) preserves the pre-toggle behavior; OFF skips
+/// `expandRecurringForRange` entirely rather than just hiding its output
+/// (see `TaskCalendarView.showRepeats`). Added for the 2026-08 "every day
+/// says ○ ○ ○ +37" regression fix — even a single ghost marker per day may
+/// be unwanted for a user with dozens of recurring tasks.
+const String kPrefCalendarShowRepeats = 'tasks.calendar.showRepeats';
+
 // ── Provider ─────────────────────────────────────────────────────────────────
 
 /// Local UI-prefs store backed by the encrypted DB's `ui_prefs` table. Same

@@ -107,6 +107,10 @@ List<Task> relevantWidgetTasks(List<Task> tasks, {DateTime? now}) {
       undated.add(t);
       continue;
     }
+    // `instant` is already `.toLocal()`d (see `_dueInstant`) — bucketing by
+    // the LOCAL day matches the calendar's `groupTasksByDay` convention
+    // (D1): a UTC-aware due date must not be misread as "today" or
+    // "overdue" one day early/late.
     final dueDay = DateTime(instant.year, instant.month, instant.day);
     if (dueDay.isAfter(today)) {
       upcoming.add(t);
@@ -135,7 +139,10 @@ List<Task> pickWidgetTasks(List<Task> tasks, {DateTime? now}) =>
 String widgetDueLabel(Task task, {DateTime? now}) {
   final due = task.dueDate;
   if (due == null || due.isEmpty) return '';
-  final date = DateTime.tryParse(due);
+  // `.toLocal()` before reading the calendar day — matches `_dueInstant` and
+  // `groupTasksByDay` (D1): a UTC-aware due date must resolve to the same
+  // wall-clock day the row's own chip shows (`due_date.dart:31`).
+  final date = DateTime.tryParse(due)?.toLocal();
   if (date == null) return '';
   final day = _dayWord(date, now ?? DateTime.now());
   if (dueDateHasTime(due)) {
@@ -170,12 +177,15 @@ String widgetMoreLabel(int openCount) {
   return extra > 0 ? '+$extra more' : '';
 }
 
-/// Parse a `dueDate` (either shape) to a comparable instant, or null when
-/// absent/unparseable. Date-only sorts as that day at 00:00 local — fine for
-/// ordering against timed dues.
+/// Parse a `dueDate` (either shape) to a comparable **local** instant, or
+/// null when absent/unparseable. Date-only sorts as that day at 00:00 local —
+/// fine for ordering against timed dues. `.toLocal()` is a no-op for an
+/// already-local/naive value and only corrects a UTC-aware one (D1); sort
+/// order (`byDue`'s `compareTo`) is unaffected either way since it compares
+/// the same absolute instant regardless of the UTC/local flag.
 DateTime? _dueInstant(String? due) {
   if (due == null || due.isEmpty) return null;
-  return DateTime.tryParse(due);
+  return DateTime.tryParse(due)?.toLocal();
 }
 
 /// Clamp a title to a sane widget length so a pathological title can't bloat

@@ -167,5 +167,22 @@ void main() {
     test('unparseable due date is NOT overdue', () {
       expect(isOverdueTask(make(dueDate: 'someday'), now: now), isFalse);
     });
+
+    test(
+      '.toLocal() parity (D1): a UTC-aware due date crossing local midnight '
+      'into "today" is NOT overdue',
+      () {
+        // now = 2026-08-04 local. '2026-08-03T23:30:00Z' is
+        // 2026-08-04T01:30:00 in Europe/Madrid (+2h CEST, this
+        // worktree/CI's TZ) — LOCAL today, not yesterday. Reading
+        // .year/.month/.day off the raw UTC parse instead gives Aug 3,
+        // which wrongly marks the task overdue a day early.
+        final today = DateTime(2026, 8, 4, 10);
+        expect(
+          isOverdueTask(make(dueDate: '2026-08-03T23:30:00Z'), now: today),
+          isFalse,
+        );
+      },
+    );
   });
 }

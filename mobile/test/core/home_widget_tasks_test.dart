@@ -159,6 +159,46 @@ void main() {
     });
   });
 
+  group('.toLocal() parity (D1 mirror — matches task_calendar_utils.dart)', () {
+    // 2026-08-04T22:00:00Z is 2026-08-05T00:00:00 in Europe/Madrid (this
+    // worktree/CI's local TZ, +2h CEST) — i.e. LOCAL tomorrow relative to
+    // `now`. Reading .year/.month/.day off the raw UTC parse instead gives
+    // Aug 4 (today), which wrongly lands the task in the due-now tier.
+    final localMidnightCrossNow = DateTime(2026, 8, 4, 10, 0, 0);
+
+    test(
+      'relevantWidgetTasks: a UTC-aware due date crossing local midnight '
+      'lands in "upcoming", not "due now" — and so does not suppress other '
+      'future tasks',
+      () {
+        final tasks = [
+          _task(id: 'crosses', dueDate: '2026-08-04T22:00:00Z'),
+          _task(id: 'far', dueDate: '2026-08-10'),
+        ];
+
+        final tier =
+            relevantWidgetTasks(tasks, now: localMidnightCrossNow);
+
+        // Without `.toLocal()`, 'crosses' is misread as due-now, the
+        // dueNow tier becomes non-empty, and 'far' is dropped entirely
+        // (exactly the "any due-now task hides every future task" bug).
+        expect(tier.map((t) => t.id).toList(), ['crosses', 'far']);
+      },
+    );
+
+    test(
+      'widgetDueLabel: the same crossing due date reads as "Tomorrow", not '
+      '"Today"',
+      () {
+        final task = _task(id: 'crosses', dueDate: '2026-08-04T22:00:00Z');
+        expect(
+          widgetDueLabel(task, now: localMidnightCrossNow),
+          startsWith('Tomorrow'),
+        );
+      },
+    );
+  });
+
   group('widgetUpdatedStamp', () {
     test('zero-pads to 24h HH:mm', () {
       expect(widgetUpdatedStamp(DateTime(2026, 6, 10, 9, 5)), '09:05');

@@ -70,9 +70,13 @@ void main() {
     });
 
     test('ignores the time component when bucketing', () {
+      // Naive (no zone suffix) strings are already local, so `.toLocal()` is
+      // a no-op here — this test is purely about the time-of-day being
+      // dropped from the key, not about zone conversion (see the dedicated
+      // `.toLocal()` group below for that).
       final tasks = [
-        _task('a', dueDate: '2026-06-10T08:30:00Z'),
-        _task('b', dueDate: '2026-06-10T23:59:59Z'),
+        _task('a', dueDate: '2026-06-10T08:30:00'),
+        _task('b', dueDate: '2026-06-10T23:59:59'),
       ];
 
       final grouped = groupTasksByDay(tasks);
@@ -95,6 +99,81 @@ void main() {
 
       expect(grouped.keys.length, 1);
       expect(grouped[DateTime(2026, 6, 10)]!.map((t) => t.id), ['b']);
+    });
+
+    test('a malformed due date is logged via debugPrint, not silently '
+        'dropped', () {
+      final messages = <String>[];
+      final original = debugPrint;
+      debugPrint = (String? message, {int? wrapWidth}) {
+        messages.add(message ?? '');
+      };
+      try {
+        final tasks = [
+          _task('a', dueDate: 'not-a-date'),
+          _task('b', dueDate: '2026-06-10'),
+        ];
+
+        final grouped = groupTasksByDay(tasks);
+
+        expect(grouped.keys.length, 1); // still dropped from the calendar…
+        expect(messages, isNotEmpty); // …but the failure is diagnosable.
+        expect(messages.any((m) => m.contains('not-a-date')), isTrue);
+        expect(messages.any((m) => m.contains('a')), isTrue); // task id
+      } finally {
+        debugPrint = original;
+      }
+    });
+  });
+
+  group('groupTasksByDay .toLocal() (D1 — UTC-aware due dates)', () {
+    test('a UTC-aware due date keys to the LOCAL calendar day, not the UTC '
+        'day', () {
+      // 2026-08-04T00:00:00+02:00 is 2026-08-03T22:00:00Z. Reading
+      // .year/.month/.day off the raw (UTC) parse gives Aug 3 — one day
+      // early for a Madrid (or any UTC+ offset) user. `.toLocal()` must
+      // resolve it back to Aug 4, matching the wall-clock date the user
+      // actually set.
+      final tasks = [_task('a', dueDate: '2026-08-04T00:00:00+02:00')];
+
+      final grouped = groupTasksByDay(tasks);
+
+      // The exact key depends on this worktree/CI machine's local
+      // timezone (see due_date_test.dart for the same convention) — derive
+      // the expected key the same way `.toLocal()` would, so the assertion
+      // is a real behavioral check, not a tautology: it fails outright
+      // without the .toLocal() fix on any machine set to a positive UTC
+      // offset (e.g. Europe/Madrid, this worktree's TZ).
+      final expectedLocalDay = DateTime.parse('2026-08-04T00:00:00+02:00')
+          .toLocal();
+      final expectedKey = DateTime(
+        expectedLocalDay.year,
+        expectedLocalDay.month,
+        expectedLocalDay.day,
+      );
+
+      expect(grouped.keys.length, 1);
+      expect(grouped.containsKey(expectedKey), isTrue);
+      expect(grouped[expectedKey]!.map((t) => t.id), ['a']);
+    });
+
+    test('pinned to Europe/Madrid: keys to Aug 4, not Aug 3', () {
+      // This worktree's machine (and CI) run with TZ=Europe/Madrid — pin the
+      // exact day from the diagnosis report so a regression is unambiguous
+      // rather than hidden behind the machine-relative assertion above.
+      final localOffsetHours = DateTime.now().timeZoneOffset.inHours;
+      if (localOffsetHours != 2 && localOffsetHours != 1) {
+        // Not running under Europe/Madrid (CEST +2 / CET +1) — skip the
+        // pinned assertion, the machine-relative test above still covers it.
+        return;
+      }
+      final tasks = [_task('a', dueDate: '2026-08-04T00:00:00+02:00')];
+
+      final grouped = groupTasksByDay(tasks);
+
+      expect(grouped.keys.length, 1);
+      expect(grouped.containsKey(DateTime(2026, 8, 4)), isTrue);
+      expect(grouped.containsKey(DateTime(2026, 8, 3)), isFalse);
     });
   });
 

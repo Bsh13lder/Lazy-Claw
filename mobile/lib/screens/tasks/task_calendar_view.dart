@@ -50,12 +50,27 @@ class TaskCalendarView extends StatelessWidget {
     final grouped = groupTasksByDay(tasks);
     final colorByName = projectColorMap(projects);
 
+    // Recurring tasks are materialised ONE occurrence at a time server-side
+    // (`tasks/store.py` respawns the next occurrence only on completion) —
+    // nothing else expands `recurring` for display, so a daily/weekly task
+    // would otherwise occupy a single calendar cell. Project the visible
+    // range (generously padded a month either side of the focused month, so
+    // table_calendar's leading/trailing grid days stay covered too) into
+    // GHOST entries and merge them in alongside the real day map.
+    final rangeStart = DateTime(focusedDay.year, focusedDay.month - 1, 1);
+    final rangeEnd = DateTime(focusedDay.year, focusedDay.month + 2, 1)
+        .subtract(const Duration(days: 1));
+    final ghostGrouped = expandRecurringForRange(tasks, rangeStart, rangeEnd);
+
     List<Task> eventsFor(DateTime day) =>
         grouped[DateTime(day.year, day.month, day.day)] ?? const [];
+    List<Task> ghostsFor(DateTime day) =>
+        ghostGrouped[DateTime(day.year, day.month, day.day)] ?? const [];
 
     final now = DateTime.now();
     final selected = selectedDay ?? DateTime(now.year, now.month, now.day);
     final dayTasks = eventsFor(selected);
+    final dayGhosts = ghostsFor(selected);
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -147,9 +162,11 @@ class TaskCalendarView extends StatelessWidget {
             ),
             calendarBuilders: CalendarBuilders<Task>(
               markerBuilder: (context, day, events) {
-                if (events.isEmpty) return null;
+                final ghosts = ghostsFor(day);
+                if (events.isEmpty && ghosts.isEmpty) return null;
                 return _DayMarkers(
                   tasks: events,
+                  ghosts: ghosts,
                   colorByName: colorByName,
                 );
               },
@@ -185,13 +202,13 @@ class TaskCalendarView extends StatelessWidget {
         const SizedBox(height: AppSpacing.md),
 
         // ── Selected day's tasks ───────────────────────────────────────────
-        if (dayTasks.isEmpty)
+        if (dayTasks.isEmpty && dayGhosts.isEmpty)
           LzEmptyState(
             icon: Icons.event_available_outlined,
             title: 'Nothing due this day',
             hint: 'Tap + to add a task on ${_formatDayShort(selected)}.',
           )
-        else
+        else ...[
           for (int i = 0; i < dayTasks.length; i++) ...[
             TaskRow(
               key: ValueKey('calendar-task-${dayTasks[i].id}'),
@@ -201,9 +218,21 @@ class TaskCalendarView extends StatelessWidget {
               onDelete: () => onDelete(dayTasks[i].id),
               onTap: () => onOpen(dayTasks[i]),
             ),
-            if (i < dayTasks.length - 1)
+            if (i < dayTasks.length - 1 || dayGhosts.isNotEmpty)
               const SizedBox(height: AppSpacing.sm),
           ],
+          // Ghosts: display-only projections of an upcoming repeat, never a
+          // real materialised row — no complete/delete affordance, so a tap
+          // can never act on the wrong day/occurrence.
+          for (int i = 0; i < dayGhosts.length; i++) ...[
+            _GhostRow(
+              key: ValueKey('calendar-ghost-${dayGhosts[i].id}'),
+              task: dayGhosts[i],
+            ),
+            if (i < dayGhosts.length - 1)
+              const SizedBox(height: AppSpacing.sm),
+          ],
+        ],
       ],
     );
   }
@@ -227,21 +256,36 @@ class TaskCalendarView extends StatelessWidget {
   String _formatDayShort(DateTime d) => '${_months[d.month - 1]} ${d.day}';
 }
 
-/// The bottom-of-cell marker for a day that has tasks.
+/// The bottom-of-cell marker for a day that has tasks and/or recurring-task
+/// ghosts (a projected, not-yet-materialised repeat — see
+/// [expandRecurringForRange]).
 ///
-/// Three visual states, all bottom-aligned so they never sit on the centered
-/// day number:
-///  * **Fully cleared** (`isDayAllDone`) → a single emerald check badge — the
-///    whole day reads as "done" at a glance, distinct from any dot row.
-///  * **Mixed / open** → a neatly spaced row of up to
+/// Visual states, all bottom-aligned so they never sit on the centered day
+/// number:
+///  * **Fully cleared, no ghosts** (`isDayAllDone` + no ghosts) → a single
+///    solid emerald dot, the same visual weight as a real [_TaskDot] — the
+///    whole day reads as "done" at a glance instead of blank space.
+///  * **Everything else** → a neatly spaced row of up to
 ///    [TaskCalendarView._maxDots] dots: open tasks lead as filled
-///    project-colored dots, done tasks trail as hollow dimmed rings, and the
-///    remainder collapses into a muted "+N". Each dot carries its own gap so
-///    no dot ever overlaps another.
+///    project-colored dots, done tasks trail as hollow dimmed rings, ghosts
+///    trail last as dimmer hollow rings (visually distinct from a "done"
+///    ring — never counted toward done/undone math), and the remainder
+///    collapses into a muted "+N". Each dot carries its own gap so no dot
+///    ever overlaps another.
 class _DayMarkers extends StatelessWidget {
-  const _DayMarkers({required this.tasks, required this.colorByName});
+  const _DayMarkers({
+    required this.tasks,
+    required this.ghosts,
+    required this.colorByName,
+  });
 
   final List<Task> tasks;
+
+  /// Recurring tasks' projected (not real) occurrences on this day. Never
+  /// participates in [isDayAllDone] / done math — purely a "there's an
+  /// upcoming repeat here" hint.
+  final List<Task> ghosts;
+
   final Map<String, String> colorByName;
 
   /// Even gap between adjacent dots, as a fixed [SizedBox] so the row stays
@@ -254,16 +298,22 @@ class _DayMarkers extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Everything due this day is finished → one clear "cleared" badge.
-    if (isDayAllDone(tasks)) {
+    // Everything real due this day is finished AND there's no ghost to also
+    // show → one clear "cleared" badge.
+    if (isDayAllDone(tasks) && ghosts.isEmpty) {
       return const Padding(
         padding: EdgeInsets.only(bottom: _bandBottom),
         child: _AllDoneBadge(),
       );
     }
 
-    // Open work leads as filled dots; done work trails as hollow rings.
+    // Open work leads as filled dots; done work trails as hollow rings; any
+    // remaining slots go to ghost dots (dimmer hollow rings).
     final picked = pickDayMarkerTasks(tasks, maxDots: TaskCalendarView._maxDots);
+    final ghostSlots =
+        (TaskCalendarView._maxDots - picked.shown.length).clamp(0, TaskCalendarView._maxDots);
+    final shownGhosts = ghosts.take(ghostSlots).toList();
+    final overflow = picked.overflow + (ghosts.length - shownGhosts.length);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: _bandBottom),
@@ -278,10 +328,20 @@ class _DayMarkers extends StatelessWidget {
               done: picked.shown[i].isDone,
             ),
           ],
-          if (picked.overflow > 0) ...[
+          for (int i = 0; i < shownGhosts.length; i++) ...[
+            if (i > 0 || picked.shown.isNotEmpty) const SizedBox(width: _dotGap),
+            _TaskDot(
+              key: ValueKey('ghost-marker-${shownGhosts[i].id}'),
+              color:
+                  colorForTask(shownGhosts[i], colorByName, AppColors.accent),
+              done: false,
+              ghost: true,
+            ),
+          ],
+          if (overflow > 0) ...[
             const SizedBox(width: _dotGap),
             Text(
-              '+${picked.overflow}',
+              '+$overflow',
               style: AppText.caption.copyWith(
                 color: AppColors.textMuted,
                 fontSize: 9,
@@ -318,50 +378,96 @@ class _CalChevron extends StatelessWidget {
 }
 
 /// A single day marker dot: a filled project-colored circle for an **open**
-/// task, or a hollow dimmed ring for a **done** one.
+/// task, a hollow dimmed ring for a **done** one, or a dimmer hollow ring for
+/// a [ghost] (a recurring task's projected, not-yet-materialised occurrence —
+/// see [expandRecurringForRange]). [ghost] always renders hollow regardless
+/// of [done] — a projection is never "done" or "open", it's a hint that a
+/// repeat is coming — and uses a lower ring alpha than a real done task so
+/// the two are still visually distinguishable from each other.
 class _TaskDot extends StatelessWidget {
-  const _TaskDot({required this.color, required this.done});
+  const _TaskDot({
+    super.key,
+    required this.color,
+    required this.done,
+    this.ghost = false,
+  });
 
   final Color color;
   final bool done;
+  final bool ghost;
 
   static const double _size = 6;
 
   @override
   Widget build(BuildContext context) {
+    final hollow = done || ghost;
     return Container(
       width: _size,
       height: _size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        // Open = solid fill; done = transparent with a faded ring.
-        color: done ? null : color,
-        border: done
-            ? Border.all(color: color.withValues(alpha: 0.55), width: 1.2)
+        // Open = solid fill; done/ghost = transparent with a faded ring.
+        color: hollow ? null : color,
+        border: hollow
+            ? Border.all(
+                color: color.withValues(alpha: ghost ? 0.4 : 0.55),
+                width: 1.2,
+              )
             : null,
       ),
     );
   }
 }
 
-/// A subtle emerald check badge shown when every task due on a day is done.
+/// A solid marker shown when every task due on a day is done — the same
+/// visual weight as a real [_TaskDot] (filled `AppColors.success` circle) so
+/// a fully-cleared day still reads as a real marker instead of the near-
+/// invisible 18%-alpha ring it used to be (diagnosis D3).
 class _AllDoneBadge extends StatelessWidget {
   const _AllDoneBadge();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 13,
-      height: 13,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: AppColors.success.withValues(alpha: 0.18),
-        shape: BoxShape.circle,
+    return const _TaskDot(color: AppColors.success, done: false);
+  }
+}
+
+/// A selected-day-list row for a recurring task's projected GHOST occurrence
+/// — display-only, dimmed, and carrying NO complete/delete affordance (the
+/// real materialised row is the only thing allowed to act on the task's id).
+class _GhostRow extends StatelessWidget {
+  const _GhostRow({super.key, required this.task});
+
+  final Task task;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzCard(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
       ),
-      child: const Icon(
-        Icons.check_rounded,
-        size: 9,
-        color: AppColors.success,
+      child: Row(
+        children: [
+          const Icon(
+            Icons.repeat_rounded,
+            size: 16,
+            color: AppColors.textMuted,
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              task.title,
+              style: AppText.body.copyWith(color: AppColors.textMuted),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Text(
+            'Repeats',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+        ],
       ),
     );
   }

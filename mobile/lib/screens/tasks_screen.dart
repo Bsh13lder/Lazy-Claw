@@ -91,7 +91,11 @@ bool _isOverdueOn(Task task, DateTime today) {
   if (task.isDone || task.dueDate == null) return false;
   final DateTime dueDay;
   try {
-    final d = DateTime.parse(task.dueDate!);
+    // `.toLocal()` before reading the calendar day — matches
+    // `task_calendar_utils.dart`'s `groupTasksByDay` (D1): a UTC-aware due
+    // date must resolve to the same wall-clock day everywhere, or a task
+    // can read as overdue here while its calendar cell disagrees.
+    final d = DateTime.parse(task.dueDate!).toLocal();
     dueDay = DateTime(d.year, d.month, d.day);
   } catch (_) {
     return false;
@@ -128,7 +132,8 @@ Map<TaskListSection, List<Task>> _groupTasks(List<Task> tasks) {
     }
     final DateTime dueDay;
     try {
-      final d = DateTime.parse(task.dueDate!);
+      // `.toLocal()` — same idiom as `_isOverdueOn` above / D1.
+      final d = DateTime.parse(task.dueDate!).toLocal();
       dueDay = DateTime(d.year, d.month, d.day);
     } catch (_) {
       upcoming.add(task);

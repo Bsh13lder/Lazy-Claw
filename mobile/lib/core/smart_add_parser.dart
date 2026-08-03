@@ -239,12 +239,12 @@ List<Raw> _resolveOverlaps(List<Raw> raws) {
 /// hits. Project only ever contributes its FIRST hit (later `#tags` stay in
 /// the title).
 List<Raw> _collect(String input, DateTime ref, DateTime today) {
-  final c = Collector(input, ref, today);
-  collectDates(c);
-  collectTimes(c);
-  collectPriority(c);
-  collectRecurrence(c);
-  collectProject(c);
+  final c = _Collector(input, ref, today);
+  _collectDates(c);
+  _collectTimes(c);
+  _collectPriority(c);
+  _collectRecurrence(c);
+  _collectProject(c);
   return c.raws;
 }
 

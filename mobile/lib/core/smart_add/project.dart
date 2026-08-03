@@ -9,7 +9,7 @@ final RegExp _project = RegExp(r'(^|\s)[#/]([A-Za-z0-9_-]+)');
 /// The project matcher, run against the original input. Only its FIRST hit is
 /// collected (later `#tags` stay in the title). Emits a single
 /// `SmartTokenKind.project` [Raw] ranked `_rankProject`, or none.
-void collectProject(Collector c) {
+void _collectProject(_Collector c) {
   final pm = _project.firstMatch(c.input);
   if (pm != null) {
     c.raws.add(

@@ -20,18 +20,18 @@ const int _rankProject = 20;
 /// characters typed, not the preceding space.
 int _tokenStart(RegExpMatch m) => m.start + (m.group(1)?.length ?? 0);
 
-/// Per-parse loop state shared by every matcher family's `collectX(Collector)`
+/// Per-parse loop state shared by every matcher family's `_collectX(_Collector)`
 /// function (`smart_add/dates.dart`, `times.dart`, `priority.dart`,
 /// `recurrence_patterns.dart`, `project.dart`). [scan] runs [re] against
 /// [input] and, for each match, computes the token start via [_tokenStart]
 /// then invokes [f]; a non-null [Raw] is appended to [raws].
-class Collector {
+class _Collector {
   final String input;
   final DateTime ref;
   final DateTime today;
   final List<Raw> raws = [];
 
-  Collector(this.input, this.ref, this.today);
+  _Collector(this.input, this.ref, this.today);
 
   void scan(RegExp re, Raw? Function(RegExpMatch m, int start) f) {
     for (final m in re.allMatches(input)) {

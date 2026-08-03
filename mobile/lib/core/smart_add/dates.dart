@@ -83,7 +83,7 @@ final RegExp _weekdayWord = RegExp(
 /// `SmartTokenKind.date` [Raw]s ranked `_rankExplicitDate` (ISO / M-D
 /// calendar dates) or `_rankRelativeDate` (everything resolved relative to
 /// `today`/`ref`).
-void collectDates(Collector c) {
+void _collectDates(_Collector c) {
   final today = c.today;
 
   c.scan(_isoDate, (m, s) {

@@ -30,7 +30,7 @@ const Map<String, int> _timesOfDay = {
 
 /// Every time-of-day matcher, run against the original input. All emit
 /// `SmartTokenKind.time` [Raw]s ranked `_rankTime`.
-void collectTimes(Collector c) {
+void _collectTimes(_Collector c) {
   final ref = c.ref;
 
   c.scan(_clock12, (m, s) {

@@ -46,7 +46,7 @@ final RegExp _yearlyWord = RegExp(
 /// — `_everyWeekday`'s span starts at "every", earlier than the bare
 /// "monday" span, so the earliest-start rule alone picks it. `rank` is the
 /// deterministic backstop for the rarer case of a genuine start+length tie.
-void collectRecurrence(Collector c) {
+void _collectRecurrence(_Collector c) {
   final today = c.today;
 
   c.scan(_everyWeekday, (m, s) {

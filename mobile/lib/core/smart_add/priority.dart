@@ -26,7 +26,7 @@ final RegExp _priorityBangs = RegExp(r'(^|\s)(!{1,3})(?=\s|$)');
 
 /// Every priority matcher, run against the original input. All emit
 /// `SmartTokenKind.priority` [Raw]s ranked `_rankPriority`.
-void collectPriority(Collector c) {
+void _collectPriority(_Collector c) {
   c.scan(
     _priorityCode,
     (m, s) => Raw(

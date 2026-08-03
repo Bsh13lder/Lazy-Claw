@@ -83,8 +83,11 @@ final RegExp _dayAfterTomorrow = RegExp(
   r'(^|\s)(?:day\s+after\s+tomorrow|overmorrow)(?=\s|$)',
   caseSensitive: false,
 );
+// NOTE: `tonight` lives in the time family now (`smart_add/times.dart`) — it
+// resolves to a concrete evening TIME (20:00), not just a bare date. `tn`/
+// `tod`/`tdy` stay here, date-only.
 final RegExp _todayWord = RegExp(
-  r'(^|\s)(today|tonight|tdy|tod|tn)(?=\s|$)',
+  r'(^|\s)(today|tdy|tod|tn)(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _yesterday = RegExp(
@@ -108,6 +111,21 @@ final RegExp _weekdayWordBare = RegExp(
 );
 final RegExp _weekdayWordCued = RegExp(
   r'(^|\s)(sat|sun|wed)(?=\s|$)',
+  caseSensitive: false,
+);
+
+// G2 #6: a cue word directly in front of ANY weekday (not just the
+// restricted three) absorbs the cue into the token span too, so "by wed" /
+// "due mon" clean up to nothing rather than stranding "by"/"due" in the
+// title. Deliberately SHIPS WITHOUT `on`/`from` — those are high-frequency
+// English ("turn on monday", "back from monday") and would eat a real word;
+// they're held for a later pass. This naturally out-ranks both
+// `_weekdayWordBare` and `_weekdayWordCued` on the same weekday (same date,
+// but a longer span starting earlier at the cue word — the same
+// earliest-start-wins mechanism `_nextWeekday` already relies on).
+final RegExp _cuedWeekday = RegExp(
+  r'(^|\s)(?:by|due|before|until|til|this|coming)\s+'
+  r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)(?=\s|$)',
   caseSensitive: false,
 );
 
@@ -294,8 +312,13 @@ void _collectDates(_Collector c) {
   );
   c.scan(
     _todayWord,
-    (m, s) =>
-        Raw(s, m.end, SmartTokenKind.date, rank: _rankRelativeDate, date: today),
+    (m, s) => Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: today,
+    ),
   );
   c.scan(
     _yesterday,
@@ -309,8 +332,13 @@ void _collectDates(_Collector c) {
   );
   c.scan(
     _eod,
-    (m, s) =>
-        Raw(s, m.end, SmartTokenKind.date, rank: _rankRelativeDate, date: today),
+    (m, s) => Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: today,
+    ),
   );
   c.scan(
     _eow,
@@ -335,6 +363,17 @@ void _collectDates(_Collector c) {
   });
   c.scan(_weekdayWordCued, (m, s) {
     if (!_weekdayCueSatisfied(c.input, s, m.end)) return null;
+    final wd = _weekdays[m.group(2)!.toLowerCase()];
+    if (wd == null) return null;
+    return Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: _weekdayDate(today, wd, nextWeek: false),
+    );
+  });
+  c.scan(_cuedWeekday, (m, s) {
     final wd = _weekdays[m.group(2)!.toLowerCase()];
     if (wd == null) return null;
     return Raw(

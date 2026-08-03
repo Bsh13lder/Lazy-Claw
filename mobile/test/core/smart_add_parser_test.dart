@@ -98,9 +98,13 @@ void main() {
     expect(r.priority, 'medium');
   });
 
-  test('today / tonight resolve to today', () {
+  test('today resolves to today; tonight resolves to today at 20:00', () {
+    // `tonight` moved into the time family (G2 #9) — it's no longer
+    // date-only, it now carries a concrete evening time.
     expect(parse('standup today').dueDate, '2026-06-06');
-    expect(parse('cook tonight').dueDate, '2026-06-06');
+    final tonight = parse('cook tonight');
+    expect(tonight.dueDate, '2026-06-06T20:00:00');
+    expect(tonight.hasTime, isTrue);
   });
 
   test('next week is +7 days', () {
@@ -225,9 +229,12 @@ void main() {
       assertNoMatch('sat down with the team');
     });
 
-    test('fix the sat nav (bare "sat" is not a date, and stays in the title)', () {
-      assertNoMatch('fix the sat nav');
-    });
+    test(
+      'fix the sat nav (bare "sat" is not a date, and stays in the title)',
+      () {
+        assertNoMatch('fix the sat nav');
+      },
+    );
 
     test('sun is out (bare "sun" is not a date)', () {
       assertNoMatch('sun is out');
@@ -308,10 +315,13 @@ void main() {
       expect(r.cleanTitle, 'page 12/31');
     });
 
-    test('pinned: report 6/10 and bare 12/31 still resolve (regression guard)', () {
-      expect(parse('report 6/10').dueDate, '2026-06-10');
-      expect(parse('12/31').dueDate, '2026-12-31');
-    });
+    test(
+      'pinned: report 6/10 and bare 12/31 still resolve (regression guard)',
+      () {
+        expect(parse('report 6/10').dueDate, '2026-06-10');
+        expect(parse('12/31').dueDate, '2026-12-31');
+      },
+    );
   });
 
   group('day after tomorrow / overmorrow (G1 #5)', () {
@@ -454,16 +464,111 @@ void main() {
     });
 
     test('a day token + a keyword combine (tom morning = tomorrow 09:00)', () {
+      // G2 #8: "tom morning" is now recognized as ONE absorbed time token
+      // (not two separate date+time tokens) — the time-family callback
+      // re-derives the "tom" cue and carries the day forward via `timeDate`
+      // so this still resolves to TOMORROW, not today.
       final r = parse('standup tom morning');
       expect(r.cleanTitle, 'standup');
       expect(r.dueDate, '2026-06-07T09:00:00');
       expect(r.hasTime, isTrue);
+      expect(r.tokens.length, 1);
+      expect(r.tokens.single.kind, SmartTokenKind.time);
     });
 
-    test('"tonight" stays date-only (night keyword does not fire inside it)', () {
-      final r = parse('cook tonight');
+    test('"tomorrow morning" (unabbreviated) also carries the day forward', () {
+      final r = parse('call tomorrow morning');
+      expect(r.cleanTitle, 'call');
+      expect(r.dueDate, '2026-06-07T09:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test(
+      'a bare cue-less day token + keyword still combine (5pm sat morning-style composition unaffected)',
+      () {
+        // Sanity check that ordinary two-token composition (date token +
+        // separate time token) still works when the time keyword has no
+        // absorbable cue in front of it.
+        final r = parse('call mon morning');
+        expect(r.cleanTitle, 'call');
+        expect(r.dueDate, '2026-06-08T09:00:00');
+        expect(r.hasTime, isTrue);
+      },
+    );
+
+    test('"this morning" absorbs the "this" cue into the title too', () {
+      // G2 #8: previously only "morning" was recognized, stranding "this".
+      final r = parse('wake up this morning');
+      expect(r.cleanTitle, 'wake up');
+      expect(r.dueDate, '2026-06-06T09:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test(
+      '"tonight" now resolves to today at 20:00 (moved into the time family, G2 #9)',
+      () {
+        final r = parse('cook tonight');
+        expect(r.dueDate, '2026-06-06T20:00:00');
+        expect(r.hasTime, isTrue);
+        expect(r.cleanTitle, 'cook');
+      },
+    );
+  });
+
+  group('cue absorption around clock times (G2 #7)', () {
+    test(
+      '"at" in front of a 12-hour clock is absorbed into the title cleanup',
+      () {
+        final r = parse('call at 5pm');
+        expect(r.cleanTitle, 'call');
+        expect(r.dueDate, '2026-06-06T17:00:00');
+        expect(r.hasTime, isTrue);
+      },
+    );
+
+    test(
+      '"at" in front of a 24-hour clock is absorbed into the title cleanup',
+      () {
+        final r = parse('meeting at 17:00');
+        expect(r.cleanTitle, 'meeting');
+        expect(r.dueDate, '2026-06-06T17:00:00');
+        expect(r.hasTime, isTrue);
+      },
+    );
+
+    test('no "at" present -> unaffected (regression guard)', () {
+      final r = parse('meeting 17:00');
+      expect(r.cleanTitle, 'meeting');
+      expect(r.dueDate, '2026-06-06T17:00:00');
+    });
+  });
+
+  group('cued-weekday absorption (G2 #6)', () {
+    test('"by wed" absorbs the cue and resolves to the upcoming Wednesday', () {
+      final r = parse('meet by wed');
+      expect(r.cleanTitle, 'meet');
+      expect(r.dueDate, '2026-06-10');
+    });
+
+    test('"due mon" absorbs the cue too (not just the restricted trio)', () {
+      final r = parse('due mon');
+      expect(r.cleanTitle, '');
+      expect(r.dueDate, '2026-06-08');
+    });
+
+    test('"coming sat" absorbs the cue', () {
+      final r = parse('coming sat');
+      expect(r.cleanTitle, '');
       expect(r.dueDate, '2026-06-06');
-      expect(r.hasTime, isFalse);
+    });
+
+    test('"on"/"from" are deliberately NOT absorbed (deferred cue words)', () {
+      // "turn on monday" must not eat "on" -- that's ordinary English, not a
+      // date cue. The bare weekday still resolves (unrestricted "monday"),
+      // but "on" stays in the title.
+      final r = parse('turn on monday');
+      expect(r.dueDate, '2026-06-08');
+      expect(r.cleanTitle, 'turn on');
     });
   });
 
@@ -528,10 +633,14 @@ void main() {
     test('date + time produce two adjacent, ordered spans', () {
       const input = 'meet tomorrow 5pm';
       final r = parse(input);
-      expect(r.tokens.map((t) => input.substring(t.start, t.end)).toList(),
-          ['tomorrow', '5pm']);
-      expect(r.tokens.map((t) => t.kind).toList(),
-          [SmartTokenKind.date, SmartTokenKind.time]);
+      expect(r.tokens.map((t) => input.substring(t.start, t.end)).toList(), [
+        'tomorrow',
+        '5pm',
+      ]);
+      expect(r.tokens.map((t) => t.kind).toList(), [
+        SmartTokenKind.date,
+        SmartTokenKind.time,
+      ]);
     });
 
     test('spans are sorted by start and never overlap', () {
@@ -540,8 +649,9 @@ void main() {
       // fixture-specific project-token assertion below.
       final r = parse('plan next fri 9am p2 #work later #ignored');
       // Only the FIRST project token is recognized.
-      final projects =
-          r.tokens.where((t) => t.kind == SmartTokenKind.project).toList();
+      final projects = r.tokens
+          .where((t) => t.kind == SmartTokenKind.project)
+          .toList();
       expect(projects.length, 1);
       expect(r.project, 'work');
     });

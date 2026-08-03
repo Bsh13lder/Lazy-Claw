@@ -49,6 +49,10 @@ Widget _calendar({
   required DateTime selectedDay,
   ValueChanged<String>? onComplete,
   ValueChanged<String>? onDelete,
+  // Pins "now" for the recurrence-ghost clamp (expandRecurringForRange never
+  // ghosts before this day) so a ghost-on-a-hardcoded-day assertion doesn't
+  // silently start failing once the real wall clock catches up to that day.
+  DateTime? now,
 }) =>
     TaskCalendarView(
       tasks: tasks,
@@ -62,6 +66,7 @@ Widget _calendar({
       onDelete: onDelete ?? (_) {},
       onOpen: (_) {},
       onAddOnDay: (_) {},
+      ghostsNow: now,
     );
 
 void main() {
@@ -112,6 +117,9 @@ void main() {
           tasks: tasks,
           focusedDay: DateTime(2026, 8, 1),
           selectedDay: DateTime(2026, 8, 10),
+          // Pinned so the ghost-clamp (never project before "now") never
+          // strips Aug 10 once the real calendar date passes it.
+          now: DateTime(2026, 8, 3),
         )));
         await tester.pumpAndSettle();
 
@@ -142,6 +150,7 @@ void main() {
           tasks: tasks,
           focusedDay: DateTime(2026, 8, 1),
           selectedDay: DateTime(2026, 8, 3),
+          now: DateTime(2026, 8, 3),
         )));
         await tester.pumpAndSettle();
 
@@ -168,6 +177,7 @@ void main() {
           selectedDay: DateTime(2026, 8, 10), // pure-ghost day
           onComplete: (_) => completeCalls++,
           onDelete: (_) => deleteCalls++,
+          now: DateTime(2026, 8, 3),
         )));
         await tester.pumpAndSettle();
 
@@ -177,6 +187,29 @@ void main() {
         expect(find.byType(TaskRow), findsNothing);
         expect(completeCalls, 0);
         expect(deleteCalls, 0);
+      },
+    );
+
+    testWidgets(
+      'a ghost day before the injected "now" is clamped away — proves the '
+      'past-clamp reaches the widget, not just the pure function',
+      (tester) async {
+        // Same weekly-Monday cron as above, but the selected day (Jul 6) is
+        // BEFORE the injected "now" (Aug 3) — the ghost must not render.
+        final tasks = [
+          _task('a', recurring: '0 9 * * 1', title: 'Weekly standup'),
+        ];
+
+        await tester.pumpWidget(_host(_calendar(
+          tasks: tasks,
+          focusedDay: DateTime(2026, 8, 1),
+          selectedDay: DateTime(2026, 7, 6), // a Monday, but in the "past"
+          now: DateTime(2026, 8, 3),
+        )));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Nothing due this day'), findsOneWidget);
+        expect(find.byIcon(Icons.repeat_rounded), findsNothing);
       },
     );
   });

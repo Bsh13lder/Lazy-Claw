@@ -28,6 +28,7 @@ class TaskCalendarView extends StatelessWidget {
     required this.onDelete,
     required this.onOpen,
     required this.onAddOnDay,
+    this.ghostsNow,
   });
 
   final List<Task> tasks;
@@ -41,6 +42,18 @@ class TaskCalendarView extends StatelessWidget {
   final void Function(String id) onDelete;
   final void Function(Task task) onOpen;
   final void Function(DateTime day) onAddOnDay;
+
+  /// Injected "now" for the recurrence-ghost projection
+  /// ([expandRecurringForRange]'s `now` — the day before which no ghost is
+  /// ever generated). Null (the production default) falls through to the
+  /// real wall clock. Deliberately separate from the `DateTime.now()` used
+  /// below for today-highlighting/date bounds: a test can pin what "today"
+  /// means for the ghost clamp without also faking which day the calendar
+  /// considers "today" for its own chrome (the today circle, first/last
+  /// day bounds). Without this, a widget test asserting a ghost renders on
+  /// a hardcoded future day would silently start failing once the real
+  /// wall clock caught up to that day.
+  final DateTime? ghostsNow;
 
   /// How many colored dots to render under a day before collapsing to "+N".
   static const int _maxDots = 3;
@@ -60,7 +73,12 @@ class TaskCalendarView extends StatelessWidget {
     final rangeStart = DateTime(focusedDay.year, focusedDay.month - 1, 1);
     final rangeEnd = DateTime(focusedDay.year, focusedDay.month + 2, 1)
         .subtract(const Duration(days: 1));
-    final ghostGrouped = expandRecurringForRange(tasks, rangeStart, rangeEnd);
+    final ghostGrouped = expandRecurringForRange(
+      tasks,
+      rangeStart,
+      rangeEnd,
+      now: ghostsNow,
+    );
 
     List<Task> eventsFor(DateTime day) =>
         grouped[DateTime(day.year, day.month, day.day)] ?? const [];

@@ -53,7 +53,14 @@ PROJECT_COLUMNS = [
 ]
 
 EXPENSE_COLUMNS = [
-    "id", "user_id", "project_id", "task_id", "amount", "currency",
+    "id", "user_id", "project_id", "task_id",
+    # Subtask-level link (feat/sync-widget-parser-expenses P4) — optional step
+    # id from the parent task's ``steps`` JSON. Plaintext (opaque ``s-<uuid>``,
+    # no user content) like task_id. Hard invariant: subtask_id IS NOT NULL
+    # implies task_id IS NOT NULL, enforced in create_expense/update_expense —
+    # every existing task_id-based rollup keeps working with zero changes.
+    "subtask_id",
+    "amount", "currency",
     "description", "vendor", "notes", "spent_at", "status",
     "recurring_expense_id", "lazybrain_note_id", "created_at", "updated_at",
     # Per-expense favorite flag (star) — plaintext INTEGER 0/1, default 0,
@@ -745,6 +752,53 @@ async def delete_project(
 # ---------------------------------------------------------------------------
 
 
+async def _validate_subtask_link(
+    config: Config, user_id: str, task_id: str | None, subtask_id: str | None
+) -> None:
+    """Enforce the P4 hard invariant: ``subtask_id IS NOT NULL`` implies
+    ``task_id IS NOT NULL`` — a subtask expense must always also carry its
+    parent task id, so every existing task_id-based rollup (``_spent_by_project``
+    GROUP BY project_id, the ``task_id = ?`` per-task filter) keeps including
+    it with zero code changes.
+
+    Also validates the ``subtask_id`` actually names a LIVE step on that task
+    at write time — mirrors ``tasks.store.add_comment``'s own subtask_id
+    guard (same failure message, same reasoning: an id from a stale client
+    payload must never silently attach to nothing).
+
+    Raises ``ValueError`` on either violation. Callers (routes) map this to a
+    400 — distinct from the pre-existing "project not found" ValueError,
+    which stays a 404.
+    """
+    if not subtask_id:
+        return
+    if not task_id:
+        raise ValueError("subtask_id requires a task_id")
+
+    from lazyclaw.tasks.store import decode_steps, get_task
+
+    task = await get_task(config, user_id, task_id)
+    if task is None:
+        raise ValueError(f"task not found: {task_id}")
+    step_ids = {s.get("id") for s in decode_steps(task.get("steps"))}
+    if subtask_id not in step_ids:
+        raise ValueError("Unknown subtask_id for this task")
+
+
+async def get_expense(config: Config, user_id: str, expense_id: str) -> dict | None:
+    """Fetch a single expense by id (live or soft-deleted — callers that
+    need only live rows should check ``deleted_at`` themselves)."""
+    key = await get_user_dek(config, user_id)
+    async with db_session(config) as db:
+        cur = await db.execute(
+            f"SELECT {EXPENSE_SELECT} FROM project_expenses "
+            "WHERE id = ? AND user_id = ?",
+            (expense_id, user_id),
+        )
+        row = await cur.fetchone()
+    return _expense_to_dict(row, key) if row else None
+
+
 async def create_expense(
     config: Config,
     user_id: str,
@@ -756,20 +810,27 @@ async def create_expense(
     vendor: str | None = None,
     notes: str | None = None,
     task_id: str | None = None,
+    subtask_id: str | None = None,
     spent_at: str | None = None,
     recurring_expense_id: str | None = None,
     expense_id: str | None = None,
 ) -> dict:
-    """Log an expense against a project (optionally a task). Mirrors a
+    """Log an expense against a project (optionally a task/subtask). Mirrors a
     LazyBrain note wikilinking ``[[<Name> Project]]``.
 
     ``expense_id``: optional client-minted id for offline-first idempotent
     replay. A second call with the same id returns the existing row without
     inserting a duplicate.
+
+    ``subtask_id``: optional link to a step id inside ``task_id``'s
+    ``steps`` JSON — see ``_validate_subtask_link`` for the invariant this
+    enforces.
     """
     project = await get_project(config, user_id, project_id)
     if project is None:
         raise ValueError(f"project not found: {project_id}")
+
+    await _validate_subtask_link(config, user_id, task_id, subtask_id)
 
     key = await get_user_dek(config, user_id)
 
@@ -800,12 +861,12 @@ async def create_expense(
     async with db_session(config) as db:
         await db.execute(
             "INSERT INTO project_expenses "
-            "(id, user_id, project_id, task_id, amount, currency, description, "
-            "vendor, notes, spent_at, status, recurring_expense_id, "
+            "(id, user_id, project_id, task_id, subtask_id, amount, currency, "
+            "description, vendor, notes, spent_at, status, recurring_expense_id, "
             "lazybrain_note_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?)",
             (
-                expense_id, user_id, project_id, task_id, amount, currency,
+                expense_id, user_id, project_id, task_id, subtask_id, amount, currency,
                 _enc(description, key), _enc(vendor, key), _enc(notes, key),
                 spent_at, recurring_expense_id, note_id, now, now,
             ),
@@ -815,7 +876,7 @@ async def create_expense(
     logger.debug("Created expense %s on project %s", expense_id, project_id)
     return {
         "id": expense_id, "user_id": user_id, "project_id": project_id,
-        "task_id": task_id, "amount": amount, "currency": currency,
+        "task_id": task_id, "subtask_id": subtask_id, "amount": amount, "currency": currency,
         "description": description, "vendor": vendor, "notes": notes,
         "spent_at": spent_at, "status": "posted",
         "recurring_expense_id": recurring_expense_id,
@@ -830,6 +891,7 @@ async def list_expenses(
     *,
     project_id: str | None = None,
     task_id: str | None = None,
+    subtask_id: str | None = None,
     status: str | None = "posted",
 ) -> list[dict]:
     key = await get_user_dek(config, user_id)
@@ -841,6 +903,9 @@ async def list_expenses(
     if task_id:
         where += " AND task_id = ?"
         params.append(task_id)
+    if subtask_id:
+        where += " AND subtask_id = ?"
+        params.append(subtask_id)
     if status:
         where += " AND status = ?"
         params.append(status)
@@ -898,6 +963,23 @@ async def update_expense(
     # can never write a non-0/1), exactly like ``update_project``.
     if "is_favorite" in fields:
         fields = {**fields, "is_favorite": _clean_favorite(fields["is_favorite"])}
+
+    # Re-validate the subtask invariant whenever task_id or subtask_id is
+    # touched — the EFFECTIVE (post-patch) combination must hold, not just
+    # the fields present on this call. An update that only clears task_id
+    # while a subtask_id already lives on the row (or vice versa) must be
+    # rejected exactly like create_expense would reject it up front.
+    if "task_id" in fields or "subtask_id" in fields:
+        existing = await get_expense(config, user_id, expense_id)
+        if existing is not None:
+            effective_task_id = (
+                fields["task_id"] if "task_id" in fields else existing.get("task_id")
+            )
+            effective_subtask_id = (
+                fields["subtask_id"] if "subtask_id" in fields else existing.get("subtask_id")
+            )
+            await _validate_subtask_link(config, user_id, effective_task_id, effective_subtask_id)
+
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
     params: list = []

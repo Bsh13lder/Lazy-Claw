@@ -84,6 +84,10 @@ class CreateExpenseBody(BaseModel):
     vendor: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
     task_id: str | None = None
+    # Optional link to a step id inside task_id's steps checklist. The store
+    # enforces subtask_id IS NOT NULL implies task_id IS NOT NULL (400 on
+    # violation) and that the id names a live step on that task.
+    subtask_id: str | None = None
     spent_at: str | None = None
 
 
@@ -95,6 +99,9 @@ class UpdateExpenseBody(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
     project_id: str | None = None
     task_id: str | None = None
+    # Optional link to a step id inside task_id's steps checklist. Same
+    # invariant as CreateExpenseBody.subtask_id.
+    subtask_id: str | None = None
     spent_at: str | None = None
     status: Literal["posted", "void"] | None = None
     # Per-expense favorite flag (star). None = leave unchanged (dropped by the
@@ -313,10 +320,12 @@ async def list_all_expenses_route(
 async def list_expenses_route(
     project_id: str,
     task_id: str | None = Query(None),
+    subtask_id: str | None = Query(None),
     user: User = Depends(get_current_user),
 ):
     expenses = await store.list_expenses(
         _config, user.id, project_id=project_id, task_id=task_id,
+        subtask_id=subtask_id,
     )
     return {"expenses": expenses, "count": len(expenses)}
 
@@ -337,15 +346,21 @@ async def create_expense_route(
             _config, user.id, project_id,
             amount=body.amount, currency=body.currency,
             description=body.description, vendor=body.vendor, notes=body.notes,
-            task_id=body.task_id, spent_at=body.spent_at,
+            task_id=body.task_id, subtask_id=body.subtask_id, spent_at=body.spent_at,
             expense_id=body.id or None,
         )
     except ValueError as exc:
+        # "project not found" (get_project miss) stays a 404 — every other
+        # ValueError here is the subtask-link invariant/validation added in
+        # _validate_subtask_link, which maps to 400 (bad request, not a
+        # missing resource).
+        msg = str(exc)
+        status = 404 if msg.startswith("project not found") else 400
         logger.warning(
-            "[route:budgets] POST create-expense project=%s user=%s -> 404: %s",
-            project_id, user.id, exc,
+            "[route:budgets] POST create-expense project=%s user=%s -> %s: %s",
+            project_id, user.id, status, exc,
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=status, detail=msg) from exc
     return {"expense": expense}
 
 
@@ -359,7 +374,9 @@ async def update_expense_route(
     # truly-omitted field (leave it untouched). A stray null on a NOT-NULL
     # column (amount/currency/status) is guarded out so it can never blank a
     # required field or corrupt the SUM rollup. Nullable fields (vendor, notes,
-    # description, task_id, spent_at) clear fine.
+    # description, task_id, subtask_id, spent_at) clear fine — clearing
+    # task_id while subtask_id survives raises via _validate_subtask_link
+    # (mapped to 400 below).
     fields = body.model_dump(exclude_unset=True)
     logger.debug(
         "[route:budgets] PATCH expense id=%s user=%s fields=%s",
@@ -380,7 +397,15 @@ async def update_expense_route(
             expense_id, user.id,
         )
         raise HTTPException(status_code=400, detail="no fields to update")
-    ok = await store.update_expense(_config, user.id, expense_id, **fields)
+    try:
+        ok = await store.update_expense(_config, user.id, expense_id, **fields)
+    except ValueError as exc:
+        # subtask-link invariant/validation failure (_validate_subtask_link).
+        logger.warning(
+            "[route:budgets] PATCH expense id=%s user=%s -> 400: %s",
+            expense_id, user.id, exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         logger.warning(
             "[route:budgets] PATCH expense id=%s user=%s -> 404 expense not found",

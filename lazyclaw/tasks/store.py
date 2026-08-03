@@ -1837,6 +1837,19 @@ async def delete_task(
             "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (now, now, task_id, user_id),
         )
+        if result.rowcount:
+            # Demote (never delete) this task's expenses — deleting the task
+            # must not delete money. Only the subtask_id link is cleared;
+            # task_id is intentionally left AS-IS (a pre-existing hole:
+            # delete_task never touched project_expenses.task_id before this
+            # change either — see docs/superpowers/specs/
+            # 2026-08-03-diagnosis.md "Probe: expenses"). Widening this to
+            # also null task_id is out of scope here.
+            await db.execute(
+                "UPDATE project_expenses SET subtask_id = NULL, updated_at = ? "
+                "WHERE user_id = ? AND task_id = ? AND subtask_id IS NOT NULL",
+                (now, user_id, task_id),
+            )
         await db.commit()
     if result.rowcount:
         logger.debug("[tasks] soft-deleted task %s (user=%s)", task_id, user_id)
@@ -1984,6 +1997,17 @@ async def set_steps(
     Steps and comments are written in ONE UPDATE (one ``updated_at`` bump)
     so the cascade can never half-apply.
 
+    Also DEMOTES (never deletes) any ``project_expenses`` row pinned to a
+    step that no longer survives: ``subtask_id`` is set to NULL so the
+    expense drops back to a plain task-level expense. Unlike the comment
+    cascade above, this is a DIFFERENT table (``project_expenses``, not
+    ``tasks``) so it cannot share the same UPDATE statement — it is its own
+    single UPDATE, run in the same transaction as the steps/comments write so
+    both commit atomically. Comments are disposable invisible data (safe to
+    delete); an expense is money, so deleting it on a subtask rename/removal
+    would be data loss — see docs/superpowers/specs/2026-08-03-diagnosis.md
+    "Probe: expenses".
+
     Returns the normalized list, or None if the task does not exist.
     """
     task = await get_task(config, user_id, task_id)
@@ -2002,26 +2026,43 @@ async def set_steps(
     ]
 
     now = datetime.now(timezone.utc).isoformat()
-    if len(pruned_comments) != len(current_comments):
-        comments_enc = encrypt(json.dumps(pruned_comments), key) if pruned_comments else None
-        async with db_session(config) as db:
+    async with db_session(config) as db:
+        if len(pruned_comments) != len(current_comments):
+            comments_enc = encrypt(json.dumps(pruned_comments), key) if pruned_comments else None
             await db.execute(
                 "UPDATE tasks SET steps = ?, comments = ?, updated_at = ? "
                 "WHERE id = ? AND user_id = ?",
                 (enc, comments_enc, now, task_id, user_id),
             )
-            await db.commit()
-    else:
-        # No comments orphaned by this write — leave the comments column
-        # untouched (re-encrypting an unchanged list would still churn the
-        # ciphertext via a fresh AES-GCM nonce, and bump updated_at for no
-        # reason).
-        async with db_session(config) as db:
+        else:
+            # No comments orphaned by this write — leave the comments column
+            # untouched (re-encrypting an unchanged list would still churn the
+            # ciphertext via a fresh AES-GCM nonce, and bump updated_at for no
+            # reason).
             await db.execute(
                 "UPDATE tasks SET steps = ?, updated_at = ? WHERE id = ? AND user_id = ?",
                 (enc, now, task_id, user_id),
             )
-            await db.commit()
+
+        # Demote any expense whose subtask_id no longer survives. Always run
+        # (idempotent no-op when nothing is orphaned) — a single UPDATE, not
+        # a per-row loop, mirroring the comment prune's discipline.
+        if surviving_ids:
+            placeholders = ", ".join("?" for _ in surviving_ids)
+            await db.execute(
+                "UPDATE project_expenses SET subtask_id = NULL, updated_at = ? "
+                "WHERE user_id = ? AND task_id = ? AND subtask_id IS NOT NULL "
+                f"AND subtask_id NOT IN ({placeholders})",
+                (now, user_id, task_id, *surviving_ids),
+            )
+        else:
+            await db.execute(
+                "UPDATE project_expenses SET subtask_id = NULL, updated_at = ? "
+                "WHERE user_id = ? AND task_id = ? AND subtask_id IS NOT NULL",
+                (now, user_id, task_id),
+            )
+
+        await db.commit()
 
     return normalized
 

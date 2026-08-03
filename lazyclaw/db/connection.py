@@ -308,6 +308,18 @@ async def init_db(config: Config) -> None:
             # "starred only" total. Exposed via list + /api/budgets/changes for
             # the offline sync pull, exactly like projects.is_favorite.
             ("project_expenses", "is_favorite", "ALTER TABLE project_expenses ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
+            # Subtask-level expenses (feat/sync-widget-parser-expenses P4) —
+            # optional link to a step id inside the parent task's `steps` JSON.
+            # Nullable plaintext (opaque `s-<uuid>` id, no user content), same
+            # profile as task_id. Hard invariant enforced in budgets/store.py:
+            # subtask_id IS NOT NULL implies task_id IS NOT NULL, so the
+            # existing task_id-based aggregation (per-task filter, project
+            # SUM) rolls a subtask expense up with zero code changes. On
+            # subtask removal the expense is DEMOTED (subtask_id -> NULL),
+            # never deleted — money must never disappear because a checklist
+            # item was renamed or removed (see tasks/store.py set_steps /
+            # delete_task).
+            ("project_expenses", "subtask_id", "ALTER TABLE project_expenses ADD COLUMN subtask_id TEXT"),
             # Budget-entry offline-sync primitives (fix/container-vision) —
             # budget_entries (top-ups) were create-only + hard-deleted, so they
             # could not cross-sync, retries double-added, and deletes left no

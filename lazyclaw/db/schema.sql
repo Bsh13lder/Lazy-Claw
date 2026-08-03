@@ -495,6 +495,12 @@ CREATE TABLE IF NOT EXISTS project_expenses (
     user_id TEXT NOT NULL REFERENCES users(id),
     project_id TEXT NOT NULL REFERENCES projects(id),
     task_id TEXT,                      -- optional FK to tasks(id), nullable
+    subtask_id TEXT,                   -- optional step id from tasks.steps JSON, nullable.
+                                        -- Invariant: subtask_id IS NOT NULL implies task_id
+                                        -- IS NOT NULL, so every task_id-based rollup
+                                        -- (per-task filter, project SUM) keeps including it
+                                        -- with zero code changes. Plaintext (opaque s-<uuid>,
+                                        -- no user content) like task_id.
     amount REAL NOT NULL DEFAULT 0,    -- plaintext, project base currency unless currency overrides
     currency TEXT NOT NULL DEFAULT 'EUR',
     description TEXT,                  -- encrypted

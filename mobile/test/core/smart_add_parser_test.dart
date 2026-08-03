@@ -668,6 +668,74 @@ void main() {
     );
 
     test(
+      'anti-patterns: mar/march/may digit-touching prose is STILL not a date '
+      '(review finding — the \\s+\\d guard alone does not save these)',
+      () {
+        // `mar`/`march` (verb: "don't mar the finish", "we march 3 miles")
+        // and `may` (modal verb: "may 2 people attend") are the two month
+        // names that double as ordinary English, and they break on a very
+        // common sentence shape the four anti-patterns above never covered:
+        // a bare number sitting right next to the word. Without the
+        // ambiguous-month gate these all resolved to a spurious date.
+        for (final input in [
+          'march 3 miles',
+          'may 2 people attend',
+          '3 march to the coast',
+        ]) {
+          final r = parse(input);
+          expect(r.dueDate, isNull, reason: input);
+          expect(r.cleanTitle, input, reason: input);
+        }
+      },
+    );
+
+    test(
+      'anti-pattern: "march 3" is not a date even alongside a genuine date word',
+      () {
+        // "today" IS a legitimate date token here -- the fix is that "march
+        // 3" must not ALSO produce a (wrong) token, not that this sentence
+        // has zero dates. Before the fix, "march 3" resolved to a spurious
+        // March due date that (via `day ??=`'s first-token-wins rule) won
+        // out over the correct "today".
+        final r = parse('we march 3 miles today');
+        expect(r.dueDate, '2026-06-06'); // from "today", NOT a March date
+        expect(r.cleanTitle, 'we march 3 miles');
+        expect(r.tokens.length, 1);
+        expect(r.tokens.single.kind, SmartTokenKind.date);
+        expect(
+          'we march 3 miles today'.substring(
+            r.tokens.single.start,
+            r.tokens.single.end,
+          ),
+          'today',
+        );
+      },
+    );
+
+    test(
+      'the ambiguous months resolve once disambiguated: ordinal suffix, cue word, or explicit year',
+      () {
+        expect(parse('march 3rd').dueDate, '2027-03-03');
+        expect(parse('may 5th').dueDate, '2027-05-05');
+        final onMarch3 = parse('on march 3');
+        expect(onMarch3.dueDate, '2027-03-03');
+        // "on" is deliberately NOT absorbed (same deferred-cue-absorption
+        // choice as the weekday cue check) -- it stays in the title.
+        expect(onMarch3.cleanTitle, 'on');
+        expect(parse('march 3 2027').dueDate, '2027-03-03');
+      },
+    );
+
+    test('the day-month order gets the same disambiguation treatment', () {
+      // "3 march" needs a disambiguator too; "3 jan" (unambiguous month)
+      // never needed one and stays completely unaffected.
+      final r = parse('due 3 march');
+      expect(r.dueDate, '2027-03-03');
+      expect(r.cleanTitle, 'due');
+      expect(parse('3 jan').dueDate, '2027-01-03');
+    });
+
+    test(
       '"5 june 6" — overlapping day-month/month-day both fire; rank/earliest-start pick one deterministically',
       () {
         final r = parse('5 june 6');
@@ -686,6 +754,54 @@ void main() {
         // "5 june" this year (2026-06-05) is BEFORE today (2026-06-06), so it
         // rolls to next year's occurrence.
         expect(r.dueDate, '2027-06-05');
+      },
+    );
+  });
+
+  group('month vocabulary parity (G4 hardening — minor #1)', () {
+    test(
+      'every month synonym in the parser\'s vocabulary actually resolves',
+      () {
+        // Mirrors the `_months` map in smart_add/dates.dart. `_months` and the
+        // `_monthPattern` regex string are coupled only by convention (both
+        // private, so this test can't reach in and compare them directly) --
+        // this exercises every intended synonym behaviorally instead, so a
+        // synonym added to one but not the other fails loudly here rather than
+        // silently no-op'ing. "on <month> <day>" satisfies the ambiguous-month
+        // cue gate too, so it's a uniform prefix for every synonym regardless
+        // of mar/march/may.
+        const monthSynonymToNumber = {
+          'jan': 1,
+          'january': 1,
+          'feb': 2,
+          'february': 2,
+          'mar': 3,
+          'march': 3,
+          'apr': 4,
+          'april': 4,
+          'may': 5,
+          'jun': 6,
+          'june': 6,
+          'jul': 7,
+          'july': 7,
+          'aug': 8,
+          'august': 8,
+          'sep': 9,
+          'sept': 9,
+          'september': 9,
+          'oct': 10,
+          'october': 10,
+          'nov': 11,
+          'november': 11,
+          'dec': 12,
+          'december': 12,
+        };
+        for (final entry in monthSynonymToNumber.entries) {
+          final r = parse('on ${entry.key} 15');
+          expect(r.dueDate, isNotNull, reason: 'month synonym "${entry.key}"');
+          final month = int.parse(r.dueDate!.substring(5, 7));
+          expect(month, entry.value, reason: 'month synonym "${entry.key}"');
+        }
       },
     );
   });

@@ -15,10 +15,18 @@ const int _rankTime = 50;
 const int _rankPriority = 30;
 const int _rankProject = 20;
 // G4: `_dayMonth` and `_monthDay` (smart_add/dates.dart) both live in the
-// explicitDate family but need DISTINCT ranks — "5 june 6" can produce
-// partially overlapping spans from the two matchers, and a genuine
-// start+length tie needs a deterministic winner. `_dayMonth` reads one tick
-// above the shared `_rankExplicitDate` tier so it wins such a tie.
+// explicitDate family but need DISTINCT ranks per spec, as the deterministic
+// backstop for a genuine start+length tie between them. `_dayMonth` reads one
+// tick above the shared `_rankExplicitDate` tier so it would win such a tie.
+//
+// INVESTIGATED (review minor #2): under today's matcher set this specific
+// tie is provably unreachable, not just untested — `_dayMonth`'s match
+// always starts with a DIGIT (the day) and `_monthDay`'s always starts with
+// a LETTER (the month name), so the two can never share a start position on
+// the same text, let alone a start+length tie ("5 june 6" resolves via
+// earliest-start alone, not this rank — see the pinned test for it). Kept
+// per spec anyway as forward-compatible defense: a future matcher sharing
+// `_dayMonth`'s digit-leading shape could reintroduce a genuine tie.
 const int _rankDayMonth = 91;
 
 /// Token-start helper shared by every matcher family: excludes the leading

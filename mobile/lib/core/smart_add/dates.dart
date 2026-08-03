@@ -79,24 +79,52 @@ final RegExp _mdDate = RegExp(
 final RegExp _dmySeparatedDate = RegExp(
   r'(^|\s)(\d{1,2})([-./])(\d{1,2})\3(\d{4})(?=\s|$)',
 );
-// G4: "june 5" / "5 june" (+ optional ordinal suffix and/or a 4-digit year).
-// The only genuinely missing capability before this: no way to type an
-// absolute date except ISO or US M/D. Anti-patterns this must NOT match —
+// G4: "june 5" / "5 june" (+ optional ordinal suffix, captured as its own
+// group so the callback can tell it was present — see `_ambiguousMonths`
+// below — and/or a 4-digit year). The only genuinely missing capability
+// before this: no way to type an absolute date except ISO or US M/D.
 // "Marching band practice", "may need to call back", "a march to the sea",
-// "summon the may queen" — are saved entirely by the required `\s+\d`: none
-// of them has a digit directly after the month word.
+// "summon the may queen" are saved by the required `\s+\d`: none of them has
+// a digit directly touching the month word. That guard alone is NOT
+// sufficient, though — see `_ambiguousMonths` for the digit-touching cases
+// ("march 3 miles", "may 2 people attend") a reviewer caught.
 final RegExp _monthDay = RegExp(
   r'(^|\s)(' +
       _monthPattern +
-      r')\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?(?=\s|$)',
+      r')\s+(\d{1,2})(st|nd|rd|th)?(?:,?\s+(\d{4}))?(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _dayMonth = RegExp(
-  r'(^|\s)(\d{1,2})(?:st|nd|rd|th)?\s+(' +
+  r'(^|\s)(\d{1,2})(st|nd|rd|th)?\s+(' +
       _monthPattern +
       r')(?:,?\s+(\d{4}))?(?=\s|$)',
   caseSensitive: false,
 );
+
+// `mar`/`march` (verb: "don't mar the finish", "we march 3 miles") and `may`
+// (modal verb: "may 2 people attend") are the two month names that double as
+// common English words — and unlike the four anti-patterns above, they break
+// on a digit-touching sentence shape the required-`\s+\d` guard does NOT
+// save ("march 3 miles", "may 2 people attend", "3 march to the coast"). For
+// these two, `_monthDay`/`_dayMonth` additionally require ONE of: an ordinal
+// suffix ("march 3rd"), an explicit 4-digit year ("march 3 2027"), or a
+// leading cue word immediately before the whole match ("on march 3") —
+// reusing `_weekdayCueWords` rather than a second hand-maintained list.
+// Every other month name/abbreviation stays bare, exactly as before.
+const Set<String> _ambiguousMonths = {'mar', 'march', 'may'};
+
+/// Whether the text immediately before [matchStart] in [input] ends with a
+/// cue word from `_weekdayCueWords` — the same disambiguation signal G1/G2
+/// use for the restricted weekday short forms, reused here for
+/// `_ambiguousMonths` instead of inventing a second list.
+bool _precededByCueWord(String input, int matchStart) {
+  final beforeTrim = input.substring(0, matchStart).trim();
+  if (beforeTrim.isEmpty) return false;
+  return _weekdayCueWords.contains(
+    beforeTrim.split(_whitespace).last.toLowerCase(),
+  );
+}
+
 final RegExp _inNDays = RegExp(
   r'(^|\s)in\s+(\d+)\s+days?(?=\s|$)',
   caseSensitive: false,
@@ -312,10 +340,18 @@ void _collectDates(_Collector c) {
         : Raw(s, m.end, SmartTokenKind.date, rank: _rankExplicitDate, date: d);
   });
   c.scan(_monthDay, (m, s) {
-    final month = _months[m.group(2)!.toLowerCase()];
+    final monthWord = m.group(2)!.toLowerCase();
+    final month = _months[monthWord];
     if (month == null) return null;
     final day = int.parse(m.group(3)!);
-    final explicitYear = m.group(4) != null ? int.parse(m.group(4)!) : null;
+    final hasOrdinal = m.group(4) != null;
+    final explicitYear = m.group(5) != null ? int.parse(m.group(5)!) : null;
+    if (_ambiguousMonths.contains(monthWord) &&
+        !hasOrdinal &&
+        explicitYear == null &&
+        !_precededByCueWord(c.input, s)) {
+      return null; // "march 3 miles" / "may 2 people attend" etc.
+    }
     final year = explicitYear ?? _defaultYearFor(today, month, day);
     final d = _safeDate(year, month, day);
     return d == null
@@ -324,9 +360,17 @@ void _collectDates(_Collector c) {
   });
   c.scan(_dayMonth, (m, s) {
     final day = int.parse(m.group(2)!);
-    final month = _months[m.group(3)!.toLowerCase()];
+    final hasOrdinal = m.group(3) != null;
+    final monthWord = m.group(4)!.toLowerCase();
+    final month = _months[monthWord];
     if (month == null) return null;
-    final explicitYear = m.group(4) != null ? int.parse(m.group(4)!) : null;
+    final explicitYear = m.group(5) != null ? int.parse(m.group(5)!) : null;
+    if (_ambiguousMonths.contains(monthWord) &&
+        !hasOrdinal &&
+        explicitYear == null &&
+        !_precededByCueWord(c.input, s)) {
+      return null; // "3 march to the coast" etc.
+    }
     final year = explicitYear ?? _defaultYearFor(today, month, day);
     final d = _safeDate(year, month, day);
     return d == null

@@ -234,6 +234,29 @@ void main() {
       await BudgetsRepository(t).createExpense('proj1', 10.0, 'Item');
       expect(t.lastBody?.containsKey('vendor'), isFalse);
     });
+
+    // The server's CreateExpenseBody already accepts task_id/subtask_id (and
+    // enforces "subtask_id implies task_id" with a 400) — these prove the
+    // client actually sends them so an expense can be born linked.
+    test('includes task_id + subtask_id when provided', () async {
+      final t = _FakeTransport({'expense': _expenseJson()});
+      await BudgetsRepository(t).createExpense(
+        'proj1',
+        20.0,
+        'Paint',
+        taskId: 't1',
+        subtaskId: 's1',
+      );
+      expect(t.lastBody, containsPair('task_id', 't1'));
+      expect(t.lastBody, containsPair('subtask_id', 's1'));
+    });
+
+    test('omits task_id / subtask_id entirely when null', () async {
+      final t = _FakeTransport({'expense': _expenseJson()});
+      await BudgetsRepository(t).createExpense('proj1', 10.0, 'Item');
+      expect(t.lastBody?.containsKey('task_id'), isFalse);
+      expect(t.lastBody?.containsKey('subtask_id'), isFalse);
+    });
   });
 
   group('BudgetsRepository.deleteExpense', () {

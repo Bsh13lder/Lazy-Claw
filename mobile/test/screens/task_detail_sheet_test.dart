@@ -21,7 +21,9 @@ import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
 import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
+import 'package:lazyclaw_mobile/screens/tasks/task_budget_control.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
+import 'package:lazyclaw_mobile/screens/tasks/task_tags_field.dart';
 import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
@@ -71,17 +73,20 @@ class _NoopSync extends TaskSync {
 
 class _OfflineBudgetsTransport implements BudgetsTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -273,54 +278,50 @@ void main() {
     expect(notesField.controller!.text, 'Original notes');
   });
 
-  testWidgets(
-    'empty notes open straight in the editor (no preview)',
-    (tester) async {
-      const noNotes = Task(
-        id: 'task-empty-notes',
-        userId: 'u1',
-        title: 'No notes yet',
-        priority: 'medium',
-        status: 'todo',
-        owner: 'user',
-        nagCount: 0,
-        createdAt: '2026-06-06T00:00:00Z',
-      );
-      final stub = _stub();
-      tester.view.devicePixelRatio = 1.0;
-      tester.view.physicalSize = const Size(800, 2200);
-      addTearDown(tester.view.reset);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
+  testWidgets('empty notes open straight in the editor (no preview)', (
+    tester,
+  ) async {
+    const noNotes = Task(
+      id: 'task-empty-notes',
+      userId: 'u1',
+      title: 'No notes yet',
+      priority: 'medium',
+      status: 'todo',
+      owner: 'user',
+      nagCount: 0,
+      createdAt: '2026-06-06T00:00:00Z',
+    );
+    final stub = _stub();
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 2200);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
           tasksProvider.overrideWith((ref) => stub),
           budgetsProvider.overrideWith((ref) => _stubBudgets()),
         ],
-          child: MaterialApp(
-            theme: buildAppTheme(),
-            home: Consumer(
-              builder: (ctx, ref, _) => Scaffold(
-                body: Center(
-                  child: ElevatedButton(
-                    onPressed: () => showTaskDetailSheet(ctx, ref, noNotes),
-                    child: const Text('open'),
-                  ),
+        child: MaterialApp(
+          theme: buildAppTheme(),
+          home: Consumer(
+            builder: (ctx, ref, _) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => showTaskDetailSheet(ctx, ref, noNotes),
+                  child: const Text('open'),
                 ),
               ),
             ),
           ),
         ),
-      );
-      await tester.tap(find.text('open'));
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('task-detail-notes')), findsOneWidget);
-      expect(
-        find.byKey(const Key('task-detail-notes-preview')),
-        findsNothing,
-      );
-    },
-  );
+    expect(find.byKey(const Key('task-detail-notes')), findsOneWidget);
+    expect(find.byKey(const Key('task-detail-notes-preview')), findsNothing);
+  });
 
   testWidgets(
     'notes containing a link render as a read-only LinkText preview',
@@ -332,9 +333,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-          tasksProvider.overrideWith((ref) => stub),
-          budgetsProvider.overrideWith((ref) => _stubBudgets()),
-        ],
+            tasksProvider.overrideWith((ref) => stub),
+            budgetsProvider.overrideWith((ref) => _stubBudgets()),
+          ],
           child: MaterialApp(
             theme: buildAppTheme(),
             home: Consumer(
@@ -394,9 +395,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-          tasksProvider.overrideWith((ref) => stub),
-          budgetsProvider.overrideWith((ref) => _stubBudgets()),
-        ],
+            tasksProvider.overrideWith((ref) => stub),
+            budgetsProvider.overrideWith((ref) => _stubBudgets()),
+          ],
           child: MaterialApp(
             theme: buildAppTheme(),
             home: Consumer(
@@ -418,10 +419,7 @@ void main() {
       await tester.tap(find.byKey(const Key('task-detail-notes-add-link')));
       await tester.pumpAndSettle();
 
-      await tester.enterText(
-        find.byKey(const Key('add-link-text')),
-        'docs',
-      );
+      await tester.enterText(find.byKey(const Key('add-link-text')), 'docs');
       await tester.enterText(
         find.byKey(const Key('add-link-url')),
         'https://a.io',
@@ -462,13 +460,21 @@ void main() {
     expect(find.byKey(const Key('task-detail-title')), findsNothing);
   });
 
+  // Both controls moved behind an affordance in the 2026-08-03 pass: TAGS
+  // into a popup (the sheet was dominated by an always-on field), and the
+  // allocated-budget field behind the BUDGET money dropdown. The SAVE
+  // semantics they exercise are unchanged, so these tests only gained the
+  // step that opens each surface.
+
   testWidgets('adding a tag + budget then Save passes them to updateTask', (
     tester,
   ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
-    // Type a tag and submit it (onSubmitted adds the chip).
+    // Open the tags popup, then type a tag and submit it.
+    await tester.tap(find.byKey(kTaskTagsChipKey));
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('task-detail-tag-input')),
       'work',
@@ -476,14 +482,16 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('task-detail-tag-work')), findsOneWidget);
+    await tester.tap(find.byKey(kTaskTagsDoneKey));
+    await tester.pumpAndSettle();
 
-    // Enter an allocated budget.
-    await tester.enterText(
-      find.byKey(const Key('task-detail-budget')),
-      '250',
-    );
+    // Reveal the allocated-budget field from the money dropdown, then fill it.
+    await tester.tap(find.byKey(kTaskBudgetMenuKey));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(kTaskBudgetAllocatedItemKey));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('task-detail-budget')), '250');
 
-    await tester.ensureVisible(find.byKey(const Key('task-detail-save')));
     await tester.tap(find.byKey(const Key('task-detail-save')));
     await tester.pumpAndSettle();
 
@@ -498,12 +506,17 @@ void main() {
     final stub = _stub();
     await openSheet(tester, stub);
 
-    // Type a tag but DON'T submit — Save must still capture it.
+    // Type a tag but DON'T submit, and close the popup — Save must still
+    // capture it (the controller is owned by the sheet, not by the popup).
+    await tester.tap(find.byKey(kTaskTagsChipKey));
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('task-detail-tag-input')),
       'urgent',
     );
-    await tester.ensureVisible(find.byKey(const Key('task-detail-save')));
+    await tester.tap(find.byKey(kTaskTagsDoneKey));
+    await tester.pumpAndSettle();
+
     await tester.tap(find.byKey(const Key('task-detail-save')));
     await tester.pumpAndSettle();
 

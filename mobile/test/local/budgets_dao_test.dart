@@ -416,8 +416,8 @@ void main() {
     });
 
     test(
-        'a plain applyLocalExpenseCreate never carries subtask_id (mirrors '
-        'task_id — the link is only ever set via a later PATCH)', () async {
+        'a plain applyLocalExpenseCreate (no link args) never carries '
+        'subtask_id or task_id — the unlinked create is unchanged', () async {
       final dao = await _freshDao();
       final created =
           await dao.applyLocalExpenseCreate('p1', 5.0, 'New expense');
@@ -429,6 +429,123 @@ void main() {
           outbox.firstWhere((o) => o.op == BudgetsOutboxOp.create);
       expect(createItem.payload.containsKey('subtask_id'), isFalse);
       expect(createItem.payload.containsKey('task_id'), isFalse);
+    });
+  });
+
+  // ── Expense CREATE: task/sub-task link (born-linked, no PATCH round-trip) ──
+  //
+  // Before this, an expense could only be linked by creating it unlinked and
+  // then PATCHing it — which meant the sub-task money chip stayed empty until
+  // the user re-opened the row. These lock the create path down.
+
+  group('BudgetsDao expense create task/subtask link', () {
+    test(
+        'taskId + subtaskId land in the returned Expense, the cache row AND '
+        'the outbox create payload', () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalExpenseCreate(
+        'p1',
+        12.0,
+        'Paint',
+        id: 'e-linked',
+        taskId: 't1',
+        subtaskId: 's1',
+      );
+      expect(created.taskId, 't1');
+      expect(created.subtaskId, 's1');
+
+      final row = await dao.getExpenseRow('e-linked');
+      expect(row?['task_id'], 't1');
+      expect(row?['subtask_id'], 's1');
+
+      final createItem = (await dao.readBudgetsOutbox())
+          .firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(createItem.payload['task_id'], 't1');
+      expect(createItem.payload['subtask_id'], 's1');
+    });
+
+    test('taskId alone leaves subtask_id null everywhere (key absent on wire)',
+        () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalExpenseCreate('p1', 8.0, 'Fuel',
+          id: 'e-task-only', taskId: 't1');
+      expect(created.taskId, 't1');
+      expect(created.subtaskId, isNull);
+
+      final row = await dao.getExpenseRow('e-task-only');
+      expect(row?['task_id'], 't1');
+      expect(row?['subtask_id'], isNull);
+
+      final createItem = (await dao.readBudgetsOutbox())
+          .firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(createItem.payload['task_id'], 't1');
+      // Absent, not present-and-null: the create body must stay byte-identical
+      // to the pre-link shape for anything the caller didn't ask for.
+      expect(createItem.payload.containsKey('subtask_id'), isFalse);
+    });
+
+    test(
+        'REGRESSION: create with neither link is byte-identical to the '
+        'pre-link payload (exact key set + values)', () async {
+      final dao = await _freshDao(now: () => '2026-08-03T10:00:00.000Z');
+      await dao.applyLocalExpenseCreate('p1', 5.0, 'Plain',
+          id: 'e-plain', currency: 'EUR', vendor: 'Shop');
+
+      final createItem = (await dao.readBudgetsOutbox())
+          .firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(
+        createItem.payload.keys.toSet(),
+        {'id', 'project_id', 'amount', 'description', 'currency', 'spent_at',
+            'vendor'},
+        reason: 'every existing caller must keep producing the same body',
+      );
+      expect(createItem.payload['spent_at'], '2026-08-03T10:00:00.000Z');
+    });
+
+    test(
+        'subtaskId WITHOUT taskId is rejected (ArgumentError) and persists '
+        'nothing — no cache row, no outbox op', () async {
+      final dao = await _freshDao();
+      await expectLater(
+        dao.applyLocalExpenseCreate('p1', 5.0, 'Orphan',
+            id: 'e-orphan', subtaskId: 's1'),
+        throwsArgumentError,
+      );
+      expect(await dao.getExpense('e-orphan'), isNull);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('blank/whitespace link ids normalize to null (never persisted)',
+        () async {
+      final dao = await _freshDao();
+      final created = await dao.applyLocalExpenseCreate('p1', 5.0, 'Blank',
+          id: 'e-blank', taskId: '  ', subtaskId: '');
+      expect(created.taskId, isNull);
+      expect(created.subtaskId, isNull);
+
+      final createItem = (await dao.readBudgetsOutbox())
+          .firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(createItem.payload.containsKey('task_id'), isFalse);
+      expect(createItem.payload.containsKey('subtask_id'), isFalse);
+    });
+
+    test(
+        'reenqueueOrphanedCreates rebuilds the create payload WITH the link '
+        '(a stranded born-linked expense must not heal into an unlinked row)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('p1', 30.0, 'Tiles',
+          id: 'e-stranded', taskId: 't1', subtaskId: 's1');
+      for (final o in await dao.readBudgetsOutbox()) {
+        await dao.deleteOutboxItem(o.seq);
+      }
+
+      expect(await dao.reenqueueOrphanedCreates(), 1);
+
+      final healed = (await dao.readBudgetsOutbox())
+          .firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(healed.payload['task_id'], 't1');
+      expect(healed.payload['subtask_id'], 's1');
     });
   });
 

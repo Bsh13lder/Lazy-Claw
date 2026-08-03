@@ -20,6 +20,7 @@ import 'notes/notes_body.dart';
 import 'settings/settings_prefs.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
+import 'tasks/add_task_submit.dart';
 import 'tasks/ai_task_badge.dart';
 import 'tasks/connected_task_row.dart';
 import 'tasks/overdue_view.dart';
@@ -408,26 +409,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       projects: ref.read(budgetsProvider).projects,
     );
     if (result == null || !mounted) return;
-    // A PROJECT-chip pick or `/token` that doesn't match an existing project
-    // (by name, case-insensitive) auto-creates it instead of landing in the
-    // old silent phantom-tag bucket.
-    final category = result.category;
-    if (category != null && category.isNotEmpty) {
-      await ref.read(budgetsProvider.notifier).ensureProject(category);
+    // One shared pipeline (project ensure → task create → optional linked
+    // expense) so this screen and Home can't drift — see add_task_submit.dart.
+    final outcome = await submitAddTaskResultWithRef(ref, result);
+    if (!mounted) return;
+    // The task is saved either way; only an expense that didn't attach needs
+    // saying out loud, because the user asked to spend money and it didn't
+    // happen.
+    final warning = outcome.expenseWarning;
+    if (warning != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(warning)));
     }
-    await ref
-        .read(tasksProvider.notifier)
-        .addTask(
-          result.title,
-          priority: result.priority,
-          dueDate: result.dueDate,
-          category: result.category,
-          reminderAt: result.reminderAt,
-          recurring: result.recurring,
-          recurUntil: result.recurUntil,
-          description: result.description,
-          steps: result.steps,
-        );
   }
 
   /// Open the "New Project" sheet. Reuses the same [AddProjectSheet] the Money

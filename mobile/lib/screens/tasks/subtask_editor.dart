@@ -22,6 +22,8 @@ class SubtaskEditor extends StatelessWidget {
     this.onOpenComments,
     this.expenseTotals = const {},
     this.expenseCurrency = 'USD',
+    this.savedSubtaskIds = const {},
+    this.onAddExpense,
   });
 
   final List<Subtask> subtasks;
@@ -34,17 +36,45 @@ class SubtaskEditor extends StatelessWidget {
   final Map<String, int> commentCounts;
 
   /// The sum of live (non-void) expenses linked to each sub-task, keyed by
-  /// sub-task id — "the money sign" on a sub-task row. A sub-task's id being
-  /// absent (or mapped to a non-positive total) hides the chip entirely;
-  /// this is display-only, mirroring [commentCounts]'s badge. Defaults to
-  /// `const {}` so every existing call site (task detail sheet, add-task
-  /// sheet, task row) compiles and renders unchanged.
+  /// sub-task id — the amount shown on "the money sign". A sub-task's id
+  /// being absent (or mapped to a non-positive total) just means "no money
+  /// yet"; whether the sign itself is RENDERED is decided by [onAddExpense] /
+  /// [savedSubtaskIds], not by this map. Defaults to `const {}` so every
+  /// existing call site (add-task sheet, task row) compiles and renders
+  /// unchanged.
   final Map<String, double> expenseTotals;
 
   /// The currency [expenseTotals] amounts are formatted in via [fmtMoney].
   /// A task's expenses all belong to the task's one project, hence one
   /// currency — there is no per-sub-task currency to track.
   final String expenseCurrency;
+
+  /// The sub-task ids that exist SERVER-SIDE (i.e. are part of the saved
+  /// task's `steps`), gating the tappable money affordance exactly the way
+  /// [commentCounts]'s key set gates the 💬 badge — and for the same reason:
+  /// an expense's `subtask_id`, like a comment's, can only point at a saved
+  /// sub-task. Filing one against an in-sheet, not-yet-saved row would replay
+  /// against an unknown id server-side (a definitive 400 the outbox then
+  /// drains, silently erasing the expense).
+  ///
+  /// A separate set rather than reusing [expenseTotals]'s keys because a
+  /// saved sub-task with NO money yet must still offer the affordance — that
+  /// is the whole point of it — and rather than reusing [commentCounts] so
+  /// money doesn't silently disappear on a caller that wires expenses but
+  /// not comments.
+  final Set<String> savedSubtaskIds;
+
+  /// When supplied, each SAVED sub-task's money sign becomes tappable and
+  /// invokes this with the tile's sub-task id — the caller opens the
+  /// task-scoped Add Expense sheet pinned to it (see
+  /// `TaskDetailSheet._addExpense`).
+  ///
+  /// Null (the default) keeps the pre-existing display-only behavior: the
+  /// chip renders only for sub-tasks that already have money, and does
+  /// nothing when touched. That is what keeps `add_task_sheet.dart` and
+  /// `task_row.dart` — neither of which passes any expense data — compiling
+  /// and rendering exactly as before.
+  final ValueChanged<String>? onAddExpense;
 
   /// When supplied, a tile shows a small comment icon (+count when > 0)
   /// between the title and the delete affordance ONLY when its sub-task's id
@@ -113,6 +143,10 @@ class SubtaskEditor extends StatelessWidget {
                 : () => onOpenComments!(s.id),
             expenseTotal: expenseTotals[s.id],
             expenseCurrency: expenseCurrency,
+            onAddExpense:
+                (onAddExpense == null || !savedSubtaskIds.contains(s.id))
+                ? null
+                : () => onAddExpense!(s.id),
           ),
         _AddSubtaskField(onAdd: _add),
       ],
@@ -133,6 +167,7 @@ class _SubtaskTile extends StatefulWidget {
     this.onOpenComments,
     this.expenseTotal,
     this.expenseCurrency = 'USD',
+    this.onAddExpense,
   });
 
   final Subtask subtask;
@@ -146,6 +181,10 @@ class _SubtaskTile extends StatefulWidget {
   /// [SubtaskEditor.expenseTotals].
   final double? expenseTotal;
   final String expenseCurrency;
+
+  /// Non-null turns the money sign into an ADD affordance — see
+  /// [SubtaskEditor.onAddExpense].
+  final VoidCallback? onAddExpense;
 
   @override
   State<_SubtaskTile> createState() => _SubtaskTileState();
@@ -231,8 +270,12 @@ class _SubtaskTileState extends State<_SubtaskTile> {
           // ── Title (inline-editable) ────────────────────────────────────────
           Expanded(child: _buildText(done)),
 
-          // ── Expense money chip (only when this sub-task has one) ────────────
-          if ((widget.expenseTotal ?? 0) > 0) _buildMoneyChip(),
+          // ── Money sign: tappable "add an expense here" when the caller
+          //    wired it, else the legacy display-only chip ──────────────────
+          if (widget.onAddExpense != null)
+            _buildMoneyAffordance()
+          else if ((widget.expenseTotal ?? 0) > 0)
+            _buildMoneyChip(),
 
           // ── Comments badge (only when the callback is wired) ────────────────
           if (widget.onOpenComments != null) _buildCommentBadge(),
@@ -255,11 +298,49 @@ class _SubtaskTileState extends State<_SubtaskTile> {
     );
   }
 
-  /// A small money icon + formatted total — "the money sign" on a sub-task
-  /// that has at least one expense linked to it. Display-only (no tap
-  /// handler): editing/removing the link happens from the expense's own
-  /// detail sheet, not here. Mirrors [_buildCommentBadge]'s row-affordance
-  /// shape (icon + text, same padding/sizing/muted color).
+  /// The TAPPABLE money sign: tap to add an expense pinned to this sub-task,
+  /// with the running total shown beside it once there is one. Rendered for
+  /// every saved sub-task, with or without money — mirroring exactly how
+  /// [_buildCommentBadge] renders with or without comments, because both are
+  /// "open the thing for this row" affordances rather than status readouts.
+  ///
+  /// Tinted accent (not muted) once money exists, so a sub-task that has cost
+  /// something still reads at a glance in a long checklist.
+  Widget _buildMoneyAffordance() {
+    final total = widget.expenseTotal ?? 0;
+    final hasMoney = total > 0;
+    final color = hasMoney ? AppColors.accent : AppColors.textMuted;
+    return GestureDetector(
+      key: ValueKey('subtask-expense-${widget.subtask.id}'),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        widget.onAddExpense?.call();
+      },
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.attach_money_rounded, size: 14, color: color),
+            if (hasMoney) ...[
+              const SizedBox(width: 2),
+              Text(
+                fmtMoney(widget.expenseCurrency, total),
+                style: AppText.caption.copyWith(color: color),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The legacy DISPLAY-ONLY money chip: icon + formatted total, no tap
+  /// handler. Still used by callers that pass [SubtaskEditor.expenseTotals]
+  /// without wiring [SubtaskEditor.onAddExpense], so those surfaces keep
+  /// reading money without gaining a write affordance they can't service.
+  /// Mirrors [_buildCommentBadge]'s shape (icon + text, same padding/sizing).
   Widget _buildMoneyChip() {
     return Padding(
       key: ValueKey('subtask-expense-${widget.subtask.id}'),

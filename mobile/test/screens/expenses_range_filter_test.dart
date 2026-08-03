@@ -178,7 +178,7 @@ void main() {
 
   group('Expenses ledger time-range filter', () {
     testWidgets(
-        'renders Today / Week / Month / All / Custom chips, Month default',
+        'renders Today / Week / Month / All / Custom chips, All default',
         (tester) async {
       await tester.runAsync(() async {
         await tester.pumpWidget(_buildApp(await _seed()));
@@ -191,12 +191,12 @@ void main() {
         // 'All' appears twice: the range chip + the project-filter chip.
         expect(find.text('All'), findsNWidgets(2));
         expect(find.text('Custom'), findsOneWidget);
-        // Default range = Month → the Week label is NOT shown.
+        // Default range = All → the Week label is NOT shown.
         expect(find.text('Last 7 days'), findsNothing);
       });
     });
 
-    testWidgets('default Month view shows today\'s expense', (tester) async {
+    testWidgets('default All view shows today\'s expense', (tester) async {
       await tester.runAsync(() async {
         await tester.pumpWidget(_buildApp(await _seed()));
         await _pump(tester);
@@ -212,13 +212,21 @@ void main() {
         await _pump(tester);
         await _openLedger(tester);
 
-        // Month is the default range → the stepper chevrons are present and the
-        // current-month label (from the pure helper) is shown.
+        // The ledger opens on All, NOT Month — see `_range`'s doc comment in
+        // expenses_screen.dart: a Month default silently hid every budget
+        // top-up made in a prior month. The stepper is therefore Month-only
+        // chrome that must stay absent until Month is actually selected.
+        expect(find.byTooltip('Previous month'), findsNothing);
+
+        await _tapAndAnimate(tester, find.text('Month'));
+
+        // Selecting Month reveals the chevrons and the current-month label
+        // (from the pure helper).
         expect(find.byTooltip('Previous month'), findsOneWidget);
         expect(find.byTooltip('Next month'), findsOneWidget);
         expect(find.text(expenseRangeLabel(ExpenseRange.month)), findsOneWidget);
 
-        // Switching to a non-month range hides the stepper.
+        // Switching to a non-month range hides the stepper again.
         await _tapAndAnimate(tester, find.text('Week'));
         expect(find.byTooltip('Previous month'), findsNothing);
       });

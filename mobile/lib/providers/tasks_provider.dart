@@ -208,7 +208,16 @@ class TasksNotifier extends StateNotifier<TasksState> {
   /// Trigger a sync (e.g. when reachability flips to true) then refresh.
   Future<void> syncNow() => _syncThenRefresh();
 
-  Future<void> addTask(
+  /// Create a task locally (optimistic) and return it, or null when the local
+  /// write threw (in which case `state.error` carries the reason).
+  ///
+  /// The return value exists so a caller can act on the task it just created —
+  /// specifically, the Add-Task sheet's expense chip needs the new task's id to
+  /// file a LINKED expense against it (`screens/tasks/add_task_submit.dart`).
+  /// The DAO already produced the row; discarding it here forced the caller to
+  /// guess which of `state.tasks` was theirs. Every pre-existing call site
+  /// awaits and ignores the result, which is unaffected.
+  Future<Task?> addTask(
     String title, {
     String? priority,
     String? dueDate,
@@ -254,8 +263,10 @@ class TasksNotifier extends StateNotifier<TasksState> {
       await _refreshFromCache();
       unawaited(_reminders?.scheduleForTask(created) ?? Future<void>.value());
       unawaited(_syncThenRefresh());
+      return created;
     } catch (e) {
       state = state.copyWith(error: e.toString());
+      return null;
     }
   }
 

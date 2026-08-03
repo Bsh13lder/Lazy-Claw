@@ -325,11 +325,27 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Create an expense under [projectId] (optimistic + offline-safe).
+  ///
+  /// [taskId]/[subtaskId] let the expense be born already linked, which is the
+  /// whole point of the "add expense from a task / sub-task" entry points: the
+  /// optimistic row carries the link immediately, so `subtaskExpenseTotals`
+  /// (and the sub-task money chip it feeds) update on the very next rebuild
+  /// instead of waiting for a sync round-trip. Both default to null so every
+  /// existing caller (the Money screen's Add Expense sheet) is unaffected.
+  ///
+  /// A [subtaskId] without a [taskId] is rejected by
+  /// [BudgetsDao.applyLocalExpenseCreate] (it violates the server's
+  /// `subtask_id implies task_id` invariant); the throw lands in the catch
+  /// below, so this returns false with `state.error` set and nothing is
+  /// written — same failure surface as any other local write error.
   Future<bool> addExpense(
     String projectId,
     double amount,
     String description, {
     String? vendor,
+    String? taskId,
+    String? subtaskId,
   }) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
@@ -349,6 +365,8 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
         vendor: vendor,
         projectName: projectName,
         currency: currency,
+        taskId: taskId,
+        subtaskId: subtaskId,
       );
       await _refreshFromCache();
       state = state.copyWith(isSubmitting: false);

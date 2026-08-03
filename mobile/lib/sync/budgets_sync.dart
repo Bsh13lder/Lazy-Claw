@@ -251,6 +251,11 @@ class BudgetsSync {
               currency: p['currency']?.toString(),
               spentAt: p['spent_at']?.toString(),
               notes: p['notes']?.toString(),
+              // Present only when the expense was born linked to a task /
+              // sub-task; `?.toString()` keeps an absent key as null so the
+              // repository omits it from the body entirely.
+              taskId: p['task_id']?.toString(),
+              subtaskId: p['subtask_id']?.toString(),
             );
             break;
           case BudgetsOutboxOp.update:

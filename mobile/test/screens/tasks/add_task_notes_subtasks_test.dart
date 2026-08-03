@@ -76,9 +76,10 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
 
-    await tester.ensureVisible(find.text('Add Task'));
-    await tester.pump();
-    await tester.tap(find.text('Add Task'));
+    // The submit affordance is the floating square, which is anchored to
+    // the sheet's viewport — no ensureVisible() needed, and that it is
+    // always hit-testable is exactly the point of it.
+    await tester.tap(find.byKey(kAddTaskSubmitKey));
     await tester.pumpAndSettle();
 
     expect(captured, isNotNull);
@@ -99,9 +100,10 @@ void main() {
     await tester.enterText(find.byType(TextField).first, 'Just a title');
     await tester.pump();
 
-    await tester.ensureVisible(find.text('Add Task'));
-    await tester.pump();
-    await tester.tap(find.text('Add Task'));
+    // The submit affordance is the floating square, which is anchored to
+    // the sheet's viewport — no ensureVisible() needed, and that it is
+    // always hit-testable is exactly the point of it.
+    await tester.tap(find.byKey(kAddTaskSubmitKey));
     await tester.pumpAndSettle();
 
     expect(captured, isNotNull);

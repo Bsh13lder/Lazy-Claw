@@ -1,28 +1,41 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/project_resolver.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
+import 'package:lazyclaw_mobile/core/smart_add_task_expense.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/subtask.dart';
 import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/screens/expenses/add_expense_sheet.dart'
     show AddProjectSheet;
-import 'package:lazyclaw_mobile/screens/expenses/project_color_picker.dart'
-    show ProjectColorDot;
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
+import 'package:lazyclaw_mobile/screens/tasks/add_task_expense_chip.dart';
+import 'package:lazyclaw_mobile/screens/tasks/add_task_result.dart';
 import 'package:lazyclaw_mobile/screens/tasks/chip_edit.dart';
 import 'package:lazyclaw_mobile/screens/tasks/recurrence_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
 import 'package:lazyclaw_mobile/screens/tasks/subtask_editor.dart';
+import 'package:lazyclaw_mobile/screens/tasks/task_project_suggestion_strip.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
+
+/// Key for the floating square save, shared with the tests (the button carries
+/// no visible label, so there is no text to find it by).
+const Key kAddTaskSubmitKey = Key('add-task-submit');
 
 /// A polished add-task bottom sheet with Todoist-style "smart add": as the user
 /// types, recognized natural-language tokens (due date, priority, `#project`)
 /// are parsed on-device and surfaced as chips. Parsed values pre-select the
 /// priority / due-date controls; manual taps always win.
+///
+/// The title field ALSO recognizes a money amount (`buy paint 40 eur #home
+/// tomorrow`) and offers a confirmation chip to file it as an expense linked
+/// to the new task. That path is opt-in by construction — see
+/// [_expenseArmed] and `add_task_expense_chip.dart` for why a bare number
+/// never arms it.
 ///
 /// Returns the data to the caller via [Navigator.pop] so the screen can invoke
 /// the provider without knowing about UI internals.
@@ -73,6 +86,16 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   /// Live parse of the current title text. Drives the detected-token chips and
   /// the default selections for priority / due date.
   ParsedTask _parsed = const ParsedTask(cleanTitle: '');
+
+  /// The money amount recognized in the title, or null. Detected AFTER
+  /// [_parsed] and only from the characters the task grammar did not claim —
+  /// see `core/smart_add_task_expense.dart` for why the two parsers are
+  /// composed rather than merged.
+  TaskExpenseMatch? _expenseMatch;
+
+  /// Whether the user has confirmed (or refused) filing that amount as an
+  /// expense. Sticky once touched — see [AddTaskExpenseArmState].
+  AddTaskExpenseArmState _expenseArm = const AddTaskExpenseArmState();
 
   /// Manual overrides. When set, they win over the parsed values. The due date
   /// is split into a date-only day string (`_manualDueDate`) and a separate
@@ -188,6 +211,26 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       ? (_manualRecurrence ?? Recurrence.none)
       : (_parsed.recurrence ?? Recurrence.none);
 
+  // ── Expense chip ────────────────────────────────────────────────────────────
+
+  /// Whether the task names a project at all. An expense MUST land in one, so
+  /// this gates the chip: no project → visibly disabled with a reason, rather
+  /// than a submit-time failure the user can't see coming.
+  bool get _expenseHasProject => (_effectiveCategory ?? '').trim().isNotEmpty;
+
+  /// Whether an expense will actually be filed on submit.
+  bool get _expenseArmed =>
+      _expenseArm.isArmed(_expenseMatch, hasProject: _expenseHasProject);
+
+  /// The existing project the expense would land in, or null when the task
+  /// names one that doesn't exist yet (it's created during submit). Only
+  /// supplies the currency the chip DISPLAYS — see [AddTaskExpenseChip].
+  Project? get _expenseProject {
+    final name = _effectiveCategory?.trim();
+    if (name == null || name.isEmpty) return null;
+    return resolveProjectMatch(name, _projects);
+  }
+
   // The project term is excluded once `_categoryTouched` (its chip is
   // suppressed below — see the SMART DETECTED row) so this doesn't show an
   // empty "SMART DETECTED" header when the parsed project is the only
@@ -222,18 +265,68 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
   void _onTitleChanged(String value) {
     final parsed = parseSmartAdd(value);
-    // Push the fresh spans into the controller so the field highlights the
-    // recognized tokens live; the chips below echo the resolved values.
-    _titleController.tokens = parsed.tokens;
-    setState(() => _parsed = parsed);
+    setState(() {
+      _parsed = parsed;
+      _expenseMatch = detectTaskExpense(parsed, value);
+    });
+    // After the state swap, so the highlight reflects the FRESH parse and the
+    // arm state it implies.
+    _syncTitleHighlight();
+  }
+
+  /// Toggle the expense chip. The user's choice is sticky from here on — a
+  /// later re-parse can never flip it back (in either direction).
+  void _toggleExpense() {
+    // Read the CURRENT armed value before the swap, so the toggle inverts what
+    // the user actually sees rather than the default it would resolve to.
+    final next = _expenseArm.toggled(_expenseArmed);
+    setState(() => _expenseArm = next);
+    _syncTitleHighlight();
+  }
+
+  /// Push the fresh spans into the controller so the field highlights the
+  /// recognized tokens live; the chips below echo the resolved values.
+  ///
+  /// The amount span is included ONLY while the expense is armed. That keeps
+  /// this field's existing contract intact — a highlighted token is a consumed
+  /// token is a token stripped from the saved title — instead of painting a
+  /// number as "recognized" and then leaving it in the title anyway. Tapping
+  /// the chip is therefore visible in the field itself, which is the point.
+  void _syncTitleHighlight() {
+    final match = _expenseMatch;
+    _titleController.tokens = match != null && _expenseArmed
+        ? mergeExpenseToken(_parsed.tokens, match.token)
+        : _parsed.tokens;
   }
 
   Future<void> _submit() async {
     // Re-parse from the live controller so a submit-via-keyboard can't race the
     // onChanged callback.
-    final parsed = parseSmartAdd(_titleController.text);
-    final clean = parsed.cleanTitle.trim();
-    final title = clean.isNotEmpty ? clean : _titleController.text.trim();
+    final raw = _titleController.text;
+    final parsed = parseSmartAdd(raw);
+
+    // Effective category: a manual PROJECT-chip pick always wins over the
+    // live-parsed `/token`, re-derived from the fresh parse (not `_parsed`)
+    // for the same submit-can't-race-onChanged reason as priority/due date.
+    // Hoisted above the title because the expense decision depends on it.
+    final category = _categoryTouched ? _category : parsed.project;
+
+    // Re-derive the expense decision from the FRESH parse too. `_expenseArm`
+    // is the only piece carried over from the live state — it holds the user's
+    // explicit tap, which by definition can't be re-derived from text.
+    final expense = detectTaskExpense(parsed, raw);
+    final fileExpense = _expenseArm.isArmed(
+      expense,
+      hasProject: (category ?? '').trim().isNotEmpty,
+    );
+
+    // An armed amount is a CONSUMED token, so it comes out of the title —
+    // same rule every other recognized token in this field follows. An
+    // un-armed one is not consumed, so the digits stay put.
+    final clean = fileExpense && expense != null
+        ? titleWithoutExpenseToken(raw, parsed, expense.token)
+        : parsed.cleanTitle.trim();
+    final title = clean.trim().isNotEmpty ? clean.trim() : raw.trim();
     if (title.isEmpty) return;
 
     final priority = _manualPriority ?? parsed.priority ?? 'medium';
@@ -278,14 +371,9 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     final notes = _notesController.text.trim();
     final steps = serializeSubtasks(_subtasks);
 
-    // Effective category: a manual PROJECT-chip pick always wins over the
-    // live-parsed `/token`, re-derived from the fresh parse (not `_parsed`)
-    // for the same submit-can't-race-onChanged reason as priority/due date.
-    final category = _categoryTouched ? _category : parsed.project;
-
     setState(() => _submitting = true);
     Navigator.of(context).pop(
-      _AddTaskResult(
+      AddTaskResult(
         title: title,
         priority: priority,
         dueDate: dueDate,
@@ -295,6 +383,8 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
         recurUntil: recurUntil,
         description: notes.isEmpty ? null : notes,
         steps: steps,
+        // The single gate: null here means no money is ever spent downstream.
+        expenseAmount: fileExpense ? expense?.amount : null,
       ),
     );
   }
@@ -327,7 +417,14 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
         ref.watch(settingsPrefsProvider).valueOrNull?.defaultReminderMinutes ??
         kDefaultReminderMinutes;
 
-    return SingleChildScrollView(
+    return LzFloatingSubmitLayout(
+      submit: LzFloatingSubmit(
+        key: kAddTaskSubmitKey,
+        tooltip: 'Add Task',
+        icon: Icons.add_rounded,
+        loading: _submitting,
+        onPressed: _submit,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -346,7 +443,7 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
           // ── `/` project suggestion strip (live, focus-gated) ────────────
           if (_parsed.project != null && _titleFocusNode.hasFocus)
-            _ProjectSuggestionStrip(
+            TaskProjectSuggestionStrip(
               token: _parsed.project!,
               projects: _projects,
               onSelect: _applyProjectSuggestion,
@@ -356,8 +453,20 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
           // ── Syntax legend (discoverability) ────────────────────────────
           const SizedBox(height: AppSpacing.xs),
           Text(
-            'tom · fri 9am · in 2h · morning · !p1 · #project',
+            'tom · fri 9am · in 2h · morning · !p1 · #project · 40 eur',
             style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+
+          // ── Expense confirmation (live, opt-in) ────────────────────────
+          // Sits directly under the field, above the passive "SMART
+          // DETECTED" echo, because it is a DECISION and not a readout: it
+          // is the only thing here that can spend money.
+          AddTaskExpenseChip(
+            match: _expenseMatch,
+            armed: _expenseArmed,
+            project: _expenseProject,
+            hasProject: _expenseHasProject,
+            onToggle: _toggleExpense,
           ),
 
           // ── Smart-detected tokens (live) ───────────────────────────────
@@ -724,17 +833,11 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             subtasks: _subtasks,
             onChanged: (next) => setState(() => _subtasks = next),
           ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Submit button ──────────────────────────────────────────────
-          LzButton.primary(
-            label: 'Add Task',
-            icon: Icons.add,
-            loading: _submitting,
-            expand: true,
-            onPressed: _submit,
-          ),
+          // No trailing submit button: it moved to the floating square above,
+          // which is anchored to the sheet's viewport instead of the end of
+          // this column (see [LzFloatingSubmit]'s "WHY this exists"). The
+          // bottom gap the button used to need is reserved by
+          // [LzFloatingSubmitLayout].
         ],
       ),
     );
@@ -760,6 +863,11 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       _category = result.category;
       _categoryTouched = true;
     });
+    // Gaining (or losing) a project can flip the expense chip between armed
+    // and disabled, and the field highlight has to follow it — otherwise the
+    // "highlighted == will be filed" invariant holds only until the next
+    // keystroke.
+    _syncTitleHighlight();
   }
 
   /// Open the shared "New Project" sheet (same one Tasks → Projects and Money
@@ -788,6 +896,9 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
               // again.
               _projects = ref.read(budgetsProvider).projects;
             });
+            // Same reason as [_openProjectPicker]: the task just gained a
+            // project, which can arm the expense chip.
+            _syncTitleHighlight();
           }
           return ok;
         },
@@ -814,11 +925,19 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
         text: next,
         selection: TextSelection.collapsed(offset: next.length),
       );
-      _titleController.tokens = reparsed.tokens;
       _parsed = reparsed;
+      // This path REWRITES the title, so the amount span must be re-derived
+      // against the new text like every other token. Carrying the old match
+      // forward would leave the chip quoting an amount from characters that
+      // have shifted (the `/token` was just deleted out of the middle of the
+      // string) and hand a stale span to the highlighter.
+      _expenseMatch = detectTaskExpense(reparsed, next);
       _category = projectName;
       _categoryTouched = true;
     });
+    // Outside setState so it reads the freshly-swapped `_parsed`/`_expenseMatch`
+    // — same ordering as [_onTitleChanged].
+    _syncTitleHighlight();
   }
 
   /// The suggestion strip's "Create project '{token}'" row. Mirrors
@@ -940,139 +1059,6 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   String _isoTomorrow() => _isoFor(DateTime.now().add(const Duration(days: 1)));
 }
 
-/// Live `/token` project suggestions, shown under the title field while the
-/// user is mid-token (see [_AddTaskSheetState] wiring). Rows are the
-/// case-insensitive SUBSTRING matches over [projects] (max 4, exact match
-/// first, then prefix, then substring — so an exact match can't be pushed
-/// outside the visible window by source-order while [hasExactMatch] still
-/// hides the create row), deduped by lowercased name, plus a trailing
-/// "Create project '{token}'" row when no project name EXACTLY matches the
-/// typed token. Bounded-height inline dropdown, matching the
-/// [SheetFormulaHelper]-style autocomplete pattern used elsewhere
-/// (sheet_formula_bar.dart).
-class _ProjectSuggestionStrip extends StatelessWidget {
-  const _ProjectSuggestionStrip({
-    required this.token,
-    required this.projects,
-    required this.onSelect,
-    required this.onCreate,
-  });
-
-  /// The raw token text parsed from the title (no leading `#`/`/`).
-  final String token;
-  final List<Project> projects;
-
-  /// Called with the exact matched project's name.
-  final ValueChanged<String> onSelect;
-
-  /// Called with [token] when the "Create project" row is tapped.
-  final ValueChanged<String> onCreate;
-
-  @override
-  Widget build(BuildContext context) {
-    final needle = token.toLowerCase();
-    // Bucket by match strength (exact / prefix / substring) instead of a
-    // single source-order filter, then dedupe by lowercased name — a
-    // duplicate name would otherwise produce two rows sharing the same
-    // ValueKey (a debug assert). Buckets preserve [projects]' original
-    // relative order within themselves.
-    final exact = <Project>[];
-    final prefix = <Project>[];
-    final substring = <Project>[];
-    final seenNames = <String>{};
-    for (final p in projects) {
-      final name = p.name.toLowerCase();
-      if (!name.contains(needle)) continue;
-      if (!seenNames.add(name)) continue;
-      if (name == needle) {
-        exact.add(p);
-      } else if (name.startsWith(needle)) {
-        prefix.add(p);
-      } else {
-        substring.add(p);
-      }
-    }
-    final matches = [...exact, ...prefix, ...substring].take(4).toList();
-    final hasExactMatch = exact.isNotEmpty;
-
-    return Container(
-      margin: const EdgeInsets.only(top: AppSpacing.xs),
-      constraints: const BoxConstraints(maxHeight: 168),
-      decoration: BoxDecoration(
-        color: AppColors.bgSurfaceElevated,
-        borderRadius: AppRadii.rMd,
-        border: Border.all(color: AppColors.borderDefault),
-      ),
-      child: ListView(
-        shrinkWrap: true,
-        padding: EdgeInsets.zero,
-        children: [
-          for (final p in matches)
-            LzListTile(
-              key: ValueKey('project-suggest-${p.name}'),
-              dense: true,
-              leading: ProjectColorDot(hex: p.color, size: 12),
-              title: p.name,
-              onTap: () => onSelect(p.name),
-            ),
-          if (!hasExactMatch)
-            LzListTile(
-              key: const Key('project-suggest-create'),
-              dense: true,
-              leading: Icon(
-                Icons.add_rounded,
-                size: 16,
-                color: AppColors.accent,
-              ),
-              title: "Create project '$token'",
-              titleStyle: AppText.body.copyWith(
-                color: AppColors.accent,
-                fontWeight: FontWeight.w600,
-              ),
-              onTap: () => onCreate(token),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Data returned by [AddTaskSheet] when the user taps "Add Task".
-class _AddTaskResult {
-  const _AddTaskResult({
-    required this.title,
-    required this.priority,
-    this.dueDate,
-    this.category,
-    this.reminderAt,
-    this.recurring,
-    this.recurUntil,
-    this.description,
-    this.steps,
-  });
-  final String title;
-  final String priority;
-  final String? dueDate;
-  final String? category;
-
-  /// Absolute reminder instant (`due − lead`), or null for no reminder.
-  final String? reminderAt;
-
-  /// A standard 5-field cron expression when the task repeats, else null.
-  final String? recurring;
-
-  /// The series' end day (`yyyy-MM-dd`) when the task repeats until a date,
-  /// else null (repeats forever / does not repeat).
-  final String? recurUntil;
-
-  /// Free-form notes → the task's `description`, or null when blank.
-  final String? description;
-
-  /// The serialized `[{id,title,done}]` sub-task checklist JSON, or null for an
-  /// empty list (see [serializeSubtasks]).
-  final String? steps;
-}
-
 // ── Public helper ─────────────────────────────────────────────────────────────
 
 /// Show the add-task sheet and return the submitted result, or null if
@@ -1085,26 +1071,20 @@ class _AddTaskResult {
 /// feeds the PROJECT chip's picker (and highlights the caller's existing
 /// projects) — pass `ref.read(budgetsProvider).projects`; omitting it just
 /// leaves the picker with nothing besides "No project" / "＋ New project".
-Future<
-  ({
-    String title,
-    String priority,
-    String? dueDate,
-    String? category,
-    String? reminderAt,
-    String? recurring,
-    String? recurUntil,
-    String? description,
-    String? steps,
-  })?
->
-showAddTaskSheet(
+///
+/// Returns an [AddTaskResult] (previously an equivalent 9-field anonymous
+/// record, re-typed when the result grew an `expenseAmount` and had to be
+/// consumed OUTSIDE this file by `add_task_submit.dart`). Field access is
+/// unchanged for callers. Feed the result to `submitAddTaskResultWithRef` —
+/// it owns the "create the task, then file the linked expense" ordering that
+/// `expenseAmount` depends on.
+Future<AddTaskResult?> showAddTaskSheet(
   BuildContext context, {
   DateTime? initialDueDate,
   ReminderLead defaultLead = kDefaultReminderLead,
   List<Project> projects = const [],
-}) async {
-  final result = await LzBottomSheet.show<_AddTaskResult>(
+}) {
+  return LzBottomSheet.show<AddTaskResult>(
     context,
     title: 'New Task',
     builder: (_) => AddTaskSheet(
@@ -1112,17 +1092,5 @@ showAddTaskSheet(
       defaultLead: defaultLead,
       projects: projects,
     ),
-  );
-  if (result == null) return null;
-  return (
-    title: result.title,
-    priority: result.priority,
-    dueDate: result.dueDate,
-    category: result.category,
-    reminderAt: result.reminderAt,
-    recurring: result.recurring,
-    recurUntil: result.recurUntil,
-    description: result.description,
-    steps: result.steps,
   );
 }

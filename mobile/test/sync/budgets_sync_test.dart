@@ -282,6 +282,24 @@ void main() {
   });
 
   group('BudgetsSync.push', () {
+    test(
+        'an expense create born with a task/sub-task link replays the link '
+        'into the POST body (server accepts task_id/subtask_id on create)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Reno', id: 'p1');
+      await dao.applyLocalExpenseCreate('p1', 40.0, 'Tiles',
+          id: 'e-linked', taskId: 't1', subtaskId: 's1');
+
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      final post = transport.calls.firstWhere(
+          (c) => c.method == 'POST' && c.path.endsWith('/expenses'));
+      expect(post.body?['task_id'], 't1');
+      expect(post.body?['subtask_id'], 's1');
+    });
+
     test('drains both entities in seq order and clears the outbox', () async {
       final dao = await _freshDao();
       await dao.applyLocalProjectCreate('Proj', id: 'p1');

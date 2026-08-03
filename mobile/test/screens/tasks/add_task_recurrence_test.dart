@@ -82,9 +82,10 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recurrence-opt-daily')));
     await tester.pump();
 
-    await tester.ensureVisible(find.text('Add Task'));
-    await tester.pump();
-    await tester.tap(find.text('Add Task'));
+    // The submit affordance is the floating square, which is anchored to
+    // the sheet's viewport — no ensureVisible() needed, and that it is
+    // always hit-testable is exactly the point of it.
+    await tester.tap(find.byKey(kAddTaskSubmitKey));
     await tester.pumpAndSettle();
 
     // No due time → default 09:00 daily cron.
@@ -104,9 +105,10 @@ void main() {
     );
     await tester.pump();
 
-    await tester.ensureVisible(find.text('Add Task'));
-    await tester.pump();
-    await tester.tap(find.text('Add Task'));
+    // The submit affordance is the floating square, which is anchored to
+    // the sheet's viewport — no ensureVisible() needed, and that it is
+    // always hit-testable is exactly the point of it.
+    await tester.tap(find.byKey(kAddTaskSubmitKey));
     await tester.pumpAndSettle();
 
     expect(captured?.recurring, '0 17 * * 1');
@@ -128,9 +130,10 @@ void main() {
     await tester.enterText(find.byType(TextField).first, 'buy milk tomorrow');
     await tester.pump();
 
-    await tester.ensureVisible(find.text('Add Task'));
-    await tester.pump();
-    await tester.tap(find.text('Add Task'));
+    // The submit affordance is the floating square, which is anchored to
+    // the sheet's viewport — no ensureVisible() needed, and that it is
+    // always hit-testable is exactly the point of it.
+    await tester.tap(find.byKey(kAddTaskSubmitKey));
     await tester.pumpAndSettle();
 
     expect(captured, isNotNull);

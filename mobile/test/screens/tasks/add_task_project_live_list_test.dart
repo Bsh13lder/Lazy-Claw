@@ -31,17 +31,20 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class _OfflineBudgetsTransport implements BudgetsTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -62,13 +65,13 @@ class _NopProbe implements ConnectivityProbe {
 int _dbSeq = 0;
 
 Future<Database> _openMemDb() => databaseFactoryFfi.openDatabase(
-      'file:add_task_live_projects_${_dbSeq++}?mode=memory&cache=shared',
-      options: OpenDatabaseOptions(
-        version: kAppDbVersion,
-        singleInstance: false,
-        onCreate: (db, _) => createAppDbSchema(db),
-      ),
-    );
+  'file:add_task_live_projects_${_dbSeq++}?mode=memory&cache=shared',
+  options: OpenDatabaseOptions(
+    version: kAppDbVersion,
+    singleInstance: false,
+    onCreate: (db, _) => createAppDbSchema(db),
+  ),
+);
 
 /// Settle after a DB-touching action (project create) — NOT `pumpAndSettle`.
 /// `AddProjectSheet`'s indeterminate `CircularProgressIndicator` (shown while
@@ -94,8 +97,9 @@ void main() {
   Widget host(Database db) => ProviderScope(
     overrides: [
       appDatabaseProvider.overrideWithValue(db),
-      budgetsRepositoryProvider
-          .overrideWithValue(BudgetsRepository(_OfflineBudgetsTransport())),
+      budgetsRepositoryProvider.overrideWithValue(
+        BudgetsRepository(_OfflineBudgetsTransport()),
+      ),
       reachabilityProvider.overrideWithValue(Reachability(_NopProbe())),
     ],
     child: MaterialApp(
@@ -181,14 +185,16 @@ void main() {
         expect(
           renovationRow,
           findsOneWidget,
-          reason: 'the just-created project must be a selectable row in the '
+          reason:
+              'the just-created project must be a selectable row in the '
               're-opened picker, not absent',
         );
         final tile = tester.widget<LzListTile>(renovationRow);
         expect(
           tile.trailing,
           isNotNull,
-          reason: 'the just-created project must show as the CURRENT '
+          reason:
+              'the just-created project must show as the CURRENT '
               'selection (check icon), not unchecked',
         );
 
@@ -196,10 +202,17 @@ void main() {
         // submit — the category still carries through end to end.
         await tester.tap(renovationRow);
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('Add Task'));
-        await tester.pump();
-        await tester.tap(find.text('Add Task'));
-        await tester.pumpAndSettle();
+        // The submit affordance is the floating square, which is anchored to
+        // the sheet's viewport — no ensureVisible() needed, and that it is
+        // always hit-testable is exactly the point of it.
+        await tester.tap(find.byKey(kAddTaskSubmitKey));
+        // `_settle`, not `pumpAndSettle`: the project create earlier in this
+        // test left a real sqflite round-trip (BudgetsNotifier's fire-and-
+        // forget `_syncThenRefresh`) in flight, and `pumpAndSettle` gives the
+        // ffi isolate no REAL event-loop gap to land it. Without this the
+        // work resolves AFTER the ProviderScope is torn down and the notifier
+        // throws "used after dispose" post-test.
+        await _settle(tester);
 
         expect(captured, isTrue);
         expect(capturedCategory, 'Renovation');
@@ -219,10 +232,7 @@ void main() {
         await tester.tap(find.text('open'));
         await tester.pumpAndSettle();
 
-        await tester.enterText(
-          find.byType(TextField).first,
-          'buy paint /Reno',
-        );
+        await tester.enterText(find.byType(TextField).first, 'buy paint /Reno');
         await tester.pump();
 
         await tester.tap(find.byKey(const Key('project-suggest-create')));
@@ -233,10 +243,7 @@ void main() {
         // row) — the old bug kept offering to create it again because the
         // strip read the construction-time snapshot, not the freshly-created
         // project.
-        await tester.enterText(
-          find.byType(TextField).first,
-          'buy paint /Reno',
-        );
+        await tester.enterText(find.byType(TextField).first, 'buy paint /Reno');
         await tester.pump();
 
         expect(
@@ -247,7 +254,8 @@ void main() {
         expect(
           find.byKey(const Key('project-suggest-create')),
           findsNothing,
-          reason: 'an exact match must hide the create row — otherwise the '
+          reason:
+              'an exact match must hide the create row — otherwise the '
               'user can spawn a duplicate project with the same name',
         );
       });

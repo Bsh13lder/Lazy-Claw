@@ -1,18 +1,30 @@
-// Widget tests for the Add Expense sheet's smart-typing Description field:
-//   * typing the user's literal example pre-fills the Amount field + resolves
-//     the `#project` token to an existing project,
-//   * a manual edit to the Amount field always wins over a later re-parse,
-//   * a typed bare amount (no currency in the text) still calls onSubmit with
-//     the same 4-arg shape the manual-entry path always used — pinning that
-//     quick-typing introduces no NEW currency divergence,
-//   * an unmatched `#project` token shows the create-project suggestion row,
-//     and tapping it creates + applies the project.
+// Widget tests for the Add Expense sheet.
+//
+// Field ORDER (2026-08-03): Description is first + autofocused, Amount second.
+// The Description field is the smart one — typing `spent on #clubbay 25`
+// live-parses the amount and the `#project` token and pre-fills everything
+// below it. Opening on the Amount field raised a numeric keypad and fought
+// that whole interaction, so the order was flipped. The tests below pin BOTH
+// the new order AND that the smart-parse pre-fills survived the reorder (the
+// actual regression risk).
+//
+// Submit affordance: the full-width "Add Expense" button used to sit at the
+// END of the column, which meant a grown form (suggestion strip + keyboard)
+// pushed it past the sheet's bottom edge — users read that as "there is no
+// save button". It is now an [LzFloatingSubmit] pinned to the bottom-right of
+// the sheet viewport, keyed `expense-submit-fab`.
+//
+// Also covered: manual-amount-wins-over-reparse, the `#project` suggestion
+// strip (match / ambiguous / create), and task-scoped mode's LOCKED project
+// field (see also test/screens/expenses/add_expense_for_task_test.dart).
 //
 // AddExpenseSheet only reads `budgetsProvider` from the "Create project" path
 // (everything else is plain callbacks), so most tests need nothing but a bare
 // ProviderScope; only the create-flow test overrides it with a stub notifier
 // backed by a throwing fake Database (never touched — see
 // expense_detail_sheet_test.dart, which established this pattern).
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -108,21 +120,27 @@ _StubBudgetsNotifier _stub({List<Project> projects = const []}) {
 }
 
 void main() {
+  // NOTE: the sheet now owns its own SingleChildScrollView (via
+  // LzFloatingSubmitLayout), so the host must give it BOUNDED height and must
+  // NOT wrap it in another scroll view — nesting two vertical viewports gives
+  // the inner one unbounded height and throws.
   Widget host({
     required List<Project> projects,
     String? initialProjectId,
+    String? lockedProjectId,
+    String? contextLabel,
     required Future<bool> Function(String, double, String, String?) onSubmit,
     _StubBudgetsNotifier? budgetsStub,
   }) {
     final sheet = MaterialApp(
       theme: buildAppTheme(),
       home: Scaffold(
-        body: SingleChildScrollView(
-          child: AddExpenseSheet(
-            projects: projects,
-            initialProjectId: initialProjectId,
-            onSubmit: onSubmit,
-          ),
+        body: AddExpenseSheet(
+          projects: projects,
+          initialProjectId: initialProjectId,
+          lockedProjectId: lockedProjectId,
+          contextLabel: contextLabel,
+          onSubmit: onSubmit,
         ),
       ),
     );
@@ -135,9 +153,80 @@ void main() {
 
   Finder amountField() => find.byKey(const Key('expense-amount-field'));
   Finder descriptionField() => find.byKey(const Key('expense-description-field'));
+  Finder submitFab() => find.byKey(const Key('expense-submit-fab'));
 
   String amountText(WidgetTester tester) =>
       tester.widget<TextField>(amountField()).controller!.text;
+
+  // ── C1: field order ───────────────────────────────────────────────────────
+
+  testWidgets(
+    'Description is the FIRST field and holds focus on open; Amount is second',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+      await tester.pump();
+
+      final fields = find.byType(TextField);
+      expect(
+        tester.widget<TextField>(fields.at(0)).key,
+        const Key('expense-description-field'),
+      );
+      expect(
+        tester.widget<TextField>(fields.at(1)).key,
+        const Key('expense-amount-field'),
+      );
+
+      // Autofocus lands on Description, not on the numeric Amount keypad.
+      final desc = tester.widget<EditableText>(
+        find.descendant(of: descriptionField(), matching: find.byType(EditableText)),
+      );
+      expect(desc.focusNode.hasFocus, isTrue);
+      expect(tester.widget<TextField>(amountField()).autofocus, isFalse);
+    },
+  );
+
+  testWidgets(
+    'the keyboard Next chain matches the new order: Description → Amount → '
+    'Vendor(done)',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      final fields = find.byType(TextField);
+      expect(
+        tester.widget<TextField>(fields.at(0)).textInputAction,
+        TextInputAction.next,
+      );
+      expect(
+        tester.widget<TextField>(fields.at(1)).textInputAction,
+        TextInputAction.next,
+      );
+      // Vendor is the last field — it submits.
+      expect(
+        tester.widget<TextField>(fields.at(2)).textInputAction,
+        TextInputAction.done,
+      );
+    },
+  );
+
+  testWidgets(
+    'the example hint stays attached to the Description field',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      expect(find.text('25 · €45.50 · 40 eur · #project'), findsOneWidget);
+    },
+  );
+
+  // ── Smart-typing (must survive the reorder) ───────────────────────────────
 
   testWidgets(
     'typing the literal example pre-fills the amount and resolves the project',
@@ -274,9 +363,7 @@ void main() {
       await tester.enterText(descriptionField(), 'spent on #clubbay 25');
       await tester.pump();
 
-      await tester.ensureVisible(find.text('Add Expense'));
-      await tester.pump();
-      await tester.tap(find.text('Add Expense'));
+      await tester.tap(submitFab());
       await tester.pumpAndSettle();
 
       expect(capturedProjectId, 'p1');
@@ -336,6 +423,152 @@ void main() {
         find.byKey(const Key('expense-project-suggest-create')),
         findsNothing,
       );
+    },
+  );
+
+  // ── C2: the floating square submit ────────────────────────────────────────
+
+  testWidgets(
+    'the submit affordance is the keyed floating square — the old full-width '
+    '"Add Expense" button is GONE (not shipped alongside it)',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      expect(submitFab(), findsOneWidget);
+      expect(find.widgetWithText(LzButton, 'Add Expense'), findsNothing);
+
+      // It carries no visible label, so it MUST announce itself.
+      expect(tester.widget<LzFloatingSubmit>(submitFab()).tooltip, 'Add expense');
+    },
+  );
+
+  testWidgets(
+    'the floating submit shows a spinner and is disabled while submitting',
+    (tester) async {
+      final gate = Completer<bool>();
+      var calls = 0;
+
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) {
+          calls++;
+          return gate.future;
+        },
+      ));
+
+      await tester.enterText(descriptionField(), 'taxi 25');
+      await tester.pump();
+
+      await tester.tap(submitFab());
+      await tester.pump();
+
+      expect(calls, 1);
+      final fab = tester.widget<LzFloatingSubmit>(submitFab());
+      expect(fab.loading, isTrue);
+      expect(fab.onPressed, isNull, reason: 're-tap must be impossible');
+      expect(
+        find.descendant(
+          of: submitFab(),
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+
+      // Settle the in-flight submit so the spinner stops (pumpAndSettle would
+      // otherwise spin forever on the indeterminate indicator).
+      gate.complete(false);
+      await tester.pumpAndSettle();
+      expect(tester.widget<LzFloatingSubmit>(submitFab()).loading, isFalse);
+    },
+  );
+
+  testWidgets(
+    'submitting with an invalid amount surfaces the inline error and does not '
+    'call onSubmit',
+    (tester) async {
+      var calls = 0;
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async {
+          calls++;
+          return true;
+        },
+      ));
+
+      await tester.enterText(descriptionField(), 'coffee');
+      await tester.pump();
+      await tester.tap(submitFab());
+      await tester.pump();
+
+      expect(calls, 0);
+      expect(find.text('Enter a valid amount'), findsOneWidget);
+    },
+  );
+
+  // ── C3: task-scoped mode (locked project) ─────────────────────────────────
+
+  testWidgets(
+    'normal mode keeps the editable project dropdown',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay')],
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      expect(find.byType(DropdownButton<String>), findsOneWidget);
+      expect(find.byKey(const Key('expense-project-locked')), findsNothing);
+      expect(find.byKey(const Key('expense-context-label')), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'task-scoped mode locks the project (read-only, no dropdown) and shows the '
+    'context label',
+    (tester) async {
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay'), _project('p2', 'Marketing')],
+        initialProjectId: 'p2',
+        lockedProjectId: 'p1',
+        contextLabel: 'Sub-task: Buy paint',
+        onSubmit: (_, _, _, _) async => true,
+      ));
+
+      expect(find.byType(DropdownButton<String>), findsNothing);
+      expect(find.byKey(const Key('expense-project-locked')), findsOneWidget);
+      expect(find.text('clubbay'), findsOneWidget);
+      expect(find.text('Sub-task: Buy paint'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'a #project token can NOT re-file a task-scoped expense — the lock wins '
+    'and no suggestion strip is offered',
+    (tester) async {
+      String? capturedProjectId;
+      await tester.pumpWidget(host(
+        projects: [_project('p1', 'clubbay'), _project('p2', 'Marketing')],
+        lockedProjectId: 'p1',
+        onSubmit: (projectId, _, _, _) async {
+          capturedProjectId = projectId;
+          return true;
+        },
+      ));
+
+      await tester.enterText(descriptionField(), 'paint #marketing 25');
+      await tester.pump();
+
+      expect(
+        find.byKey(const Key('expense-project-suggest-create')),
+        findsNothing,
+      );
+
+      await tester.tap(submitFab());
+      await tester.pumpAndSettle();
+
+      expect(capturedProjectId, 'p1');
     },
   );
 }

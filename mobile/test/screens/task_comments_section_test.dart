@@ -1,8 +1,14 @@
-// Widget tests for the task-level comment thread + composer.
+// Widget tests for the comment thread + composer.
 //
-// Provider-free by design (per the task brief): TaskCommentsSection takes
-// plain callbacks (onAdd/onDelete/onAddLink), so these tests exercise it
-// directly with a bare MaterialApp host — no ProviderScope, no DAO/DB.
+// Provider-free by design: showCommentsSheet takes plain callbacks
+// (onAdd/onDelete/onAddLink), so these tests drive it from a bare MaterialApp
+// host — no ProviderScope, no DAO/DB.
+//
+// The standalone `TaskCommentsSection` widget these tests used to mount was
+// deleted with D4 (2026-08-03): task-level comments moved OUT of an inline
+// section at the bottom of the detail sheet and into this same popup, so
+// there is exactly one comments surface again. The body under test is
+// unchanged — only the way it is presented moved.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +18,9 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:lazyclaw_mobile/widgets/link_text.dart';
 
 void main() {
+  /// Mounts the comments body directly (no modal route) so these tests stay
+  /// about the thread + composer rather than about sheet presentation, which
+  /// the `showCommentsSheet` group below covers.
   Widget host({
     required List<TaskComment> comments,
     required ValueChanged<String> onAdd,
@@ -21,14 +30,34 @@ void main() {
     return MaterialApp(
       theme: buildAppTheme(),
       home: Scaffold(
-        body: TaskCommentsSection(
-          comments: comments,
-          onAdd: onAdd,
-          onDelete: onDelete,
-          onAddLink: onAddLink,
+        body: Builder(
+          builder: (ctx) => ElevatedButton(
+            onPressed: () => showCommentsSheet(
+              ctx,
+              title: 'Comments',
+              comments: comments,
+              onAdd: (text) async {
+                onAdd(text);
+                return null;
+              },
+              onDelete: onDelete,
+              onAddLink: onAddLink,
+            ),
+            child: const Text('open'),
+          ),
         ),
       ),
     );
+  }
+
+  /// Every test in this file starts by opening the sheet.
+  Future<void> pumpOpen(WidgetTester tester, Widget app) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1600);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(app);
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
   }
 
   const userComment = TaskComment(
@@ -48,7 +77,8 @@ void main() {
   testWidgets('renders author labels and text through LinkText', (
     tester,
   ) async {
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(
         comments: const [userComment, agentComment],
         onAdd: (_) {},
@@ -72,9 +102,10 @@ void main() {
     );
   });
 
-  testWidgets(
-    'a comment with subtaskId set does NOT render in the task-level section',
-    (tester) async {
+  test(
+    'taskLevelComments drops a sub-task comment — the sheet itself no longer '
+    'filters, the CALLER decides scope (see showCommentsSheet)',
+    () {
       const subtaskComment = TaskComment(
         id: 'c-3',
         ts: '2026-08-01T12:00:00Z',
@@ -83,27 +114,8 @@ void main() {
         subtaskId: 'sub-1',
       );
 
-      await tester.pumpWidget(
-        host(
-          comments: const [userComment, subtaskComment],
-          onAdd: (_) {},
-          onDelete: (_) {},
-        ),
-      );
-
-      expect(
-        find.byWidgetPredicate(
-          (w) => w is LinkText && w.text == 'looks good to me',
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (w) => w is LinkText && w.text == 'subtask-only note',
-        ),
-        findsNothing,
-      );
-      expect(find.byKey(const ValueKey('comment-c-3')), findsNothing);
+      final kept = taskLevelComments(const [userComment, subtaskComment]);
+      expect(kept.map((c) => c.id), ['c-1']);
     },
   );
 
@@ -111,7 +123,8 @@ void main() {
     tester,
   ) async {
     String? captured;
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(
         comments: const [],
         onAdd: (text) => captured = text,
@@ -136,7 +149,8 @@ void main() {
   testWidgets('typing beyond 2000 chars is capped by the field itself', (
     tester,
   ) async {
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(comments: const [], onAdd: (_) {}, onDelete: (_) {}),
     );
 
@@ -155,7 +169,8 @@ void main() {
     'the maxLength counter ("n / 2000") is hidden — enforcement stays but '
     'the default counter text never renders (visual noise in a tight Row)',
     (tester) async {
-      await tester.pumpWidget(
+      await pumpOpen(
+        tester,
         host(comments: const [], onAdd: (_) {}, onDelete: (_) {}),
       );
 
@@ -188,7 +203,8 @@ void main() {
 
   testWidgets('an empty submit is a no-op', (tester) async {
     var calls = 0;
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(comments: const [], onAdd: (_) => calls++, onDelete: (_) {}),
     );
 
@@ -202,7 +218,8 @@ void main() {
     tester,
   ) async {
     String? deletedId;
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(
         comments: const [userComment],
         onAdd: (_) {},
@@ -227,7 +244,8 @@ void main() {
     tester,
   ) async {
     String? deletedId;
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(
         comments: const [userComment],
         onAdd: (_) {},
@@ -247,12 +265,19 @@ void main() {
   testWidgets('the add-link icon only renders when onAddLink is supplied', (
     tester,
   ) async {
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(comments: const [], onAdd: (_) {}, onDelete: (_) {}),
     );
     expect(find.byKey(const Key('comment-add-link')), findsNothing);
 
-    await tester.pumpWidget(
+    // Dismiss the first sheet before opening the second — pumping a new host
+    // over a live modal route would leave both composers in the tree.
+    await tester.tapAt(const Offset(20, 20));
+    await tester.pumpAndSettle();
+
+    await pumpOpen(
+      tester,
       host(
         comments: const [],
         onAdd: (_) {},
@@ -266,7 +291,8 @@ void main() {
   testWidgets('the add-link icon inserts the dialog result into the field', (
     tester,
   ) async {
-    await tester.pumpWidget(
+    await pumpOpen(
+      tester,
       host(
         comments: const [],
         onAdd: (_) {},
@@ -287,7 +313,8 @@ void main() {
   testWidgets(
     'a non-overflowing insert splices at the cursor position, not the end',
     (tester) async {
-      await tester.pumpWidget(
+      await pumpOpen(
+        tester,
         host(
           comments: const [],
           onAdd: (_) {},
@@ -322,7 +349,8 @@ void main() {
   testWidgets(
     'an overflowing splice is clamped: field text unchanged + snackbar shown',
     (tester) async {
-      await tester.pumpWidget(
+      await pumpOpen(
+        tester,
         host(
           comments: const [],
           onAdd: (_) {},
@@ -346,7 +374,7 @@ void main() {
     },
   );
 
-  group('showSubtaskCommentsSheet', () {
+  group('showCommentsSheet (sub-task scope)', () {
     // Regression test for the add-then-delete-in-same-session bug: the sheet
     // used to synthesize its OWN local id for an optimistically-added comment
     // instead of using the id the real persistence layer actually minted. A
@@ -367,9 +395,9 @@ void main() {
         home: Scaffold(
           body: Builder(
             builder: (ctx) => ElevatedButton(
-              onPressed: () => showSubtaskCommentsSheet(
+              onPressed: () => showCommentsSheet(
                 ctx,
-                subtaskTitle: 'Draft outline',
+                title: 'Draft outline',
                 comments: comments,
                 onAdd: onAdd,
                 onDelete: onDelete,

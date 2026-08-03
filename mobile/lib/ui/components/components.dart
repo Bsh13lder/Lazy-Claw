@@ -16,6 +16,7 @@ export 'lz_chip.dart';
 export 'lz_dialog.dart';
 export 'lz_empty_state.dart';
 export 'lz_error_state.dart';
+export 'lz_floating_submit.dart';
 export 'lz_icon_button.dart';
 export 'lz_list_tile.dart';
 export 'lz_pill.dart';

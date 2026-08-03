@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../core/due_date.dart';
@@ -50,11 +52,42 @@ Map<DateTime, List<Task>> groupTasksByDay(List<Task> tasks) {
   return out.map((day, tasks) => MapEntry(day, sortDoneLast(tasks)));
 }
 
-/// Safety valve for [expandRecurringForRange]: the most ghost days a single
-/// recurring task will ever project, regardless of how wide [rangeStart] ..
-/// [rangeEnd] is. Guards against a pathological cron (or a caller passing a
-/// multi-year range) generating an unbounded number of entries.
-const int kMaxGhostsPerTask = 60;
+/// How far past **today** [expandRecurringForRange] is willing to project, in
+/// days (the horizon day itself is inclusive, so the window is
+/// `today .. today + kGhostHorizonDays`).
+///
+/// ~3 months. Paging one or two months ahead should still show the repeats
+/// that are genuinely coming up — that is the whole point of the ghost
+/// projection — but the calendar must NOT paint a speculative dot on every
+/// day of a month a year out. A dot that far ahead carries zero information
+/// (of course a daily task "repeats" in July 2027) and reads as data the
+/// user actually entered, which is exactly how the 2026-08-03 report landed:
+/// *"still repeating recurring tasks all year, this is a bug, I did not set
+/// it up like that."*
+///
+/// [expandRecurringForRange] takes this as an optional parameter so tests can
+/// pin the bound instead of doing calendar arithmetic against the default.
+const int kGhostHorizonDays = 92;
+
+/// Absolute ceiling on the ghost days a single recurring task may occupy.
+///
+/// This bounds the **window**, not a running counter: the loop below emits at
+/// most ONE ghost per calendar day per task, so clamping the projected window
+/// to at most this many days makes the ceiling structurally unreachable.
+///
+/// It used to be an in-loop counter (`generated < kMaxGhostsPerTask`, then
+/// 60) racing an unbounded range, which is the failure mode this shape
+/// exists to prevent: a 92-day horizon over a daily cron produces 93
+/// candidate days, so a 60-cap would have shown repeats for the first two
+/// months of the window and then silently stopped — a *partially filled*
+/// range, indistinguishable from another bug. With the clamp there is only
+/// ever one meaningful bound (the horizon, or the caller's own range, or the
+/// task's [Task.recurUntil] — whichever ends first), and whatever comes back
+/// is always gap-free.
+///
+/// Set well above what the default horizon can produce (93) so it only ever
+/// engages for a caller that explicitly asks for an absurd `horizonDays`.
+const int kMaxGhostsPerTask = 200;
 
 /// Projects each recurring task's upcoming occurrences across
 /// [rangeStart]..[rangeEnd] (inclusive, local calendar days) as GHOST
@@ -77,21 +110,43 @@ const int kMaxGhostsPerTask = 60;
 /// bucketed the same way [groupTasksByDay] does) is skipped — the real
 /// [TaskRow] already renders there, so a ghost would duplicate it.
 ///
-/// Ghosts are a forward-looking "here's the next repeat" hint, never a
-/// history — no ghost is ever generated for a day before [now]'s local
-/// calendar day (defaults to the wall clock; pass it explicitly for
-/// deterministic tests). Paging the calendar back to a month before the
-/// task existed must not paint ghost dots on every matching day in that
-/// month, which would read as phantom repeats that never happened. A ghost
-/// exactly on today IS allowed — today isn't "the past" yet — and the
-/// real-vs-ghost dedup above still applies on top of this clamp.
+/// A **done** task never projects. On completion the server materialises the
+/// next occurrence as a brand-new row carrying the same cron
+/// (`tasks/store.py`) while the completed row KEEPS its `recurring` value —
+/// both reach the client, so a done occurrence that still projected would
+/// double-dot every future match day for what is one single series. (When a
+/// respawn *fails* the done row is the only one left, but the server's
+/// `status == 'done'` guard means it can never respawn again either, so
+/// projecting from it would be advertising repeats that will never come.)
 ///
-/// Capped at [kMaxGhostsPerTask] generated ghosts per task.
+/// ### The three bounds
+/// A ghost day must clear ALL of these; whichever ends first wins, and the
+/// result is always a contiguous run (never a partially-filled range):
+///  1. **Never the past** — no ghost before [now]'s local calendar day
+///     (defaults to the wall clock; pass it explicitly for deterministic
+///     tests). Ghosts are a forward-looking "here's the next repeat" hint,
+///     never a history: paging back to a month before the task existed must
+///     not paint dots on every matching day of it. A ghost exactly ON today
+///     IS allowed — today isn't "the past" yet.
+///  2. **Never past the horizon** — no ghost after `today + [horizonDays]`
+///     (see [kGhostHorizonDays] for why, and [kMaxGhostsPerTask] for the
+///     clamp that keeps this the single meaningful forward bound).
+///  3. **Never past the user's own series end** — no ghost after
+///     [Task.recurUntil]'s local day, INCLUSIVE of that day (the stored
+///     `yyyy-MM-dd` means "the series runs through the end of this day", and
+///     the final occurrence is the one the user most wants to see coming).
+///     A null / blank / unparseable value means "never ends", never "ends
+///     immediately" — failing open here mirrors `tasks/store.py`'s
+///     `_series_expired`, which also returns "not expired" on a bad parse.
+///     The server already refuses to respawn past this date, so a calendar
+///     that ignored it (as this did until 2026-08-03) promised repeats that
+///     were never going to be materialised.
 Map<DateTime, List<Task>> expandRecurringForRange(
   List<Task> tasks,
   DateTime rangeStart,
   DateTime rangeEnd, {
   DateTime? now,
+  int horizonDays = kGhostHorizonDays,
 }) {
   final start = DateTime(rangeStart.year, rangeStart.month, rangeStart.day);
   final end = DateTime(rangeEnd.year, rangeEnd.month, rangeEnd.day);
@@ -99,64 +154,120 @@ Map<DateTime, List<Task>> expandRecurringForRange(
   if (end.isBefore(start)) return out;
 
   final today = _localDay(now ?? DateTime.now());
+  // Clamped so a caller can neither invert the window (negative) nor widen it
+  // past what [kMaxGhostsPerTask] can hold — see that constant for why the
+  // ceiling lives on the window instead of on a per-task counter.
+  final span = math.max(0, math.min(horizonDays, kMaxGhostsPerTask - 1));
+  final horizonEnd = _addDays(today, span);
+
   final loopStart = start.isBefore(today) ? today : start;
-  if (loopStart.isAfter(end)) return out;
+  final loopEnd = end.isAfter(horizonEnd) ? horizonEnd : end;
+  if (loopStart.isAfter(loopEnd)) return out;
 
   for (final task in tasks) {
-    final cron = task.recurring;
-    if (cron == null || cron.trim().isEmpty) continue;
-
-    final recurrence = recurrenceFromCron(cron);
-    if (!recurrence.repeats || recurrence.kind == RecurrenceKind.custom) {
-      continue; // Unparseable / unsupported shape → no ghosts.
-    }
-
-    // Monthly/yearly need the exact day-of-month (and, for yearly, month)
-    // straight off the cron string — `Recurrence` only carries `kind` +
-    // `weekday`, it doesn't retain those fields.
-    int? monthlyDay;
-    int? yearlyDay;
-    int? yearlyMonth;
-    if (recurrence.kind == RecurrenceKind.monthly ||
-        recurrence.kind == RecurrenceKind.yearly) {
-      final fields = _cronFields(cron);
-      if (fields == null) continue;
-      final dom = int.tryParse(fields[2]);
-      if (dom == null) continue;
-      if (recurrence.kind == RecurrenceKind.monthly) {
-        monthlyDay = dom;
-      } else {
-        final mon = int.tryParse(fields[3]);
-        if (mon == null) continue;
-        yearlyDay = dom;
-        yearlyMonth = mon;
-      }
-    }
-
-    final realDay = localDueDay(task.dueDate);
-
-    var day = loopStart;
-    var generated = 0;
-    while (!day.isAfter(end) && generated < kMaxGhostsPerTask) {
-      final matches = switch (recurrence.kind) {
-        RecurrenceKind.daily => true,
-        RecurrenceKind.weekdays =>
-          day.weekday >= DateTime.monday && day.weekday <= DateTime.friday,
-        RecurrenceKind.weekly => day.weekday == recurrence.weekday,
-        RecurrenceKind.monthly => day.day == monthlyDay,
-        RecurrenceKind.yearly =>
-          day.day == yearlyDay && day.month == yearlyMonth,
-        RecurrenceKind.none || RecurrenceKind.custom => false, // unreachable
-      };
-      if (matches && day != realDay) {
-        (out[day] ??= <Task>[]).add(task);
-        generated++;
-      }
-      day = day.add(const Duration(days: 1));
+    for (final day in _ghostDaysForTask(task, loopStart, loopEnd)) {
+      (out[day] ??= <Task>[]).add(task);
     }
   }
   return out;
 }
+
+/// The local-midnight days [task] should ghost on within [from]..[to]
+/// (both inclusive, both already clamped to the caller's range / today /
+/// the horizon by [expandRecurringForRange]). Empty for anything that must
+/// not project — see that function's doc for every rule enforced here.
+List<DateTime> _ghostDaysForTask(Task task, DateTime from, DateTime to) {
+  final cron = task.recurring;
+  if (cron == null || cron.trim().isEmpty) return const [];
+  if (task.isDone) return const [];
+
+  final spec = _ghostSpecFromCron(cron);
+  if (spec == null) return const []; // Unparseable / unsupported → no ghosts.
+
+  // The user's explicit "Ends on" date tightens the window for THIS task only.
+  final seriesEnd = localDueDay(task.recurUntil);
+  final last = (seriesEnd != null && seriesEnd.isBefore(to)) ? seriesEnd : to;
+  if (from.isAfter(last)) return const [];
+
+  final realDay = localDueDay(task.dueDate);
+  final days = <DateTime>[];
+  for (var day = from; !day.isAfter(last); day = _addDays(day, 1)) {
+    if (spec.matches(day) && day != realDay) days.add(day);
+  }
+  return days;
+}
+
+/// The day-stepping rule a recognized recurrence cron reduces to — the
+/// fields [Recurrence] itself doesn't retain (day-of-month, month) resolved
+/// once per task instead of re-parsed inside the day loop. Returns null for
+/// any cron the on-device picker didn't author, per "this is deliberately
+/// not a general cron engine".
+_GhostSpec? _ghostSpecFromCron(String cron) {
+  final recurrence = recurrenceFromCron(cron);
+  if (!recurrence.repeats || recurrence.kind == RecurrenceKind.custom) {
+    return null;
+  }
+  if (recurrence.kind != RecurrenceKind.monthly &&
+      recurrence.kind != RecurrenceKind.yearly) {
+    return _GhostSpec(recurrence.kind, weekday: recurrence.weekday);
+  }
+
+  final fields = _cronFields(cron);
+  if (fields == null) return null;
+  final dayOfMonth = int.tryParse(fields[2]);
+  if (dayOfMonth == null) return null;
+  if (recurrence.kind == RecurrenceKind.monthly) {
+    return _GhostSpec(RecurrenceKind.monthly, dayOfMonth: dayOfMonth);
+  }
+  final month = int.tryParse(fields[3]);
+  if (month == null) return null;
+  return _GhostSpec(
+    RecurrenceKind.yearly,
+    dayOfMonth: dayOfMonth,
+    month: month,
+  );
+}
+
+/// An immutable "does this calendar day match?" predicate for one of the
+/// recurrence shapes the picker authors.
+class _GhostSpec {
+  const _GhostSpec(this.kind, {this.weekday, this.dayOfMonth, this.month});
+
+  final RecurrenceKind kind;
+
+  /// Weekly only (Dart convention Mon=1 … Sun=7).
+  final int? weekday;
+
+  /// Monthly + yearly.
+  final int? dayOfMonth;
+
+  /// Yearly only (1-12).
+  final int? month;
+
+  bool matches(DateTime day) => switch (kind) {
+        RecurrenceKind.daily => true,
+        RecurrenceKind.weekdays =>
+          day.weekday >= DateTime.monday && day.weekday <= DateTime.friday,
+        RecurrenceKind.weekly => day.weekday == weekday,
+        RecurrenceKind.monthly => day.day == dayOfMonth,
+        RecurrenceKind.yearly => day.day == dayOfMonth && day.month == month,
+        // Unreachable: _ghostSpecFromCron rejects both before constructing.
+        RecurrenceKind.none || RecurrenceKind.custom => false,
+      };
+}
+
+/// [day] advanced by [count] CALENDAR days, staying at local midnight.
+///
+/// Deliberately not `day.add(Duration(days: n))`: a [Duration] is an exact
+/// elapsed-time span, so adding 24h across Europe/Madrid's autumn roll-back
+/// (2026-10-25) lands on 23:00 of the *same* day. Every subsequent step then
+/// carries that hour, so the keys stop being local midnights — the calendar
+/// looks ghosts up by `DateTime(y, m, d)` and would silently miss them, and
+/// the range's final day would be dropped as "after the end". The
+/// [DateTime] constructor normalizes an out-of-range day field into the
+/// right calendar date instead, which is what a *calendar* projection means.
+DateTime _addDays(DateTime day, int count) =>
+    DateTime(day.year, day.month, day.day + count);
 
 /// Splits a 5-field cron string into its fields, or null when it isn't
 /// exactly 5 whitespace-separated fields.

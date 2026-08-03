@@ -144,9 +144,10 @@ void main() {
       expect(field.controller!.selection.baseOffset, 'buy paint'.length);
       expect(field.controller!.selection.extentOffset, 'buy paint'.length);
 
-      await tester.ensureVisible(find.text('Add Task'));
-      await tester.pump();
-      await tester.tap(find.text('Add Task'));
+      // The submit affordance is the floating square, which is anchored to
+      // the sheet's viewport — no ensureVisible() needed, and that it is
+      // always hit-testable is exactly the point of it.
+      await tester.tap(find.byKey(kAddTaskSubmitKey));
       await tester.pumpAndSettle();
 
       expect(captured, isTrue);

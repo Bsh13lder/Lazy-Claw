@@ -7,15 +7,15 @@ import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_owner_filter.dart';
 
 Task _task(String id, {String owner = 'user'}) => Task(
-      id: id,
-      userId: 'u1',
-      title: 'Task $id',
-      priority: 'medium',
-      status: 'todo',
-      owner: owner,
-      nagCount: 0,
-      createdAt: '2026-06-06T00:00:00Z',
-    );
+  id: id,
+  userId: 'u1',
+  title: 'Task $id',
+  priority: 'medium',
+  status: 'todo',
+  owner: owner,
+  nagCount: 0,
+  createdAt: '2026-06-06T00:00:00Z',
+);
 
 void main() {
   group('isAgentTask', () {
@@ -60,12 +60,14 @@ void main() {
       expect(out.map((t) => t.id), ['a1', 'a2']);
     });
 
-    test('mine keeps tasks with an unexpected owner (never silently dropped)',
-        () {
-      final mixed = [_task('x', owner: 'system'), _task('a', owner: 'agent')];
-      final out = filterByOwner(mixed, TaskOwnerFilter.mine);
-      expect(out.map((t) => t.id), ['x']);
-    });
+    test(
+      'mine keeps tasks with an unexpected owner (never silently dropped)',
+      () {
+        final mixed = [_task('x', owner: 'system'), _task('a', owner: 'agent')];
+        final out = filterByOwner(mixed, TaskOwnerFilter.mine);
+        expect(out.map((t) => t.id), ['x']);
+      },
+    );
 
     test('preserves input order within a filter', () {
       final out = filterByOwner(tasks, TaskOwnerFilter.ai);

@@ -9,31 +9,26 @@ import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_project_grouping.dart';
 
-Task _task(
-  String id, {
-  String? category,
-  String status = 'todo',
-}) =>
-    Task(
-      id: id,
-      userId: 'u1',
-      title: 'Task $id',
-      category: category,
-      priority: 'medium',
-      status: status,
-      owner: 'user',
-      nagCount: 0,
-      createdAt: '2026-06-06T00:00:00Z',
-    );
+Task _task(String id, {String? category, String status = 'todo'}) => Task(
+  id: id,
+  userId: 'u1',
+  title: 'Task $id',
+  category: category,
+  priority: 'medium',
+  status: status,
+  owner: 'user',
+  nagCount: 0,
+  createdAt: '2026-06-06T00:00:00Z',
+);
 
 Project _project(String id, String name, {String? color}) => Project(
-      id: id,
-      name: name,
-      budget: 0,
-      currency: 'USD',
-      status: 'active',
-      color: color,
-    );
+  id: id,
+  name: name,
+  budget: 0,
+  currency: 'USD',
+  status: 'active',
+  color: color,
+);
 
 void main() {
   group('groupTasksByProject', () {
@@ -53,17 +48,19 @@ void main() {
       expect(groups[kInboxProjectLabel], isEmpty);
     });
 
-    test('seeds an empty group for every project (zero-task projects appear)',
-        () {
-      final groups = groupTasksByProject(
-        const [],
-        [_project('p1', 'Home'), _project('p2', 'Work')],
-      );
+    test(
+      'seeds an empty group for every project (zero-task projects appear)',
+      () {
+        final groups = groupTasksByProject(const [], [
+          _project('p1', 'Home'),
+          _project('p2', 'Work'),
+        ]);
 
-      expect(groups.keys, containsAll(['Home', 'Work']));
-      expect(groups['Home'], isEmpty);
-      expect(groups['Work'], isEmpty);
-    });
+        expect(groups.keys, containsAll(['Home', 'Work']));
+        expect(groups['Home'], isEmpty);
+        expect(groups['Work'], isEmpty);
+      },
+    );
 
     test('null / blank category → Inbox bucket', () {
       final tasks = [
@@ -76,8 +73,10 @@ void main() {
 
       // Inbox is the only bucket here (no projects).
       expect(groups.keys, [kInboxProjectLabel]);
-      expect(groups[kInboxProjectLabel]!.map((t) => t.id),
-          containsAll(['a', 'b', 'c']));
+      expect(
+        groups[kInboxProjectLabel]!.map((t) => t.id),
+        containsAll(['a', 'b', 'c']),
+      );
     });
 
     test('Inbox bucket is always seeded, even with no projectless tasks', () {
@@ -128,7 +127,9 @@ void main() {
     });
 
     test('Inbox leads even when it is the only bucket', () {
-      final groups = {kInboxProjectLabel: <Task>[_task('u')]};
+      final groups = {
+        kInboxProjectLabel: <Task>[_task('u')],
+      };
       expect(orderedProjectGroupNames(const [], groups), ['Inbox']);
     });
   });
@@ -152,24 +153,26 @@ void main() {
   });
 
   group('splitTasksByGroup', () {
-    test('a task matching a project lands in realProjects (case-insensitive)',
-        () {
-      final tasks = [
-        _task('a', category: 'home'),
-        _task('b', category: 'HOME'),
-      ];
-      final projects = [_project('p1', 'Home', color: '#FF0000')];
+    test(
+      'a task matching a project lands in realProjects (case-insensitive)',
+      () {
+        final tasks = [
+          _task('a', category: 'home'),
+          _task('b', category: 'HOME'),
+        ];
+        final projects = [_project('p1', 'Home', color: '#FF0000')];
 
-      final split = splitTasksByGroup(tasks, projects);
+        final split = splitTasksByGroup(tasks, projects);
 
-      expect(split.realProjects, hasLength(1));
-      final home = split.realProjects.single;
-      expect(home.name, 'Home'); // canonical project casing
-      expect(home.project.color, '#FF0000'); // carried for the color dot
-      expect(home.tasks.map((t) => t.id), containsAll(['a', 'b']));
-      expect(split.tags, isEmpty);
-      expect(split.inbox, isEmpty);
-    });
+        expect(split.realProjects, hasLength(1));
+        final home = split.realProjects.single;
+        expect(home.name, 'Home'); // canonical project casing
+        expect(home.project.color, '#FF0000'); // carried for the color dot
+        expect(home.tasks.map((t) => t.id), containsAll(['a', 'b']));
+        expect(split.tags, isEmpty);
+        expect(split.inbox, isEmpty);
+      },
+    );
 
     test('a task with an unknown category becomes a tag (not a project)', () {
       final tasks = [
@@ -204,10 +207,10 @@ void main() {
     });
 
     test('zero-task projects are still seeded in realProjects', () {
-      final split = splitTasksByGroup(
-        const [],
-        [_project('p1', 'Home'), _project('p2', 'Work')],
-      );
+      final split = splitTasksByGroup(const [], [
+        _project('p1', 'Home'),
+        _project('p2', 'Work'),
+      ]);
 
       expect(split.realProjects.map((b) => b.name), ['Home', 'Work']);
       expect(split.realProjects.every((b) => b.tasks.isEmpty), isTrue);
@@ -218,10 +221,11 @@ void main() {
     });
 
     test('realProjects preserves the projects-list order', () {
-      final split = splitTasksByGroup(
-        const [],
-        [_project('p1', 'Work'), _project('p2', 'Home'), _project('p3', 'Side')],
-      );
+      final split = splitTasksByGroup(const [], [
+        _project('p1', 'Work'),
+        _project('p2', 'Home'),
+        _project('p3', 'Side'),
+      ]);
 
       expect(split.realProjects.map((b) => b.name), ['Work', 'Home', 'Side']);
     });
@@ -250,10 +254,9 @@ void main() {
     });
 
     test('hasTags / hasRealProjects reflect content', () {
-      final split = splitTasksByGroup(
-        [_task('a', category: 'Garden')],
-        const [],
-      );
+      final split = splitTasksByGroup([
+        _task('a', category: 'Garden'),
+      ], const []);
       expect(split.hasRealProjects, isFalse);
       expect(split.hasTags, isTrue);
     });

@@ -3,25 +3,41 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/project_resolver.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
-import '../../models/expense.dart';
 import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/budgets_provider.dart';
 import '../../providers/tasks_provider.dart';
 import '../../widgets/link_text.dart';
+import '../expenses/add_expense_for_task.dart';
 import '../settings/settings_prefs.dart';
 import 'add_link_dialog.dart';
 import 'chip_edit.dart';
-import 'recurrence_picker.dart';
-import 'reminder_lead_picker.dart';
 import 'reschedule_sheet.dart';
-import 'subtask_editor.dart';
+import 'task_attribute_chips.dart';
+import 'task_budget_control.dart';
 import 'task_comments_section.dart';
+import 'task_detail_patch.dart';
+import 'task_detail_pickers.dart';
+import 'task_due_model.dart';
+import 'task_due_section.dart';
+import 'task_expense_rollup.dart';
+import 'task_notes_field.dart';
+import 'task_repeat_section.dart';
+import 'task_section_label.dart';
+import 'task_subtasks_section.dart';
+import 'task_tags_field.dart';
+
+/// The pure expense rollups used to live at the bottom of this file. They now
+/// have their own library (this file was already past the 800-line ceiling),
+/// re-exported here so existing `import '.../task_detail_sheet.dart'` call
+/// sites that reach for [subtaskExpenseTotals] keep resolving unchanged.
+export 'task_expense_rollup.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
 /// the user change the title, notes, priority, project and due date, then Save
@@ -75,7 +91,13 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   /// parsed field against this to decide set / clear / untouched.
   double? _originalBudget;
 
-  static const int _maxTagLength = 40;
+  /// Whether the allocated-budget field is on screen. Seeded true only when
+  /// the task already HAS an allocation — otherwise the field is a permanently
+  /// empty box in a sheet that is already too long, and the money dropdown is
+  /// the discoverable way in. Once revealed it stays revealed for the session
+  /// (never auto-hidden mid-edit).
+  late bool _showBudgetField;
+  final FocusNode _budgetFocus = FocusNode();
 
   /// The due date is split into a date-only day string (`_dueDay`) and a
   /// separate time-of-day (`_dueTime`), pre-filled from the task's stored
@@ -135,8 +157,6 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   String? _recurUntil;
   bool _recurUntilTouched = false;
 
-  static const _priorities = ['low', 'medium', 'high', 'urgent'];
-
   @override
   void initState() {
     super.initState();
@@ -151,7 +171,9 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _budgetController = TextEditingController(
       text: _formatBudget(t.allocatedBudget),
     );
-    _priority = _priorities.contains(t.priority) ? t.priority : 'medium';
+    _showBudgetField = t.allocatedBudget != null;
+    // Fall back rather than trust a stored value the chips can't show.
+    _priority = kTaskPriorities.contains(t.priority) ? t.priority : 'medium';
     final raw = t.dueDate;
     _dueDay = (raw == null || raw.isEmpty) ? null : dueDateDayPart(raw);
     final parts = dueTimeParts(raw);
@@ -176,87 +198,19 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
         : dueDateDayPart(t.recurUntil!);
   }
 
-  /// The effective reminder lead (explicit choice wins over the global default).
-  ReminderLead get _effectiveLead => _explicitLead ?? widget.defaultLead;
-
-  /// The reminderAt string to persist: `''` (clear) when there's no due time or
-  /// the lead is None, else the absolute `due − lead` instant.
-  String get _composedReminderAt => resolveReminderAt(
-    dueDate: _composedDue,
+  /// The due/reminder derivations, rebuilt from the current fields on every
+  /// read. Cheap (a const-shaped value object over seven fields) and always
+  /// consistent — there is no cached copy to invalidate. See
+  /// `task_due_model.dart` for the rules themselves.
+  TaskDueModel get _due => TaskDueModel(
+    dueDay: _dueDay,
+    dueTime: _dueTime,
+    originalReminderAt: _originalReminderAt,
     explicitLead: _explicitLead,
     defaultLead: widget.defaultLead,
+    reminderTouched: _reminderTouched,
+    dueTouched: _dueTouched,
   );
-
-  /// The reminder instant that SURVIVES this edit when the due date has no
-  /// time-of-day, or null when nothing survives. This is the only path that can
-  /// see a date-only task's reminder, since `due − lead` degenerates for it.
-  ///
-  /// * user touched the REMIND control → null (an explicit clear)
-  /// * no reminder to begin with → null
-  /// * due date removed entirely → null (a reminder with nothing to remind
-  ///   about is an orphan that would still nag)
-  /// * due day untouched → the stored instant, verbatim
-  /// * due day moved → the SAME clock time re-anchored onto the new day (the
-  ///   Smart-Reschedule shape, cf. [cardDueTimeLabel]) rather than a reminder
-  ///   stranded on the old date
-  String? get _survivingReminderAt {
-    if (_reminderTouched) return null;
-    final original = _originalReminderAt;
-    if (original == null || original.isEmpty) return null;
-    final due = _composedDue;
-    if (due == null) return null;
-    if (!_dueTouched) return original;
-    final parts = dueTimeParts(original);
-    final day = DateTime.tryParse(due);
-    if (parts == null || day == null) return original;
-    return composeDueDate(day, hour: parts.hour, minute: parts.minute);
-  }
-
-  /// The `reminderAt` argument for [TasksNotifier.updateTask]: `null` leaves the
-  /// column untouched, `''` force-clears it, anything else sets it.
-  ///
-  /// WHY this is not simply [_composedReminderAt]: `resolveReminderAt` can only
-  /// answer `''` for a due date with no time-of-day, and EVERY backend-respawned
-  /// recurring occurrence (plus every Smart-Rescheduled task) has exactly that
-  /// shape — a date-only due plus a real timed `reminder_at`. Sending the composed
-  /// value unconditionally meant opening a repeating task to fix a typo and
-  /// hitting Save permanently deleted its reminder, its server reminder job and
-  /// its advance nags.
-  String? get _reminderArg {
-    // A timed due makes the reminder fully derivable, and the lead picker IS the
-    // user-visible control for it — so it stays authoritative (status quo).
-    if (dueDateHasTime(_composedDue)) return _composedReminderAt;
-    final surviving = _survivingReminderAt;
-    if (surviving == null) return '';
-    // Unchanged → leave the column absent from the patch, matching how this sheet
-    // already avoids churning category / recurring / tags / steps.
-    if (surviving == _originalReminderAt) return null;
-    return surviving;
-  }
-
-  /// Combine the day + time into the persisted `dueDate` string: a datetime when
-  /// a time is set, a date-only string when only a day is set, today+time when
-  /// only a time is set, else null.
-  String? get _composedDue {
-    final day = _dueDay;
-    final time = _dueTime;
-    if (day == null) {
-      if (time == null) return null;
-      final n = DateTime.now();
-      return composeDueDate(
-        DateTime(n.year, n.month, n.day),
-        hour: time.hour,
-        minute: time.minute,
-      );
-    }
-    final d = DateTime.tryParse(day);
-    if (d == null) return day;
-    return composeDueDate(
-      DateTime(d.year, d.month, d.day),
-      hour: time?.hour,
-      minute: time?.minute,
-    );
-  }
 
   @override
   void dispose() {
@@ -265,6 +219,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _budgetController.dispose();
     _tagController.dispose();
     _notesFocus.dispose();
+    _budgetFocus.dispose();
     super.dispose();
   }
 
@@ -287,22 +242,64 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     return v.toString();
   }
 
-  void _addTag(String raw) {
-    final tag = raw.trim();
-    if (tag.isEmpty) return;
-    final clamped = tag.length > _maxTagLength
-        ? tag.substring(0, _maxTagLength)
-        : tag;
-    if (_tags.contains(clamped)) {
-      _tagController.clear();
-      return;
-    }
-    setState(() => _tags = [..._tags, clamped]);
-    _tagController.clear();
+  /// Open the TASK-level comment thread (the same sheet a sub-task's 💬 badge
+  /// opens, just scoped to the task).
+  ///
+  /// [live] is the freshly-watched task, not `widget.task`: comments write
+  /// through the notifier immediately, so the snapshot the sheet was opened
+  /// with goes stale the moment one is added.
+  Future<void> _openTaskComments(Task live) async {
+    await showCommentsSheet(
+      context,
+      title: 'Comments',
+      comments: taskLevelComments(live.taskComments),
+      onAdd: (text) =>
+          ref.read(tasksProvider.notifier).addComment(widget.task.id, text),
+      onDelete: (cid) =>
+          ref.read(tasksProvider.notifier).deleteComment(widget.task.id, cid),
+      onAddLink: () => showAddLinkDialog(context),
+    );
   }
 
-  void _removeTag(String tag) {
-    setState(() => _tags = _tags.where((t) => t != tag).toList());
+  /// Open ONE sub-task's comment thread — the same sheet as
+  /// [_openTaskComments], scoped to [subtaskId] instead of to the task.
+  Future<void> _openSubtaskComments(Task live, String subtaskId) async {
+    await showCommentsSheet(
+      context,
+      title: _subtaskTitle(subtaskId),
+      comments: [
+        for (final c in live.taskComments)
+          if (c.subtaskId == subtaskId) c,
+      ],
+      onAdd: (text) => ref
+          .read(tasksProvider.notifier)
+          .addComment(widget.task.id, text, subtaskId: subtaskId),
+      onDelete: (cid) =>
+          ref.read(tasksProvider.notifier).deleteComment(widget.task.id, cid),
+      onAddLink: () => showAddLinkDialog(context),
+    );
+  }
+
+  /// Open the tags popup. The text controller stays owned by THIS state, not
+  /// by the popup, so a tag typed but never submitted survives the popup
+  /// closing and is still folded in by [_foldPendingTag] on Save — the
+  /// behavior the old always-on field had.
+  Future<void> _openTags() async {
+    await showTaskTagsSheet(
+      context,
+      tags: _tags,
+      controller: _tagController,
+      onChanged: (next) => setState(() => _tags = next),
+    );
+  }
+
+  /// Commit any un-submitted text in the tag field into [_tags]. Called from
+  /// Save, which pops immediately afterwards — no `setState` needed (and the
+  /// `_saving` flag's own `setState` rebuilds anyway).
+  void _foldPendingTag() {
+    if (_tagController.text.trim().isEmpty) return;
+    _tags = tagsWithAdded(_tags, _tagController.text);
+    _tagController.clear();
   }
 
   /// Switches the Notes block from the read-only preview to the editable
@@ -338,76 +335,49 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final title = _titleController.text.trim();
     if (title.isEmpty || _saving || _deleting) return;
     // Fold any un-committed text in the tag field into the list before saving.
-    if (_tagController.text.trim().isNotEmpty) _addTag(_tagController.text);
+    _foldPendingTag();
     setState(() => _saving = true);
-    // Only write `tags` when they changed. Serialized as the JSON-array string
-    // the DAO/cache carry; task_sync decodes it to a list for the PATCH. An
-    // empty list ('[]') is a deliberate clear (differs from the on-open snapshot
-    // only when the task actually had tags).
-    final nextTagsJson = jsonEncode(_tags);
-    final tagsArg = nextTagsJson == _originalTagsJson ? null : nextTagsJson;
-    // Budget: empty field clears a previously-set budget; a parsed number that
-    // differs sets it; otherwise leave untouched.
-    final budgetText = _budgetController.text.trim();
-    final parsedBudget = budgetText.isEmpty
-        ? null
-        : double.tryParse(budgetText);
-    double? budgetArg;
-    bool clearBudget = false;
-    if (budgetText.isEmpty && _originalBudget != null) {
-      clearBudget = true;
-    } else if (parsedBudget != null && parsedBudget != _originalBudget) {
-      budgetArg = parsedBudget;
-    }
-    // Only write `steps` when the checklist changed. An empty string (not null)
-    // force-clears the column when every sub-task was removed.
-    final nextSteps = serializeSubtasks(_subtasks);
-    final stepsArg = nextSteps == _originalSteps ? null : (nextSteps ?? '');
-    // Only write `category` when the user touched the project. An empty string
-    // (not null) force-clears the column when "No project" was chosen.
-    final categoryArg = !_categoryTouched ? null : (_category ?? '');
-    // Only write `recurring` when the user touched the repeat picker, so an
-    // untouched custom/known cron is preserved. A "does not repeat" selection
-    // sends an empty string to force-clear the column; otherwise the computed
-    // cron (anchored to the due date) is sent.
-    final recurringArg = !_recurrenceTouched
-        ? null
-        : (recurrenceToCron(
-                _recurrence,
-                dueAnchor: recurrenceAnchorFromDue(_composedDue),
-              ) ??
-              '');
-    // Only write `recur_until` when the user touched the Ends control (the ''
-    // sentinel clears back to "Never" — mirrors the recurring convention). When
-    // the recurrence itself was just cleared, an end date is an orphan: clear it
-    // too (but only when there is something to clear, so a plain edit doesn't
-    // churn the column).
-    String? recurUntilArg;
-    if (recurringArg != null && recurringArg.isEmpty) {
-      recurUntilArg = (_recurUntil != null || _recurUntilTouched) ? '' : null;
-    } else if (_recurUntilTouched) {
-      recurUntilArg = _recurUntil ?? '';
-    }
+    // Every three-way (untouched / clear / set) rule lives in the pure
+    // builder — see task_detail_patch.dart for why it is not inlined here.
+    final patch = buildTaskDetailPatch(
+      title: title,
+      description: _notesController.text.trim(),
+      priority: _priority,
+      composedDue: _due.composedDue,
+      tags: _tags,
+      originalTagsJson: _originalTagsJson,
+      budgetText: _budgetController.text,
+      originalBudget: _originalBudget,
+      nextSteps: serializeSubtasks(_subtasks),
+      originalSteps: _originalSteps,
+      categoryTouched: _categoryTouched,
+      category: _category,
+      recurrenceTouched: _recurrenceTouched,
+      nextCron: recurrenceToCron(
+        _recurrence,
+        dueAnchor: recurrenceAnchorFromDue(_due.composedDue),
+      ),
+      recurUntilTouched: _recurUntilTouched,
+      recurUntil: _recurUntil,
+      // Untouched reminders ride as null (absent) — see TaskDueModel.reminderArg.
+      reminderArg: _due.reminderArg,
+    );
     await ref
         .read(tasksProvider.notifier)
         .updateTask(
           widget.task.id,
-          title: title,
-          description: _notesController.text.trim(),
-          priority: _priority,
-          category: categoryArg,
-          // Send the `''` clear sentinel (not null) when the due date was
-          // removed, so the clear reaches the cache + outbox and syncs — a null
-          // is read as "field untouched" and would silently no-op the clear.
-          dueDate: _composedDue ?? '',
-          steps: stepsArg,
-          // Untouched reminders ride as null (absent) — see [_reminderArg].
-          reminderAt: _reminderArg,
-          recurring: recurringArg,
-          recurUntil: recurUntilArg,
-          tags: tagsArg,
-          allocatedBudget: budgetArg,
-          clearAllocatedBudget: clearBudget,
+          title: patch.title,
+          description: patch.description,
+          priority: patch.priority,
+          category: patch.category,
+          dueDate: patch.dueDate,
+          steps: patch.steps,
+          reminderAt: patch.reminderAt,
+          recurring: patch.recurring,
+          recurUntil: patch.recurUntil,
+          tags: patch.tags,
+          allocatedBudget: patch.allocatedBudget,
+          clearAllocatedBudget: patch.clearAllocatedBudget,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -425,6 +395,66 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final task = widget.task;
     navigator.pop();
     await showRescheduleSheet(rootContext, ref, task);
+  }
+
+  // ── Money ───────────────────────────────────────────────────────────────
+
+  /// The task's destination project row, resolved from its `category` NAME
+  /// (tasks store a project name, expenses need the project's id).
+  ///
+  /// Prefers the picker list the caller handed in; falls back to the budgets
+  /// cache because some call sites open this sheet without surfacing project
+  /// editing at all (`projects: const []`) — the task still HAS a project
+  /// there, and "add expense" must not be dead just because the picker is.
+  /// Returns null when the name is blank or doesn't resolve to exactly one
+  /// project ([resolveProjectMatch] never guesses on an ambiguous match).
+  Project? _resolveProject(List<Project> cached) {
+    final name = _category;
+    if (name == null || name.trim().isEmpty) return null;
+    final pool = widget.projects.isNotEmpty ? widget.projects : cached;
+    return resolveProjectMatch(name, pool);
+  }
+
+  /// Reveal (and focus) the allocated-budget field. Never hides it again — a
+  /// second pick while it's already open just re-focuses, so the action can't
+  /// destroy a half-typed number.
+  void _revealAllocatedBudget() {
+    setState(() => _showBudgetField = true);
+    _budgetFocus.requestFocus();
+  }
+
+  /// Open the task-scoped Add Expense sheet for this task, optionally pinned
+  /// to one of its sub-tasks.
+  ///
+  /// [subtaskId] must name a SAVED sub-task — the affordance that reaches this
+  /// is hidden for in-sheet, not-yet-saved ones (see [SubtaskEditor]).
+  ///
+  /// No explicit refresh afterwards: `build` watches [budgetsProvider], and
+  /// `addExpense` writes an optimistic row into that state, so the rollup and
+  /// the sub-task chips re-render on the same frame the sheet stays open for.
+  Future<void> _addExpense({
+    required Project project,
+    String? subtaskId,
+    String? contextLabel,
+  }) async {
+    await showAddExpenseForTaskSheet(
+      context,
+      ref,
+      projectId: project.id,
+      taskId: widget.task.id,
+      subtaskId: subtaskId,
+      contextLabel: contextLabel,
+    );
+  }
+
+  /// Explain, rather than silently do nothing, when a sub-task's money sign is
+  /// tapped on a task with no (resolvable) project. The sheet deliberately
+  /// still SHOWS the affordance — hiding it would make the feature look absent
+  /// instead of blocked.
+  void _warnNoProject() {
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text(kTaskBudgetNoProjectReason)));
   }
 
   Future<void> _pickProject() async {
@@ -458,66 +488,6 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     Navigator.of(context).pop();
   }
 
-  Color _priorityColor(String p) {
-    switch (p) {
-      case 'urgent':
-        return AppColors.error;
-      case 'high':
-        return AppColors.warn;
-      case 'medium':
-        return AppColors.info;
-      default:
-        return AppColors.textMuted;
-    }
-  }
-
-  /// The Notes block: a read-only [LinkText] preview when there's non-empty,
-  /// un-touched content (tapping anywhere but a link switches to the editor),
-  /// else the editable field with a trailing "Add link" affordance.
-  Widget _buildNotes() {
-    if (!_editingNotes) {
-      return GestureDetector(
-        key: const Key('task-detail-notes-preview'),
-        behavior: HitTestBehavior.opaque,
-        onTap: _beginEditNotes,
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(AppSpacing.md),
-          decoration: BoxDecoration(
-            color: AppColors.bgSurfaceElevated,
-            borderRadius: AppRadii.rMd,
-            border: Border.all(color: AppColors.borderDefault),
-          ),
-          child: LinkText(_notesController.text, style: AppText.body),
-        ),
-      );
-    }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: LzTextField(
-            controller: _notesController,
-            fieldKey: const Key('task-detail-notes'),
-            focusNode: _notesFocus,
-            hint: 'Notes (optional)',
-            prefixIcon: Icons.notes_outlined,
-            minLines: 2,
-            maxLines: 5,
-            keyboardType: TextInputType.multiline,
-          ),
-        ),
-        IconButton(
-          key: const Key('task-detail-notes-add-link'),
-          icon: const Icon(Icons.add_link),
-          color: AppColors.textMuted,
-          tooltip: 'Add link',
-          onPressed: _addLink,
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     // Comments are IMMEDIATE (they write straight through the notifier, not
@@ -549,14 +519,49 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     // expense's subtask_id only ever points at a saved sub-task, exactly
     // like a comment's), so an in-sheet, not-yet-saved sub-task correctly
     // gets no chip either.
-    final expenses = ref.watch(budgetsProvider).expenses;
+    final budgets = ref.watch(budgetsProvider);
+    final expenses = budgets.expenses;
     final expenseTotals = subtaskExpenseTotals(expenses, widget.task.id);
     final expenseCurrency = subtaskExpenseCurrency(expenses, widget.task.id);
-    return SingleChildScrollView(
+    // The destination project for any money added from this sheet. Null =
+    // the task has no project (or names one that can't be resolved), which
+    // disables the "Add expense" action with a stated reason.
+    final project = _resolveProject(budgets.projects);
+    // The SAVED sub-task ids — the only ones an expense's `subtask_id` may
+    // point at, exactly like `commentCounts` above.
+    final savedSubtaskIds = {for (final s in live.subtasks) s.id};
+    return LzFloatingSubmitLayout(
+      // Square, always-on-screen Save. The old footer button was anchored to
+      // the END of this (very long) column, so on a short viewport — or with
+      // the keyboard up — it was simply off screen: the user's report was
+      // that there was no save button at all. NOTE: this layout brings its
+      // own scroll view, so the column below must NOT be wrapped in another.
+      submit: LzFloatingSubmit(
+        key: const Key('task-detail-save'),
+        tooltip: 'Save task',
+        loading: _saving,
+        onPressed: (_saving || _deleting) ? null : _save,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // ── Destructive action, parked far from the thumb ──────────────
+          //
+          // Delete used to sit shoulder-to-shoulder with Save in a footer
+          // Row. Now that Save is a bottom-right floating target this sheet
+          // is thumb-driven, and "one mis-tap deletes the task" is not an
+          // acceptable failure mode — so Delete lives at the TOP-RIGHT
+          // (furthest reachable corner from the submit), rendered muted and
+          // icon-only, and still behind a confirm dialog.
+          Align(
+            alignment: Alignment.centerRight,
+            child: TaskDeleteAction(
+              deleting: _deleting,
+              onPressed: _saving ? null : _delete,
+            ),
+          ),
+
           // ── Title ──────────────────────────────────────────────────────
           LzTextField(
             controller: _titleController,
@@ -568,388 +573,141 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
           const SizedBox(height: AppSpacing.lg),
 
-          // ── Notes ──────────────────────────────────────────────────────
-          _buildNotes(),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Priority selector ──────────────────────────────────────────
-          _SectionLabel('PRIORITY'),
-          const SizedBox(height: AppSpacing.sm),
-          Row(
-            children: _priorities.map((p) {
-              return Padding(
-                padding: const EdgeInsets.only(right: AppSpacing.sm),
-                child: LzChip(
-                  label: p,
-                  selected: p == _priority,
-                  color: _priorityColor(p),
-                  onTap: () => setState(() => _priority = p),
-                ),
-              );
-            }).toList(),
-          ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Project selector ───────────────────────────────────────────
-          _SectionLabel('PROJECT'),
-          const SizedBox(height: AppSpacing.sm),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: ProjectChip(
-              fieldKey: const Key('task-detail-project'),
-              projects: widget.projects,
-              category: _category,
-              onTap: _pickProject,
-            ),
-          ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Tags ───────────────────────────────────────────────────────
-          _SectionLabel('TAGS'),
-          const SizedBox(height: AppSpacing.sm),
-          if (_tags.isNotEmpty) ...[
-            Wrap(
-              spacing: AppSpacing.sm,
-              runSpacing: AppSpacing.sm,
-              children: [
-                for (final tag in _tags)
-                  _TaskTagChip(tag: tag, onDelete: () => _removeTag(tag)),
-              ],
-            ),
-            const SizedBox(height: AppSpacing.sm),
-          ],
-          LzTextField(
-            controller: _tagController,
-            fieldKey: const Key('task-detail-tag-input'),
-            hint: 'Add a tag',
-            prefixIcon: Icons.label_outline,
-            textInputAction: TextInputAction.done,
-            onSubmitted: _addTag,
-          ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Allocated budget ───────────────────────────────────────────
-          _SectionLabel('BUDGET'),
-          const SizedBox(height: AppSpacing.sm),
-          LzTextField(
-            controller: _budgetController,
-            fieldKey: const Key('task-detail-budget'),
-            hint: 'Allocated budget (optional)',
-            prefixIcon: Icons.account_balance_wallet_outlined,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            textInputAction: TextInputAction.done,
-          ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Due date quick-pick ────────────────────────────────────────
+          // ── Notes, with the task's comment thread one tap away ──────────
+          //
+          // The comments used to be a whole section pinned BELOW sub-tasks —
+          // the far end of the app's longest sheet. As a badge here they cost
+          // one row and are reachable the instant the sheet opens.
           Row(
             children: [
-              _SectionLabel('DUE DATE'),
+              TaskSectionLabel('NOTES'),
               const Spacer(),
-              LzButton.ghost(
-                key: const Key('task-detail-reschedule'),
-                label: 'Reschedule',
-                icon: Icons.event_repeat_outlined,
-                onPressed: _reschedule,
+              TaskCommentsBadge(
+                count: taskLevelComments(live.taskComments).length,
+                onTap: () => _openTaskComments(live),
               ),
             ],
           ),
           const SizedBox(height: AppSpacing.sm),
-          Row(
-            children: [
-              LzChip(
-                label: 'Today',
-                icon: Icons.today_outlined,
-                selected: _dueDay == _isoToday(),
-                color: AppColors.warn,
-                onTap: () => setState(() {
-                  _dueTouched = true;
-                  _dueDay = _dueDay == _isoToday() ? null : _isoToday();
-                }),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              LzChip(
-                label: 'Tomorrow',
-                icon: Icons.event_outlined,
-                selected: _dueDay == _isoTomorrow(),
-                color: AppColors.accent,
-                onTap: () => setState(() {
-                  _dueTouched = true;
-                  _dueDay = _dueDay == _isoTomorrow() ? null : _isoTomorrow();
-                }),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              LzChip(
-                label: 'Pick…',
-                icon: Icons.calendar_month_outlined,
-                selected:
-                    _dueDay != null &&
-                    _dueDay != _isoToday() &&
-                    _dueDay != _isoTomorrow(),
-                color: AppColors.info,
-                onTap: _pickDate,
-              ),
-            ],
+          TaskNotesField(
+            controller: _notesController,
+            focusNode: _notesFocus,
+            editing: _editingNotes,
+            onBeginEdit: _beginEditNotes,
+            onAddLink: _addLink,
           ),
 
-          // ── Time-of-day chip ──────────────────────────────────────────
-          const SizedBox(height: AppSpacing.sm),
-          Row(
-            children: [
-              LzChip(
-                label: _dueTime != null
-                    ? formatClock12(_dueTime!.hour, _dueTime!.minute)
-                    : 'Add time',
-                icon: Icons.schedule_outlined,
-                selected: _dueTime != null,
-                color: AppColors.accent,
-                onTap: _pickTime,
-              ),
-              if (_dueTime != null) ...[
-                const SizedBox(width: AppSpacing.sm),
-                GestureDetector(
-                  onTap: () => setState(() {
-                    _dueTouched = true;
-                    _dueTime = null;
-                  }),
-                  child: Icon(
-                    Icons.close,
-                    size: 16,
-                    color: AppColors.textMuted,
-                  ),
-                ),
-              ],
-            ],
-          ),
-
-          if (_composedDue != null) ...[
-            const SizedBox(height: AppSpacing.sm),
-            Row(
-              children: [
-                Icon(
-                  Icons.event_available_outlined,
-                  size: 14,
-                  color: AppColors.textMuted,
-                ),
-                const SizedBox(width: AppSpacing.xs),
-                Text(
-                  'Due ${dueDateDisplay(_composedDue!)}',
-                  style: AppText.caption.copyWith(
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  key: const Key('task-detail-due-clear'),
-                  onTap: () => setState(() {
-                    _dueTouched = true;
-                    _dueDay = null;
-                    _dueTime = null;
-                  }),
-                  child: Icon(
-                    Icons.close,
-                    size: 14,
-                    color: AppColors.textMuted,
-                  ),
-                ),
-              ],
-            ),
-          ],
-
-          // ── Reminder lead-time (only when a due TIME exists) ───────────
-          if (dueDateHasTime(_composedDue)) ...[
-            const SizedBox(height: AppSpacing.xl),
-            _SectionLabel('REMIND'),
-            const SizedBox(height: AppSpacing.sm),
-            ReminderLeadPicker(
-              value: _effectiveLead,
-              onChanged: (lead) => setState(() {
-                _reminderTouched = true;
-                _explicitLead = lead;
-              }),
-            ),
-          ]
-          // A DATE-ONLY due can't express a lead (`due − lead` degenerates), but
-          // the task may still carry a real timed reminder — every respawned
-          // recurring occurrence does. Show it read-only with a ✕, so the user
-          // can SEE the reminder instead of the sheet silently implying "None".
-          else if (_survivingReminderAt != null) ...[
-            const SizedBox(height: AppSpacing.xl),
-            _SectionLabel('REMIND'),
-            const SizedBox(height: AppSpacing.sm),
-            Row(
-              children: [
-                Icon(
-                  Icons.notifications_active_outlined,
-                  size: 14,
-                  color: AppColors.textMuted,
-                ),
-                const SizedBox(width: AppSpacing.xs),
-                Text(
-                  dueDateDisplay(_survivingReminderAt!),
-                  key: const Key('task-detail-reminder'),
-                  style: AppText.caption.copyWith(
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  key: const Key('task-detail-reminder-clear'),
-                  onTap: () => setState(() => _reminderTouched = true),
-                  child: Icon(
-                    Icons.close,
-                    size: 14,
-                    color: AppColors.textMuted,
-                  ),
-                ),
-              ],
-            ),
-          ],
-
-          // ── Recurrence (repeat) ────────────────────────────────────────
           const SizedBox(height: AppSpacing.xl),
-          _SectionLabel('REPEAT'),
-          const SizedBox(height: AppSpacing.sm),
-          RecurrencePicker(
-            value: _recurrence,
-            anchorWeekday: _composedDue == null
+
+          // ── Priority + Project/Tags chips (see task_attribute_chips) ───
+          TaskPriorityChips(
+            priority: _priority,
+            onChanged: (p) => setState(() => _priority = p),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          TaskProjectTagsRow(
+            projects: widget.projects,
+            category: _category,
+            tags: _tags,
+            onPickProject: _pickProject,
+            onOpenTags: _openTags,
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Budget (extracted: see TaskBudgetSection) ──────────────────
+          TaskBudgetSection(
+            allocated: _originalBudget,
+            spent: taskExpenseTotal(expenses, widget.task.id),
+            currency: taskExpenseCurrency(expenses, widget.task.id),
+            canAddExpense: project != null,
+            showAllocatedField: _showBudgetField,
+            allocatedController: _budgetController,
+            allocatedFocusNode: _budgetFocus,
+            onEditAllocated: _revealAllocatedBudget,
+            // Unreachable while `canAddExpense` is false (the row is disabled),
+            // but a non-null callback keeps the widget's contract simple.
+            onAddExpense: () => project == null
+                ? _warnNoProject()
+                : _addExpense(project: project, contextLabel: live.title),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Due date + reminder (extracted: see TaskDueSection) ────────
+          TaskDueSection(
+            dueDay: _dueDay,
+            dueTime: _dueTime,
+            composedDue: _due.composedDue,
+            survivingReminderAt: _due.survivingReminderAt,
+            effectiveLead: _due.effectiveLead,
+            todayIso: _isoToday(),
+            tomorrowIso: _isoTomorrow(),
+            onReschedule: _reschedule,
+            onToggleDay: (iso) => setState(() {
+              _dueTouched = true;
+              _dueDay = _dueDay == iso ? null : iso;
+            }),
+            onPickDay: _pickDate,
+            onPickTime: _pickTime,
+            onClearTime: () => setState(() {
+              _dueTouched = true;
+              _dueTime = null;
+            }),
+            onClearDue: () => setState(() {
+              _dueTouched = true;
+              _dueDay = null;
+              _dueTime = null;
+            }),
+            onLeadChanged: (lead) => setState(() {
+              _reminderTouched = true;
+              _explicitLead = lead;
+            }),
+            onClearReminder: () => setState(() => _reminderTouched = true),
+          ),
+
+          // ── Repeat + series end (extracted: see TaskRepeatSection) ────
+          const SizedBox(height: AppSpacing.xl),
+          TaskRepeatSection(
+            recurrence: _recurrence,
+            recurUntil: _recurUntil,
+            anchorWeekday: _due.composedDue == null
                 ? null
-                : DateTime.tryParse(_composedDue!)?.weekday,
-            onChanged: (r) => setState(() {
+                : DateTime.tryParse(_due.composedDue!)?.weekday,
+            onRecurrenceChanged: (r) => setState(() {
               _recurrenceTouched = true;
               _recurrence = r;
             }),
+            onPickUntil: _pickRecurUntil,
+            onClearUntil: () => setState(() {
+              _recurUntilTouched = true;
+              _recurUntil = null;
+            }),
           ),
-
-          // ── Series end (only when a recurrence is selected) ────────────
-          if (_recurrence.repeats) ...[
-            const SizedBox(height: AppSpacing.md),
-            _SectionLabel('ENDS'),
-            const SizedBox(height: AppSpacing.sm),
-            Row(
-              children: [
-                LzChip(
-                  key: const Key('task-detail-recur-until-never'),
-                  label: 'Never',
-                  icon: Icons.all_inclusive,
-                  selected: _recurUntil == null,
-                  color: AppColors.accent,
-                  onTap: () => setState(() {
-                    _recurUntilTouched = true;
-                    _recurUntil = null;
-                  }),
-                ),
-                const SizedBox(width: AppSpacing.sm),
-                LzChip(
-                  key: const Key('task-detail-recur-until-date'),
-                  label: _recurUntil ?? 'On date…',
-                  icon: Icons.event_outlined,
-                  selected: _recurUntil != null,
-                  color: AppColors.info,
-                  onTap: _pickRecurUntil,
-                ),
-                if (_recurUntil != null) ...[
-                  const SizedBox(width: AppSpacing.sm),
-                  GestureDetector(
-                    key: const Key('task-detail-recur-until-clear'),
-                    onTap: () => setState(() {
-                      _recurUntilTouched = true;
-                      _recurUntil = null;
-                    }),
-                    child: Icon(
-                      Icons.close,
-                      size: 16,
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
 
           const SizedBox(height: AppSpacing.xl),
 
-          // ── Sub-tasks ──────────────────────────────────────────────────
-          Row(
-            children: [
-              _SectionLabel('SUBTASKS'),
-              const Spacer(),
-              if (subtaskProgressLabel(_subtasks) != null)
-                Text(
-                  subtaskProgressLabel(_subtasks)!,
-                  key: const Key('task-detail-subtask-progress'),
-                  style: AppText.caption.copyWith(color: AppColors.accent),
-                ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          SubtaskEditor(
+          // ── Sub-tasks (extracted: see TaskSubtasksSection) ─────────────
+          TaskSubtasksSection(
             subtasks: _subtasks,
             onChanged: (next) => setState(() => _subtasks = next),
             commentCounts: commentCounts,
             expenseTotals: expenseTotals,
             expenseCurrency: expenseCurrency,
-            onOpenComments: (sid) => showSubtaskCommentsSheet(
-              context,
-              subtaskTitle: _subtaskTitle(sid),
-              comments: live.taskComments
-                  .where((c) => c.subtaskId == sid)
-                  .toList(),
-              onAdd: (text) => ref
-                  .read(tasksProvider.notifier)
-                  .addComment(widget.task.id, text, subtaskId: sid),
-              onDelete: (cid) => ref
-                  .read(tasksProvider.notifier)
-                  .deleteComment(widget.task.id, cid),
-              onAddLink: () => showAddLinkDialog(context),
-            ),
-          ),
-
-          const SizedBox(height: AppSpacing.xl),
-
-          // ── Comments ───────────────────────────────────────────────────
-          _SectionLabel('COMMENTS'),
-          const SizedBox(height: AppSpacing.sm),
-          TaskCommentsSection(
-            comments: live.taskComments,
-            onAdd: (text) => ref
-                .read(tasksProvider.notifier)
-                .addComment(widget.task.id, text),
-            onDelete: (cid) => ref
-                .read(tasksProvider.notifier)
-                .deleteComment(widget.task.id, cid),
-            onAddLink: () => showAddLinkDialog(context),
-          ),
-
-          const SizedBox(height: AppSpacing.xxl),
-
-          // ── Footer: Delete + Save ──────────────────────────────────────
-          Row(
-            children: [
-              LzButton.danger(
-                key: const Key('task-detail-delete'),
-                label: 'Delete Task',
-                icon: Icons.delete_outline,
-                loading: _deleting,
-                onPressed: _delete,
-              ),
-              const SizedBox(width: AppSpacing.md),
-              Expanded(
-                child: LzButton.primary(
-                  key: const Key('task-detail-save'),
-                  label: 'Save',
-                  icon: Icons.check,
-                  loading: _saving,
-                  expand: true,
-                  onPressed: _save,
-                ),
-              ),
-            ],
+            savedSubtaskIds: savedSubtaskIds,
+            // Always wired, even with no project: the money sign stays
+            // visible and EXPLAINS itself (snackbar) instead of vanishing,
+            // which would read as "this task can't have expenses".
+            onAddExpense: (sid) => project == null
+                ? _warnNoProject()
+                : _addExpense(
+                    project: project,
+                    subtaskId: sid,
+                    contextLabel: 'Sub-task: ${_subtaskTitle(sid)}',
+                  ),
+            onOpenComments: (sid) => _openSubtaskComments(live, sid),
           ),
         ],
       ),
@@ -958,100 +716,48 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
-    DateTime initial = now.add(const Duration(days: 1));
-    if (_dueDay != null) {
-      try {
-        final parsed = DateTime.parse(_dueDay!);
-        if (!parsed.isBefore(DateTime(now.year, now.month, now.day))) {
-          initial = parsed;
-        }
-      } catch (_) {
-        // Keep the default when the stored value isn't ISO-parseable.
-      }
-    }
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initial,
+    final picked = await showTaskDatePicker(
+      context,
+      initialDate: dueDayPickerSeed(_dueDay, now: now),
       firstDate: now.subtract(const Duration(days: 365)),
       lastDate: now.add(const Duration(days: 365)),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: AppColors.accent,
-            surface: AppColors.bgSurfaceElevated,
-          ),
-        ),
-        child: child!,
-      ),
     );
-    if (picked != null) {
-      setState(() {
-        _dueTouched = true;
-        _dueDay = _isoFor(picked);
-      });
-    }
+    if (picked == null) return;
+    setState(() {
+      _dueTouched = true;
+      _dueDay = isoDay(picked);
+    });
   }
 
-  /// Pick the series' end day. A long horizon (10 years) so a yearly recurrence
-  /// can still be given a meaningful end date.
+  /// Pick the series' end day. A long horizon (10 years) so a yearly
+  /// recurrence can still be given a meaningful end date.
   Future<void> _pickRecurUntil() async {
     final now = DateTime.now();
-    DateTime initial = now.add(const Duration(days: 30));
-    final existing = _recurUntil == null
-        ? null
-        : DateTime.tryParse(_recurUntil!);
-    if (existing != null && !existing.isBefore(now)) initial = existing;
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initial,
+    final picked = await showTaskDatePicker(
+      context,
+      initialDate: recurUntilPickerSeed(_recurUntil, now: now),
       firstDate: now,
       lastDate: now.add(const Duration(days: 3650)),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: AppColors.accent,
-            surface: AppColors.bgSurfaceElevated,
-          ),
-        ),
-        child: child!,
-      ),
     );
-    if (picked != null) {
-      setState(() {
-        _recurUntilTouched = true;
-        _recurUntil = _isoFor(picked);
-      });
-    }
+    if (picked == null) return;
+    setState(() {
+      _recurUntilTouched = true;
+      _recurUntil = isoDay(picked);
+    });
   }
 
   Future<void> _pickTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _dueTime ?? const TimeOfDay(hour: 9, minute: 0),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: AppColors.accent,
-            surface: AppColors.bgSurfaceElevated,
-          ),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      setState(() {
-        _dueTouched = true;
-        _dueTime = picked;
-      });
-    }
+    final picked = await showTaskTimePicker(context, initial: _dueTime);
+    if (picked == null) return;
+    setState(() {
+      _dueTouched = true;
+      _dueTime = picked;
+    });
   }
 
-  String _isoFor(DateTime d) =>
-      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  String _isoToday() => isoDay(DateTime.now());
 
-  String _isoToday() => _isoFor(DateTime.now());
-
-  String _isoTomorrow() => _isoFor(DateTime.now().add(const Duration(days: 1)));
+  String _isoTomorrow() => isoDay(DateTime.now().add(const Duration(days: 1)));
 
   /// The sub-task's title for the comments sheet header, falling back to a
   /// generic label if the id somehow no longer matches (defensive only — the
@@ -1062,110 +768,6 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
         orElse: () => const Subtask(id: '', title: 'Sub-task', done: false),
       )
       .title;
-}
-
-/// A small uppercase section label matching the add-task sheet's headers.
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: AppText.caption.copyWith(
-        color: AppColors.textMuted,
-        letterSpacing: 0.8,
-        fontWeight: FontWeight.w700,
-      ),
-    );
-  }
-}
-
-/// A removable tag chip (tap to delete) shown in the detail sheet's TAGS row.
-class _TaskTagChip extends StatelessWidget {
-  const _TaskTagChip({required this.tag, required this.onDelete});
-
-  final String tag;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      borderRadius: AppRadii.rPill,
-      child: InkWell(
-        key: ValueKey('task-detail-tag-$tag'),
-        borderRadius: AppRadii.rPill,
-        onTap: onDelete,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.md,
-            AppSpacing.xs,
-            AppSpacing.xs,
-            AppSpacing.xs,
-          ),
-          decoration: BoxDecoration(
-            color: AppColors.accent.withValues(alpha: 0.14),
-            borderRadius: AppRadii.rPill,
-            border: Border.all(color: AppColors.accent.withValues(alpha: 0.35)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                tag,
-                style: AppText.caption.copyWith(
-                  color: AppColors.accent,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.xs),
-              Icon(
-                Icons.close_rounded,
-                size: 14,
-                color: AppColors.accent.withValues(alpha: 0.7),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Sub-task expense rollup (pure — feeds SubtaskEditor's money chip) ──────────
-
-/// The per-sub-task expense totals for [taskId], keyed by sub-task id — the
-/// data [SubtaskEditor.expenseTotals] renders as its money chip. Only LIVE
-/// (non-void) expenses actually linked to a sub-task count: a demoted
-/// expense (its sub-task was deleted server-side, per the backend's
-/// demote-never-delete cascade) has `subtaskId == null` and correctly rolls
-/// up only at the task level, not here.
-Map<String, double> subtaskExpenseTotals(
-  List<Expense> expenses,
-  String taskId,
-) {
-  final out = <String, double>{};
-  for (final e in expenses) {
-    final sid = e.subtaskId;
-    if (e.taskId != taskId || sid == null || e.isVoid) continue;
-    out[sid] = (out[sid] ?? 0) + e.amount;
-  }
-  return out;
-}
-
-/// The currency to render [subtaskExpenseTotals] in — taken from the first
-/// live task-linked, sub-task-linked expense found (a task's expenses all
-/// belong to the task's one project, hence share one currency), defaulting
-/// to 'USD' when the task has no such expense yet.
-String subtaskExpenseCurrency(List<Expense> expenses, String taskId) {
-  for (final e in expenses) {
-    if (e.taskId == taskId && e.subtaskId != null && !e.isVoid) {
-      return e.currency;
-    }
-  }
-  return 'USD';
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────

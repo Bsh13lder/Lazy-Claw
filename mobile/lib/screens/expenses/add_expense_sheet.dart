@@ -7,9 +7,13 @@ import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import 'expense_project_field.dart';
 import 'expense_project_suggestion_strip.dart';
-import 'project_color_picker.dart';
-import 'project_date_chips.dart';
+
+/// `AddProjectSheet` used to live in this file; it now has its own. Re-exported
+/// so the existing `import '.../add_expense_sheet.dart' show AddProjectSheet;`
+/// call sites (Tasks screen, Add Task sheet, Money screen) keep working.
+export 'add_project_sheet.dart';
 
 /// Bottom sheet for adding a new expense.
 ///
@@ -20,17 +24,26 @@ import 'project_date_chips.dart';
 /// re-parse (`_amountTouched`/`_projectTouched`, mirroring the task sheet's
 /// `_categoryTouched`).
 ///
+/// FIELD ORDER (2026-08-03): Description is FIRST and autofocused, Amount is
+/// second. Opening on Amount raised a numeric keypad, which fought the whole
+/// quick-typing interaction — the user has to dismiss/retarget before they can
+/// use the one field that fills in everything else. Amount keeps every
+/// behavior it had; only its position moved.
+///
 /// Calls [onSubmit] with (projectId, amount, description, vendor?) — the same
 /// 4-arg shape whether the values came from typing or manual entry, so quick-
 /// typing can't introduce a new currency (or any other) divergence from the
 /// existing form-based add path. Caller is responsible for invoking
-/// [budgetsProvider.addExpense].
+/// [BudgetsNotifier.addExpense]; see `showAddExpenseForTaskSheet`
+/// (add_expense_for_task.dart) for the task/sub-task-scoped variant.
 class AddExpenseSheet extends ConsumerStatefulWidget {
   const AddExpenseSheet({
     super.key,
     required this.projects,
     required this.initialProjectId,
     required this.onSubmit,
+    this.lockedProjectId,
+    this.contextLabel,
   });
 
   final List<Project> projects;
@@ -41,6 +54,16 @@ class AddExpenseSheet extends ConsumerStatefulWidget {
     String description,
     String? vendor,
   ) onSubmit;
+
+  /// Non-null switches the sheet into TASK-SCOPED mode: the project is fixed
+  /// to this id, rendered read-only, and neither the picker nor a typed
+  /// `#project` token can change it. See [ExpenseProjectLockedField] for why
+  /// re-filing a task's expense elsewhere has to be impossible.
+  final String? lockedProjectId;
+
+  /// Optional "you are adding to X" header (e.g. `Sub-task: Buy paint`) so a
+  /// scoped add never looks like a plain project expense.
+  final String? contextLabel;
 
   @override
   ConsumerState<AddExpenseSheet> createState() => _AddExpenseSheetState();
@@ -73,17 +96,24 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   String? _lastAutoFilledAmountText;
 
   /// The projects offered by the `#`/`/` suggestion strip. Seeded from
-  /// [widget.projects] but kept live: a project created FROM INSIDE this
-  /// sheet (via the strip's "Create project" row) is refreshed into this
+  /// [AddExpenseSheet.projects] but kept live: a project created FROM INSIDE
+  /// this sheet (via the strip's "Create project" row) is refreshed into this
   /// list right after the create succeeds, mirroring the Add Task sheet's
   /// `_projects` (see `add_task_sheet.dart:_createProjectFromSuggestion`).
   late List<Project> _projects;
+
+  /// True when the caller pinned the project (task/sub-task scoped add).
+  bool get _projectLocked => widget.lockedProjectId != null;
 
   @override
   void initState() {
     super.initState();
     _projects = widget.projects;
-    _projectId = widget.initialProjectId ??
+    // A locked id always wins over `initialProjectId` — the caller may pass
+    // both (the Money screen's last-used project is irrelevant once the task
+    // dictates the destination).
+    _projectId = widget.lockedProjectId ??
+        widget.initialProjectId ??
         (_projects.isNotEmpty ? _projects.first.id : null);
     _descFocusNode.addListener(_handleDescFocusChange);
   }
@@ -129,7 +159,10 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
       if (!_amountTouched && parsed.amount != null) {
         _applyParsedAmount(parsed.amount!);
       }
-      if (!_projectTouched && parsed.project != null) {
+      // In task-scoped mode a `#project` token is parsed (so it still drops
+      // out of the stored description) but deliberately NOT applied — the task
+      // owns the destination project.
+      if (!_projectLocked && !_projectTouched && parsed.project != null) {
         final match = resolveProjectMatch(parsed.project!, _projects);
         if (match != null) _projectId = match.id;
       }
@@ -204,10 +237,21 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
 
     if (!mounted) return;
     if (ok) {
-      Navigator.pop(context);
+      // Pop `true` so a scoped caller (showAddExpenseForTaskSheet) can await
+      // the outcome. Harmless on the Money screen's `show<void>` route —
+      // `void` accepts any result and that call site ignores it.
+      Navigator.pop(context, true);
     } else {
       setState(() => _loading = false);
     }
+  }
+
+  /// The locked project's display name, or null when it isn't in the cached
+  /// project list yet.
+  String? get _lockedProjectName {
+    final id = widget.lockedProjectId;
+    if (id == null) return null;
+    return _projects.where((p) => p.id == id).firstOrNull?.name;
   }
 
   @override
@@ -215,287 +259,109 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     // The strip only offers to disambiguate/create when the live-parsed
     // `#`/`/` token has NO unambiguous existing-project match — an
     // unambiguous match is already silently applied by `_onDescriptionChanged`
-    // (see the plan's project-resolution semantics).
+    // (see the plan's project-resolution semantics). It is suppressed entirely
+    // in task-scoped mode: picking/creating a project there would be a no-op
+    // at best and a mis-filed expense at worst.
     final suggestToken = _parsed.project;
-    final showSuggestions = suggestToken != null &&
+    final showSuggestions = !_projectLocked &&
+        suggestToken != null &&
         _descFocusNode.hasFocus &&
         !_projectTouched &&
         resolveProjectMatch(suggestToken, _projects) == null;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Amount — first, biggest, most important. Pre-filled live from the
-        // Description field below; a manual edit here always wins.
-        LzTextField(
-          controller: _amountCtrl,
-          fieldKey: const Key('expense-amount-field'),
-          label: 'Amount',
-          hint: '0.00',
-          prefixIcon: Icons.attach_money_rounded,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          textInputAction: TextInputAction.next,
-          errorText: _amountError,
-          autofocus: true,
-          onChanged: (v) {
-            if (v != _lastAutoFilledAmountText) _amountTouched = true;
-            if (_amountError != null) setState(() => _amountError = null);
-          },
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        // Description — the smart field: type "spent on #clubbay 25" and the
-        // amount + project above pre-fill live.
-        LzTextField(
-          controller: _descController,
-          fieldKey: const Key('expense-description-field'),
-          focusNode: _descFocusNode,
-          label: 'Description',
-          hint: 'e.g. "spent on #clubbay 25"',
-          prefixIcon: Icons.notes_rounded,
-          textInputAction: TextInputAction.next,
-          onChanged: _onDescriptionChanged,
-        ),
-        if (showSuggestions)
-          ExpenseProjectSuggestionStrip(
-            token: suggestToken,
-            projects: _projects,
-            onSelect: _applyProjectSuggestion,
-            onCreate: _createProjectFromSuggestion,
-          ),
-        const SizedBox(height: AppSpacing.xs),
-        Text(
-          '25 · €45.50 · 40 eur · #project',
-          style: AppText.caption.copyWith(color: AppColors.textMuted),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        // Vendor (optional).
-        LzTextField(
-          controller: _vendorCtrl,
-          label: 'Vendor (optional)',
-          hint: 'Merchant or source',
-          prefixIcon: Icons.storefront_outlined,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => _submit(),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        // Project picker.
-        _ProjectPicker(
-          projects: _projects,
-          selectedId: _projectId,
-          onChanged: (id) => setState(() {
-            _projectId = id;
-            _projectTouched = true;
-          }),
-        ),
-        const SizedBox(height: AppSpacing.xl),
-        // Submit.
-        LzButton.primary(
-          label: 'Add Expense',
-          icon: Icons.add_rounded,
-          loading: _loading,
-          expand: true,
-          onPressed: _loading ? null : _submit,
-        ),
-      ],
-    );
-  }
-}
-
-class _ProjectPicker extends StatelessWidget {
-  const _ProjectPicker({
-    required this.projects,
-    required this.selectedId,
-    required this.onChanged,
-  });
-
-  final List<Project> projects;
-  final String? selectedId;
-  final ValueChanged<String?> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    if (projects.isEmpty) {
-      return Container(
-        padding: const EdgeInsets.all(AppSpacing.md),
-        decoration: BoxDecoration(
-          color: AppColors.bgSurfaceElevated,
-          borderRadius: AppRadii.rMd,
-          border: Border.all(color: AppColors.borderDefault),
-        ),
-        child: Text(
-          'No projects — create one first',
-          style: AppText.body.copyWith(color: AppColors.textMuted),
-        ),
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Project',
-          style: AppText.label.copyWith(color: AppColors.textSecondary),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        Container(
-          decoration: BoxDecoration(
-            color: AppColors.bgSurfaceElevated,
-            borderRadius: AppRadii.rMd,
-            border: Border.all(color: AppColors.borderDefault),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: selectedId,
-              isExpanded: true,
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-              dropdownColor: AppColors.bgSurfaceElevated,
-              style: AppText.body,
-              icon: const Icon(
-                Icons.keyboard_arrow_down_rounded,
-                color: AppColors.textMuted,
+    return LzFloatingSubmitLayout(
+      // Square, always-on-screen submit. It replaces the old full-width
+      // "Add Expense" button, which a grown form pushed below the sheet's
+      // bottom edge — the user's report was literally "there is no save sign".
+      submit: LzFloatingSubmit(
+        key: const Key('expense-submit-fab'),
+        icon: Icons.add_rounded,
+        tooltip: 'Add expense',
+        loading: _loading,
+        onPressed: _loading ? null : _submit,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.contextLabel != null) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: LzPill(
+                key: const Key('expense-context-label'),
+                label: widget.contextLabel!,
+                icon: Icons.link_rounded,
               ),
-              hint: Text(
-                'Select project',
-                style: AppText.body.copyWith(color: AppColors.textMuted),
-              ),
-              items: projects
-                  .map(
-                    (p) => DropdownMenuItem<String>(
-                      value: p.id,
-                      child: Text(p.name, style: AppText.body),
-                    ),
-                  )
-                  .toList(),
-              onChanged: onChanged,
             ),
+            const SizedBox(height: AppSpacing.lg),
+          ],
+          // Description — FIRST and autofocused because it is the smart field:
+          // type "spent on #clubbay 25" and the Amount + project below fill in
+          // live. See the class doc for why this beats opening on Amount.
+          LzTextField(
+            controller: _descController,
+            fieldKey: const Key('expense-description-field'),
+            focusNode: _descFocusNode,
+            label: 'Description',
+            hint: 'e.g. "spent on #clubbay 25"',
+            prefixIcon: Icons.notes_rounded,
+            textInputAction: TextInputAction.next,
+            autofocus: true,
+            onChanged: _onDescriptionChanged,
           ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Bottom sheet for creating a new project.
-class AddProjectSheet extends StatefulWidget {
-  const AddProjectSheet({
-    super.key,
-    required this.onSubmit,
-  });
-
-  /// Called with (name, budget?, color?, startDate?, dueDate?). The color is a
-  /// `"#RRGGBB"` hex string; the dates are `yyyy-MM-dd` strings — each null
-  /// when the user left it unset.
-  final Future<bool> Function(
-    String name,
-    double? budget,
-    String? color,
-    String? startDate,
-    String? dueDate,
-  ) onSubmit;
-
-  @override
-  State<AddProjectSheet> createState() => _AddProjectSheetState();
-}
-
-class _AddProjectSheetState extends State<AddProjectSheet> {
-  final _nameCtrl = TextEditingController();
-  final _budgetCtrl = TextEditingController();
-  String? _selectedColor;
-  String? _startDate;
-  String? _dueDate;
-  bool _loading = false;
-  String? _nameError;
-
-  @override
-  void dispose() {
-    _nameCtrl.dispose();
-    _budgetCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    final name = _nameCtrl.text.trim();
-    if (name.isEmpty) {
-      setState(() => _nameError = 'Project name is required');
-      return;
-    }
-
-    final budget = double.tryParse(_budgetCtrl.text.trim());
-    setState(() {
-      _loading = true;
-      _nameError = null;
-    });
-
-    final ok = await widget.onSubmit(
-        name, budget, _selectedColor, _startDate, _dueDate);
-    if (!mounted) return;
-    if (ok) {
-      Navigator.pop(context);
-    } else {
-      setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        LzTextField(
-          controller: _nameCtrl,
-          label: 'Project name',
-          hint: 'e.g. Marketing Q3',
-          prefixIcon: Icons.folder_outlined,
-          textInputAction: TextInputAction.next,
-          autofocus: true,
-          errorText: _nameError,
-          onChanged: (_) {
-            if (_nameError != null) setState(() => _nameError = null);
-          },
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        LzTextField(
-          controller: _budgetCtrl,
-          label: 'Budget (optional)',
-          hint: '0.00',
-          prefixIcon: Icons.account_balance_wallet_outlined,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => _submit(),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        Text(
-          'Color (optional)',
-          style: AppText.label.copyWith(color: AppColors.textSecondary),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        ProjectColorSwatches(
-          selected: _selectedColor,
-          onSelected: (hex) => setState(() => _selectedColor = hex),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        Text(
-          'Time frame (optional)',
-          style: AppText.label.copyWith(color: AppColors.textSecondary),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        ProjectDateChips(
-          startDate: _startDate,
-          dueDate: _dueDate,
-          onStartChanged: (v) => setState(() => _startDate = v),
-          onDueChanged: (v) => setState(() => _dueDate = v),
-        ),
-        const SizedBox(height: AppSpacing.xl),
-        LzButton.primary(
-          label: 'Create Project',
-          icon: Icons.create_new_folder_outlined,
-          loading: _loading,
-          expand: true,
-          onPressed: _loading ? null : _submit,
-        ),
-      ],
+          if (showSuggestions)
+            ExpenseProjectSuggestionStrip(
+              token: suggestToken,
+              projects: _projects,
+              onSelect: _applyProjectSuggestion,
+              onCreate: _createProjectFromSuggestion,
+            ),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            '25 · €45.50 · 40 eur · #project',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          // Amount — pre-filled live from the Description field above; a
+          // manual edit here always wins over a later re-parse.
+          LzTextField(
+            controller: _amountCtrl,
+            fieldKey: const Key('expense-amount-field'),
+            label: 'Amount',
+            hint: '0.00',
+            prefixIcon: Icons.attach_money_rounded,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            textInputAction: TextInputAction.next,
+            errorText: _amountError,
+            onChanged: (v) {
+              if (v != _lastAutoFilledAmountText) _amountTouched = true;
+              if (_amountError != null) setState(() => _amountError = null);
+            },
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          // Vendor (optional) — last field, so it submits.
+          LzTextField(
+            controller: _vendorCtrl,
+            label: 'Vendor (optional)',
+            hint: 'Merchant or source',
+            prefixIcon: Icons.storefront_outlined,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          if (_projectLocked)
+            ExpenseProjectLockedField(projectName: _lockedProjectName)
+          else
+            ExpenseProjectPicker(
+              projects: _projects,
+              selectedId: _projectId,
+              onChanged: (id) => setState(() {
+                _projectId = id;
+                _projectTouched = true;
+              }),
+            ),
+        ],
+      ),
     );
   }
 }

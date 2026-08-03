@@ -11,7 +11,10 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 void main() {
   // Host that owns the value + records every onChanged emission, re-rendering
   // the picker with the latest value (mirrors how the sheets drive it).
-  Widget host(List<ReminderLead> sink, {ReminderLead initial = ReminderLead.none}) {
+  Widget host(
+    List<ReminderLead> sink, {
+    ReminderLead initial = ReminderLead.none,
+  }) {
     return MaterialApp(
       theme: buildAppTheme(),
       home: Scaffold(
@@ -58,8 +61,9 @@ void main() {
     expect(sink.last, ReminderLead.none);
   });
 
-  testWidgets('Custom… reveals the number field and emits a custom lead',
-      (tester) async {
+  testWidgets('Custom… reveals the number field and emits a custom lead', (
+    tester,
+  ) async {
     final sink = <ReminderLead>[];
     await tester.pumpWidget(host(sink));
 
@@ -74,7 +78,9 @@ void main() {
 
     // Type a custom value (minutes by default).
     await tester.enterText(
-        find.byKey(const Key('reminder-custom-value')), '45');
+      find.byKey(const Key('reminder-custom-value')),
+      '45',
+    );
     await tester.pump();
     expect(sink.last, const ReminderLead(Duration(minutes: 45)));
     expect(sink.last.isCustom, isTrue);
@@ -85,15 +91,18 @@ void main() {
     expect(sink.last, const ReminderLead(Duration(hours: 45)));
   });
 
-  testWidgets('opening Custom on an existing custom value seeds the inputs',
-      (tester) async {
+  testWidgets('opening Custom on an existing custom value seeds the inputs', (
+    tester,
+  ) async {
     final sink = <ReminderLead>[];
     await tester.pumpWidget(
-        host(sink, initial: const ReminderLead(Duration(hours: 2))));
+      host(sink, initial: const ReminderLead(Duration(hours: 2))),
+    );
 
     // Custom inputs are shown immediately (value.isCustom), seeded to 2 / Hr.
     final field = tester.widget<TextField>(
-        find.byKey(const Key('reminder-custom-value')));
+      find.byKey(const Key('reminder-custom-value')),
+    );
     expect(field.controller!.text, '2');
     expect(find.text('Hr'), findsOneWidget);
   });

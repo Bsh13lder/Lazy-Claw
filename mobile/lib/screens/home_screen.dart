@@ -19,6 +19,7 @@ import 'expenses/money_helpers.dart';
 import 'expenses/project_color_picker.dart';
 import 'settings/settings_prefs.dart' show kDefaultReminderLead;
 import 'tasks/add_task_sheet.dart';
+import 'tasks/add_task_submit.dart';
 
 // The chat provider is defined in chat_screen.dart and kept alive by
 // StatefulShellRoute. We re-read it here (same ProviderScope) so the Home
@@ -101,24 +102,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       projects: ref.read(budgetsProvider).projects,
     );
     if (result == null || !mounted) return;
-    // A PROJECT-chip pick or `/token` that doesn't match an existing project
-    // (by name, case-insensitive) auto-creates it instead of landing in the
-    // old silent phantom-tag bucket.
-    final category = result.category;
-    if (category != null && category.isNotEmpty) {
-      await ref.read(budgetsProvider.notifier).ensureProject(category);
+    // Same shared pipeline the Tasks tab uses (project ensure → task create →
+    // optional linked expense) — see add_task_submit.dart for why it isn't
+    // duplicated here.
+    final outcome = await submitAddTaskResultWithRef(ref, result);
+    if (!mounted) return;
+    final warning = outcome.expenseWarning;
+    if (warning != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(warning)));
     }
-    await ref.read(tasksProvider.notifier).addTask(
-          result.title,
-          priority: result.priority,
-          dueDate: result.dueDate,
-          category: result.category,
-          reminderAt: result.reminderAt,
-          recurring: result.recurring,
-          recurUntil: result.recurUntil,
-          description: result.description,
-          steps: result.steps,
-        );
   }
 
   @override

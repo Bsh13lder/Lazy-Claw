@@ -12,17 +12,24 @@ void main() {
   final now = DateTime(2026, 6, 6);
 
   /// Build the controller's span for [text] under a real [BuildContext].
-  Future<TextSpan> spanFor(WidgetTester tester, String text,
-      {bool withComposing = false}) async {
+  Future<TextSpan> spanFor(
+    WidgetTester tester,
+    String text, {
+    bool withComposing = false,
+  }) async {
     final controller = SmartAddController(text: text);
     controller.tokens = parseSmartAdd(text, now: now).tokens;
     late BuildContext ctx;
-    await tester.pumpWidget(MaterialApp(
-      home: Builder(builder: (c) {
-        ctx = c;
-        return const SizedBox.shrink();
-      }),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (c) {
+            ctx = c;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
     return controller.buildTextSpan(
       context: ctx,
       style: const TextStyle(),
@@ -33,16 +40,18 @@ void main() {
   List<TextSpan> kids(TextSpan span) =>
       (span.children ?? const <InlineSpan>[]).cast<TextSpan>();
 
-  testWidgets('emits one highlighted span per token, plain text in between',
-      (tester) async {
+  testWidgets('emits one highlighted span per token, plain text in between', (
+    tester,
+  ) async {
     const input = 'pay rent tom !p1 #home';
     final parsed = parseSmartAdd(input, now: now);
     final span = await spanFor(tester, input);
     final children = kids(span);
 
     // The styled (highlighted) spans = those with a background fill.
-    final highlighted =
-        children.where((s) => s.style?.backgroundColor != null).toList();
+    final highlighted = children
+        .where((s) => s.style?.backgroundColor != null)
+        .toList();
     expect(highlighted.length, parsed.tokens.length); // tom + !p1 + #home = 3
 
     // Highlighted text matches exactly what each token covers.
@@ -55,8 +64,9 @@ void main() {
 
   testWidgets('priority tokens are bold + colored', (tester) async {
     final span = await spanFor(tester, 'ship !!!');
-    final styled =
-        kids(span).firstWhere((s) => s.style?.backgroundColor != null);
+    final styled = kids(
+      span,
+    ).firstWhere((s) => s.style?.backgroundColor != null);
     expect(styled.text, '!!!');
     expect(styled.style?.fontWeight, FontWeight.w600);
     expect(styled.style?.color, isNotNull);
@@ -65,13 +75,15 @@ void main() {
   testWidgets('no tokens -> falls back to a plain span', (tester) async {
     final span = await spanFor(tester, 'just plain text');
     // No highlighted children when nothing was recognized.
-    final highlighted =
-        kids(span).where((s) => s.style?.backgroundColor != null);
+    final highlighted = kids(
+      span,
+    ).where((s) => s.style?.backgroundColor != null);
     expect(highlighted, isEmpty);
   });
 
-  testWidgets('defers to default rendering while an IME composition is active',
-      (tester) async {
+  testWidgets('defers to default rendering while an IME composition is active', (
+    tester,
+  ) async {
     final controller = SmartAddController();
     controller.value = const TextEditingValue(
       text: 'meet tom',
@@ -79,12 +91,16 @@ void main() {
     );
     controller.tokens = parseSmartAdd('meet tom', now: now).tokens;
     late BuildContext ctx;
-    await tester.pumpWidget(MaterialApp(
-      home: Builder(builder: (c) {
-        ctx = c;
-        return const SizedBox.shrink();
-      }),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (c) {
+            ctx = c;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
     final span = controller.buildTextSpan(
       context: ctx,
       style: const TextStyle(),
@@ -98,8 +114,9 @@ void main() {
     expect(highlighted, isEmpty);
   });
 
-  testWidgets('setting identical tokens does not notify listeners',
-      (tester) async {
+  testWidgets('setting identical tokens does not notify listeners', (
+    tester,
+  ) async {
     final controller = SmartAddController(text: 'x tom');
     final tokens = parseSmartAdd('x tom', now: now).tokens;
     controller.tokens = tokens;

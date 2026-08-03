@@ -4,6 +4,9 @@ import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/budgets_dao.dart';
 import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
+// Imported for `subtaskExpenseTotals` only — the pure rollup the sub-task
+// money chip renders. Nothing here builds a widget.
+import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
 import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -104,6 +107,79 @@ void main() {
       expect(n.state.dirtyExpenseIds, contains(exp.id));
       // The optimistic row carries the project name for the tile subtitle.
       expect(exp.projectName, 'Proj');
+      // Unlinked create stays unlinked — regression guard for the pre-existing
+      // Money-screen caller, which passes neither id.
+      expect(exp.taskId, isNull);
+      expect(exp.subtaskId, isNull);
+    });
+
+    test(
+        'addExpense(taskId:, subtaskId:) stamps the link on the OPTIMISTIC row '
+        'so subtaskExpenseTotals() sees it before any sync round-trip',
+        () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Reno');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final projectId = n.state.projects.first.id;
+
+      final ok = await n.addExpense(projectId, 40.0, 'Tiles',
+          taskId: 't1', subtaskId: 's1');
+      expect(ok, isTrue);
+
+      final exp = n.state.expenses.firstWhere((e) => e.description == 'Tiles');
+      expect(exp.taskId, 't1');
+      expect(exp.subtaskId, 's1');
+      // THE guarantee the whole feature rests on: the sub-task money chip
+      // reads this rollup straight off provider state.
+      expect(subtaskExpenseTotals(n.state.expenses, 't1'), {'s1': 40.0});
+
+      // …and the queued create carries the link, so the server row is born
+      // linked too (no create-then-PATCH window where the link can be lost).
+      final createItem = (await dao.readBudgetsOutbox()).firstWhere(
+          (o) => o.isExpense && o.op == BudgetsOutboxOp.create);
+      expect(createItem.payload['task_id'], 't1');
+      expect(createItem.payload['subtask_id'], 's1');
+    });
+
+    test('addExpense(taskId:) alone leaves the sub-task link null', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Reno');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await n.addExpense(n.state.projects.first.id, 15.0, 'Fuel', taskId: 't1');
+
+      final exp = n.state.expenses.firstWhere((e) => e.description == 'Fuel');
+      expect(exp.taskId, 't1');
+      expect(exp.subtaskId, isNull);
+      // Task-level money must NOT leak into the per-sub-task rollup.
+      expect(subtaskExpenseTotals(n.state.expenses, 't1'), isEmpty);
+    });
+
+    test(
+        'addExpense with a subtaskId but no taskId fails loudly (false + '
+        'state.error) and writes nothing', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
+      final n = BudgetsNotifier(dao, sync);
+
+      await n.createProject('Reno');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final ok = await n.addExpense(
+          n.state.projects.first.id, 5.0, 'Orphan', subtaskId: 's1');
+
+      expect(ok, isFalse);
+      expect(n.state.error, isNotNull);
+      expect(n.state.isSubmitting, isFalse);
+      expect(n.state.expenses, isEmpty);
+      expect(
+        (await dao.readBudgetsOutbox()).where((o) => o.isExpense),
+        isEmpty,
+      );
     });
 
     test(

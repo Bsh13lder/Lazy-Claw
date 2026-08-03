@@ -580,6 +580,28 @@ class BudgetsDao {
 
   /// Create an expense locally under [projectId]. Mints a client UUID when [id]
   /// is omitted so the create replays idempotently. Returns the stored Expense.
+  ///
+  /// [taskId]/[subtaskId] let the expense be born already linked (the "add an
+  /// expense straight from a task / sub-task" flow). Both are optional and
+  /// default to null, so every pre-existing caller keeps producing the exact
+  /// same cache row and outbox body. Two boundary rules, both applied BEFORE
+  /// anything is persisted:
+  ///
+  ///  * NORMALIZE — a blank/whitespace-only id (a picker that yielded '' , a
+  ///    stale form field) is coerced to null rather than persisted. An empty
+  ///    string is not a link; storing one would make `task_id = ?` filters and
+  ///    [subtaskExpenseTotals]-style rollups match a task that doesn't exist.
+  ///  * REJECT — a [subtaskId] without a [taskId] throws [ArgumentError]. That
+  ///    shape violates the server's hard invariant (`subtask_id IS NOT NULL`
+  ///    implies `task_id IS NOT NULL`, a 400 from `_validate_subtask_link`), so
+  ///    silently accepting it locally would mint a row that can never sync —
+  ///    it would drain into a permanent rejection and dead-letter. Failing here
+  ///    keeps the outbox honest: nothing is written, nothing is queued.
+  ///
+  /// Unlike the PATCH path ([applyLocalExpenseUpdate]) there is no
+  /// null-vs-absent `*Set` flag to carry here: a create has no prior value to
+  /// preserve, so "null" and "absent" mean the same thing (no link) and the
+  /// keys are simply omitted from the payload when unset.
   Future<Expense> applyLocalExpenseCreate(
     String projectId,
     double amount,
@@ -588,12 +610,30 @@ class BudgetsDao {
     String currency = 'USD',
     String? vendor,
     String? projectName,
+    String? taskId,
+    String? subtaskId,
   }) async {
+    final linkTaskId = _normalizedLinkId(taskId);
+    final linkSubtaskId = _normalizedLinkId(subtaskId);
+    if (linkSubtaskId != null && linkTaskId == null) {
+      throw ArgumentError.value(
+        subtaskId,
+        'subtaskId',
+        'a sub-task link requires its parent taskId '
+            '(server invariant: subtask_id implies task_id)',
+      );
+    }
+
     final expenseId = id ?? newLocalId();
     final now = _now();
     final expense = Expense(
       id: expenseId,
       projectId: projectId,
+      // Stamped up front — same reason projectName/currency are: the sub-task
+      // money chip reads the optimistic row, so the link must be present
+      // BEFORE any sync round-trip or the chip stays empty until a pull.
+      taskId: linkTaskId,
+      subtaskId: linkSubtaskId,
       amount: amount,
       currency: currency,
       description: description,
@@ -620,6 +660,8 @@ class BudgetsDao {
       // body, but we keep it in the payload so the replay knows the target.
       // currency + spent_at ride along so an offline create doesn't lose the
       // user's chosen currency (e.g. EUR → server-default) or the spend date.
+      // task_id/subtask_id use the null-aware `?value` entry syntax so an
+      // unlinked create's body is byte-identical to the pre-link shape.
       final payload = <String, dynamic>{
         'id': expenseId,
         'project_id': projectId,
@@ -628,12 +670,24 @@ class BudgetsDao {
         'currency': currency,
         'spent_at': now,
         'vendor': ?vendor,
+        'task_id': ?linkTaskId,
+        'subtask_id': ?linkSubtaskId,
       };
       await _enqueueTxn(
           txn, BudgetsOutboxOp.create, kExpenseEntity, expenseId, payload, now);
     });
 
     return (await getExpense(expenseId))!;
+  }
+
+  /// Coerce a task/sub-task link id to its canonical form: a trimmed non-empty
+  /// string, or null. Guards the create boundary against `''` / `'  '` leaking
+  /// out of a picker or a half-filled form and being persisted as a "link" that
+  /// points nowhere.
+  static String? _normalizedLinkId(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   /// Patch an existing expense locally (amount/description/vendor/project/
@@ -1073,6 +1127,11 @@ class BudgetsDao {
           'currency': e.currency,
           if (e.spentAt != null) 'spent_at': e.spentAt,
           if (e.vendor != null) 'vendor': e.vendor,
+          // A born-linked expense must heal back into a LINKED create — without
+          // these the self-heal would silently resurrect the row unlinked and
+          // the sub-task rollup would lose the money on the next pull.
+          if (e.taskId != null) 'task_id': e.taskId,
+          if (e.subtaskId != null) 'subtask_id': e.subtaskId,
         };
         await _enqueueTxn(
             txn, BudgetsOutboxOp.create, kExpenseEntity, id, payload, now);

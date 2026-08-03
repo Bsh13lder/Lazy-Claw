@@ -17,18 +17,19 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 void main() {
   Widget host({ReminderLead defaultLead = ReminderLead.min30}) => ProviderScope(
-        child: MaterialApp(
-          theme: buildAppTheme(),
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: AddTaskSheet(defaultLead: defaultLead),
-            ),
-          ),
+    child: MaterialApp(
+      theme: buildAppTheme(),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: AddTaskSheet(defaultLead: defaultLead),
         ),
-      );
+      ),
+    ),
+  );
 
-  testWidgets('REMIND picker is hidden until a due time is set',
-      (tester) async {
+  testWidgets('REMIND picker is hidden until a due time is set', (
+    tester,
+  ) async {
     await tester.pumpWidget(host());
     // No time yet → no reminder section.
     expect(find.text('REMIND'), findsNothing);
@@ -39,18 +40,16 @@ void main() {
     expect(find.text('REMIND'), findsNothing);
   });
 
-  testWidgets('a date-only due shows the muted default-time reminder hint',
-      (tester) async {
+  testWidgets('a date-only due shows the muted default-time reminder hint', (
+    tester,
+  ) async {
     await tester.pumpWidget(host());
     await tester.enterText(find.byType(TextField).first, 'Buy milk tomorrow');
     await tester.pump();
 
     // No timed REMIND picker, but the reassurance hint at the default time.
     expect(find.text('REMIND'), findsNothing);
-    expect(
-      find.text('Reminds at 9:00 AM on the due date'),
-      findsOneWidget,
-    );
+    expect(find.text('Reminds at 9:00 AM on the due date'), findsOneWidget);
   });
 
   testWidgets('a parsed time surfaces the picker with the global default '

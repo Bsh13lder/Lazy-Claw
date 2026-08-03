@@ -198,6 +198,14 @@ class BudgetsRepository {
   /// Create an expense under [projectId]. Pass [id] to send a client-minted
   /// UUID — the server's POST accepts it, making the create idempotent on
   /// outbox replay. Returns the created [Expense].
+  ///
+  /// [taskId]/[subtaskId] link the expense at birth. The server's
+  /// `CreateExpenseBody` already declares both, so no backend change is needed
+  /// — but it enforces `subtask_id implies task_id` and 400s a violation, so
+  /// callers must never send a lone [subtaskId] (the DAO rejects that shape
+  /// before it can ever reach the outbox). Null values are OMITTED from the
+  /// body, not sent as JSON null: this is a create, so there is no prior value
+  /// a null could be meant to clear.
   Future<Expense> createExpense(
     String projectId,
     double amount,
@@ -207,6 +215,8 @@ class BudgetsRepository {
     String? currency,
     String? spentAt,
     String? notes,
+    String? taskId,
+    String? subtaskId,
   }) async {
     final body = <String, dynamic>{
       'amount': amount,
@@ -217,6 +227,8 @@ class BudgetsRepository {
     if (currency != null) body['currency'] = currency;
     if (spentAt != null) body['spent_at'] = spentAt;
     if (notes != null) body['notes'] = notes;
+    if (taskId != null) body['task_id'] = taskId;
+    if (subtaskId != null) body['subtask_id'] = subtaskId;
 
     final json = await _t.postJson(
       '/api/budgets/projects/$projectId/expenses',

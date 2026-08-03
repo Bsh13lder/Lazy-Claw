@@ -111,17 +111,20 @@ _StubTasksNotifier _stub() {
 
 class _OfflineBudgetsTransport implements BudgetsTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -170,8 +173,11 @@ const _withSteps = Task(
 );
 
 void main() {
-  Widget host(_StubTasksNotifier stub, Task task, {List<Expense> expenses = const []}) =>
-      ProviderScope(
+  Widget host(
+    _StubTasksNotifier stub,
+    Task task, {
+    List<Expense> expenses = const [],
+  }) => ProviderScope(
     overrides: [
       tasksProvider.overrideWith((ref) => stub),
       budgetsProvider.overrideWith((ref) => _stubBudgets(expenses)),
@@ -212,6 +218,15 @@ void main() {
 
   String? lastSteps(_StubTasksNotifier stub) =>
       stub.updateCalls.single['steps'] as String?;
+
+  /// Every per-sub-task 💬 badge, matched by its `subtask-comments-<id>` key
+  /// rather than by icon — the sheet's own task-level comments badge uses the
+  /// same glyph and would otherwise be counted as a sub-task's.
+  Finder subtaskCommentBadges() => find.byWidgetPredicate(
+    (w) =>
+        w.key is ValueKey<String> &&
+        (w.key as ValueKey<String>).value.startsWith('subtask-comments-'),
+  );
 
   testWidgets('renders existing sub-tasks + a done/total progress label', (
     tester,
@@ -321,7 +336,10 @@ void main() {
       // Both pre-existing (SAVED) sub-tasks get a comment affordance — the
       // detail sheet always wires onOpenComments, and their ids are present
       // in the watched provider task's parsed steps.
-      expect(find.byIcon(Icons.chat_bubble_outline), findsNWidgets(2));
+      //
+      // Counted by KEY, not by icon: the sheet's own task-level comments
+      // badge (D4) wears the same 💬 glyph, so an icon count would include it.
+      expect(subtaskCommentBadges(), findsNWidgets(2));
       expect(find.byKey(const ValueKey('subtask-comments-s1')), findsOneWidget);
       expect(find.byKey(const ValueKey('subtask-comments-s2')), findsOneWidget);
 
@@ -337,7 +355,7 @@ void main() {
       // a comment on it before Save would replay against an unknown
       // subtask_id server-side.
       expect(find.text('Add frosting'), findsOneWidget);
-      expect(find.byIcon(Icons.chat_bubble_outline), findsNWidgets(2));
+      expect(subtaskCommentBadges(), findsNWidgets(2));
     },
   );
 
@@ -386,6 +404,12 @@ void main() {
   });
 
   // ── Sub-task money chip (expense rollup) ─────────────────────────────────
+  //
+  // NOTE (D2, 2026-08-03): the money sign is now an ADD affordance rendered
+  // on EVERY saved sub-task, not only on ones that already have expenses —
+  // so these tests assert on the rendered AMOUNT rather than on the presence
+  // of the key/icon. The BUDGET dropdown also wears `attach_money_rounded`,
+  // so raw icon counts would double-count it; use `_amountsShown` instead.
 
   group('sub-task money chip', () {
     Expense expense({
@@ -395,20 +419,20 @@ void main() {
       double amount = 10.0,
       String currency = 'USD',
       String status = 'posted',
-    }) =>
-        Expense(
-          id: id,
-          projectId: 'p1',
-          taskId: taskId,
-          subtaskId: subtaskId,
-          amount: amount,
-          currency: currency,
-          description: 'expense',
-          status: status,
-        );
+    }) => Expense(
+      id: id,
+      projectId: 'p1',
+      taskId: taskId,
+      subtaskId: subtaskId,
+      amount: amount,
+      currency: currency,
+      description: 'expense',
+      status: status,
+    );
 
-    testWidgets('shows a total for a sub-task with a linked expense',
-        (tester) async {
+    testWidgets('shows a total for a sub-task with a linked expense', (
+      tester,
+    ) async {
       final stub = _stub();
       await openSheet(
         tester,
@@ -420,12 +444,15 @@ void main() {
 
       expect(find.byKey(const ValueKey('subtask-expense-s1')), findsOneWidget);
       expect(find.text('\$12.50'), findsOneWidget);
-      // s2 has no linked expense — no chip.
-      expect(find.byKey(const ValueKey('subtask-expense-s2')), findsNothing);
+      // s2 is saved so it keeps its (bare) add affordance, but shows no
+      // amount — nothing has been spent on it.
+      expect(find.byKey(const ValueKey('subtask-expense-s2')), findsOneWidget);
+      expect(find.text('\$0'), findsNothing);
     });
 
-    testWidgets('sums multiple expenses linked to the same sub-task',
-        (tester) async {
+    testWidgets('sums multiple expenses linked to the same sub-task', (
+      tester,
+    ) async {
       final stub = _stub();
       await openSheet(
         tester,
@@ -439,50 +466,76 @@ void main() {
       expect(find.text('\$15'), findsOneWidget);
     });
 
-    testWidgets(
-        'excludes a void expense and one linked to a different task',
-        (tester) async {
+    testWidgets('excludes a void expense and one linked to a different task', (
+      tester,
+    ) async {
       final stub = _stub();
       await openSheet(
         tester,
         stub,
         expenses: [
           expense(
-              id: 'e-void',
-              taskId: 'task-9',
-              subtaskId: 's1',
-              amount: 99.0,
-              status: 'void'),
+            id: 'e-void',
+            taskId: 'task-9',
+            subtaskId: 's1',
+            amount: 99.0,
+            status: 'void',
+          ),
           expense(
-              id: 'e-other-task',
-              taskId: 'task-other',
-              subtaskId: 's1',
-              amount: 50.0),
+            id: 'e-other-task',
+            taskId: 'task-other',
+            subtaskId: 's1',
+            amount: 50.0,
+          ),
         ],
       );
 
-      expect(find.byKey(const ValueKey('subtask-expense-s1')), findsNothing);
+      // The affordance is still there (s1 is saved), but neither excluded
+      // expense contributes an amount to it.
+      expect(find.byKey(const ValueKey('subtask-expense-s1')), findsOneWidget);
+      expect(find.text('\$99'), findsNothing);
+      expect(find.text('\$50'), findsNothing);
     });
 
     testWidgets(
-        'a task-level expense (no subtask_id) does not render a chip on '
-        'either sub-task', (tester) async {
-      final stub = _stub();
-      await openSheet(
-        tester,
-        stub,
-        expenses: [expense(id: 'e1', taskId: 'task-9', amount: 40.0)],
-      );
+      'a task-level expense (no subtask_id) shows NO amount on either '
+      'sub-task — it belongs to the task, not to a row',
+      (tester) async {
+        final stub = _stub();
+        await openSheet(
+          tester,
+          stub,
+          expenses: [expense(id: 'e1', taskId: 'task-9', amount: 40.0)],
+        );
 
-      expect(find.byIcon(Icons.attach_money_rounded), findsNothing);
-    });
+        // It DOES roll into the task-level readout...
+        expect(find.text('Spent \$40'), findsOneWidget);
+        // ...but never onto a sub-task row.
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('subtask-expense-s1')),
+            matching: find.text('\$40'),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('subtask-expense-s2')),
+            matching: find.text('\$40'),
+          ),
+          findsNothing,
+        );
+      },
+    );
 
-    testWidgets('no chip anywhere when the task has no linked expenses',
-        (tester) async {
+    testWidgets('no amount anywhere when the task has no linked expenses', (
+      tester,
+    ) async {
       final stub = _stub();
       await openSheet(tester, stub);
 
-      expect(find.byIcon(Icons.attach_money_rounded), findsNothing);
+      expect(find.text('No budget yet'), findsOneWidget);
+      expect(find.textContaining('\$'), findsNothing);
     });
   });
 }

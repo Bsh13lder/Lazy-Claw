@@ -8,13 +8,13 @@ import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/models/task_project_link.dart';
 
-Task _task(String id, {String? category}) => Task(
+Task _task(String id, {String? category, String status = 'todo'}) => Task(
       id: id,
       userId: 'u1',
       title: 'Task $id',
       category: category,
       priority: 'medium',
-      status: 'todo',
+      status: status,
       owner: 'user',
       nagCount: 0,
       createdAt: '2026-06-06T00:00:00Z',
@@ -97,6 +97,32 @@ void main() {
     test('empty task list yields empty result', () {
       final p = _project('p1', 'ClubBay', nameKey: 'clubbay');
       expect(tasksForProject(const [], p), isEmpty);
+    });
+
+    test('excludes done tasks by default', () {
+      final p = _project('p1', 'ClubBay', nameKey: 'clubbay');
+      final tasks = [
+        _task('a', category: 'clubbay', status: 'todo'),
+        _task('b', category: 'clubbay', status: 'done'),
+        _task('c', category: 'clubbay', status: 'in_progress'),
+      ];
+
+      final result = tasksForProject(tasks, p);
+
+      expect(result.map((t) => t.id), ['a', 'c']);
+    });
+
+    test('includes done tasks when includeCompleted is true', () {
+      final p = _project('p1', 'ClubBay', nameKey: 'clubbay');
+      final tasks = [
+        _task('a', category: 'clubbay', status: 'todo'),
+        _task('b', category: 'clubbay', status: 'done'),
+      ];
+
+      final result =
+          tasksForProject(tasks, p, includeCompleted: true);
+
+      expect(result.map((t) => t.id), ['a', 'b']);
     });
   });
 }

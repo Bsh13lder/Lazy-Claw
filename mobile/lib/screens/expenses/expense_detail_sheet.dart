@@ -136,9 +136,28 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
   /// project is selected (or it matches no live project, e.g. it was
   /// deleted). A plain loop stands in for `firstWhereOrNull` — `collection`
   /// is only a transitive dep here, not one this app declares directly.
+  ///
+  /// Excludes done tasks by default (`tasksForProject`'s `includeCompleted:
+  /// false`) so completed work doesn't clutter picking a NEW link — EXCEPT
+  /// the task this expense is already linked to (`_taskId`). That one is
+  /// always kept in the list even once it's marked done: `_TaskPicker`'s
+  /// stale-selection guard can't distinguish "this id was never found" from
+  /// "this id exists but got filtered out", so without this carve-out,
+  /// marking a task done would silently sever every expense linked to it
+  /// (and, transitively, any linked sub-task — see `_effectiveSubtaskId`)
+  /// the next time that expense is opened for a completely unrelated edit.
+  /// A done task that ISN'T the current link is still excluded as before.
   List<Task> _tasksForCurrentProject(List<Project> projects, List<Task> all) {
     for (final p in projects) {
-      if (p.id == _projectId) return tasksForProject(all, p);
+      if (p.id != _projectId) continue;
+      final visible = tasksForProject(all, p);
+      if (_taskId == null || visible.any((t) => t.id == _taskId)) {
+        return visible;
+      }
+      for (final t in tasksForProject(all, p, includeCompleted: true)) {
+        if (t.id == _taskId) return [...visible, t];
+      }
+      return visible;
     }
     return const [];
   }
@@ -251,6 +270,14 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
               _taskId = null;
               _subtaskId = null;
             }),
+            // The picker's own stale-selectedId guard tripped (its render
+            // fell back to "no project selected") — mirror that into the
+            // sheet's own state so a subsequent Save can never resubmit the
+            // id the UI just stopped showing.
+            onStaleSelection: () {
+              if (!mounted) return;
+              setState(() => _projectId = null);
+            },
           ),
 
           const SizedBox(height: AppSpacing.lg),
@@ -265,6 +292,16 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
               _taskId = id;
               _subtaskId = null;
             }),
+            // Same guard-trip reset as the project picker above — keeps
+            // render and submitted state from ever diverging. Only fires
+            // for a genuinely gone id (deleted, or its project changed) —
+            // `_tasksForCurrentProject` keeps the CURRENTLY linked task in
+            // `availableTasks` even once it's done, so completing a task
+            // never trips this guard for its own already-saved link.
+            onStaleSelection: () {
+              if (!mounted) return;
+              setState(() => _taskId = null);
+            },
           ),
 
           const SizedBox(height: AppSpacing.lg),
@@ -427,14 +464,30 @@ class _ProjectPicker extends StatelessWidget {
     required this.projects,
     required this.selectedId,
     required this.onChanged,
+    this.onStaleSelection,
   });
 
   final List<Project> projects;
   final String? selectedId;
   final ValueChanged<String?> onChanged;
 
+  /// Invoked (once, post-frame) when [selectedId] is non-null but isn't
+  /// among [projects] — i.e. the guard below is about to render "no project
+  /// selected" even though the caller still thinks one is selected. Lets the
+  /// owning state reset its own field to match what's actually on screen, so
+  /// a Save action can never resubmit an id the UI stopped displaying.
+  final VoidCallback? onStaleSelection;
+
   @override
   Widget build(BuildContext context) {
+    // Guard against a stale selectedId that isn't in the list (e.g. its project
+    // was deleted) so the DropdownButton's assert doesn't fire.
+    final hasSelected = projects.any((p) => p.id == selectedId);
+    if (selectedId != null && !hasSelected) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => onStaleSelection?.call());
+    }
+
     if (projects.isEmpty) {
       return Container(
         padding: const EdgeInsets.all(AppSpacing.md),
@@ -450,9 +503,6 @@ class _ProjectPicker extends StatelessWidget {
       );
     }
 
-    // Guard against a stale selectedId that isn't in the list (e.g. its project
-    // was deleted) so the DropdownButton's assert doesn't fire.
-    final hasSelected = projects.any((p) => p.id == selectedId);
     final value = hasSelected ? selectedId : null;
 
     return Column(
@@ -512,11 +562,22 @@ class _TaskPicker extends StatelessWidget {
     required this.tasks,
     required this.selectedId,
     required this.onChanged,
+    this.onStaleSelection,
   });
 
   final List<Task> tasks;
   final String? selectedId;
   final ValueChanged<String?> onChanged;
+
+  /// Invoked (once, post-frame) when [selectedId] is non-null but isn't
+  /// among [tasks] — e.g. the linked task was deleted, or its project
+  /// changed. NOT triggered merely because the linked task is done: the
+  /// caller (`_tasksForCurrentProject`) always keeps the current [selectedId]
+  /// in [tasks] even once it's excluded from fresh picks, so completing a
+  /// task can never silently clear an expense's existing link to it. Mirrors
+  /// [_ProjectPicker.onStaleSelection]: lets the owning state reset its own
+  /// field so render and submitted value can never diverge.
+  final VoidCallback? onStaleSelection;
 
   @override
   Widget build(BuildContext context) {
@@ -524,6 +585,10 @@ class _TaskPicker extends StatelessWidget {
     // (e.g. its task was deleted, or the project changed since) so the
     // DropdownButton's assert doesn't fire — mirrors _ProjectPicker's guard.
     final hasSelected = tasks.any((t) => t.id == selectedId);
+    if (selectedId != null && !hasSelected) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => onStaleSelection?.call());
+    }
     final value = hasSelected ? selectedId : null;
 
     return Column(

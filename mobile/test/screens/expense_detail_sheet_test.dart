@@ -156,14 +156,20 @@ class _StubTasksNotifier extends TasksNotifier {
   }
 }
 
-Task _task(String id, String title, {String? category, String? steps}) =>
+Task _task(
+  String id,
+  String title, {
+  String? category,
+  String? steps,
+  String status = 'todo',
+}) =>
     Task(
       id: id,
       userId: 'u1',
       title: title,
       category: category,
       priority: 'medium',
-      status: 'todo',
+      status: status,
       owner: 'user',
       steps: steps,
       nagCount: 0,
@@ -370,7 +376,8 @@ void main() {
 
   testWidgets(
       'renders safely (falls back to "(no task)") when the linked task no '
-      'longer exists', (tester) async {
+      'longer exists, and Save clears the stale id rather than resubmitting '
+      'it', (tester) async {
     final stub = _stub();
     // The expense still references a task id that isn't in the current
     // tasks list (e.g. the task was since deleted) — the picker must fall
@@ -399,6 +406,87 @@ void main() {
       isNull,
     );
     expect(find.text('(no task)'), findsOneWidget);
+
+    // The picker's stale-selectedId guard trips on render — that must reset
+    // the SHEET's own _taskId state too, so Save can never resubmit the
+    // ghost id the UI just stopped showing.
+    await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('expense-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls.single['taskId'], isNull);
+    expect(stub.updateCalls.single['taskIdSet'], isTrue);
+  });
+
+  testWidgets(
+      'a linked task that is later marked done stays linked — the default '
+      'status filter only hides done tasks from a fresh pick, it must never '
+      'silently sever an expense\'s already-saved link the next time that '
+      'expense is opened for an unrelated edit', (tester) async {
+    final stub = _stub();
+    // Task 't1' genuinely exists and belongs to the expense's project, but
+    // its status is 'done'. tasksForProject's default (includeCompleted:
+    // false) would normally exclude it from a fresh pick — the sheet must
+    // special-case ITS OWN linked task so it isn't treated as a "ghost" the
+    // way a truly deleted task is.
+    const withDoneTask = Expense(
+      id: 'exp-81',
+      projectId: 'proj-1',
+      taskId: 't1',
+      amount: 5,
+      currency: 'USD',
+      description: 'Snack',
+      status: 'posted',
+    );
+    await openSheet(
+      tester,
+      stub,
+      tasks: [
+        _task('t1', 'Book flights', category: 'Marketing', status: 'done'),
+      ],
+      expense: withDoneTask,
+    );
+
+    expect(
+      tester
+          .widget<DropdownButton<String>>(find.byKey(const Key('expense-detail-task')))
+          .value,
+      't1',
+    );
+
+    // Edit an unrelated field (amount) WITHOUT ever touching the task
+    // dropdown — Save must still carry the link forward untouched.
+    await tester.enterText(
+        find.byKey(const Key('expense-detail-amount')), '9');
+    await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('expense-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls.single['taskId'], 't1');
+    expect(stub.updateCalls.single['taskIdSet'], isTrue);
+    expect(stub.updateCalls.single['amount'], 9.0);
+  });
+
+  testWidgets(
+      'a done task that is NOT already linked is excluded from the picker '
+      'options — hides completed clutter from a fresh pick', (tester) async {
+    final stub = _stub();
+    await openSheet(
+      tester,
+      stub,
+      tasks: [
+        _task('t1', 'Book flights', category: 'Marketing', status: 'todo'),
+        _task('t2', 'Renew passport', category: 'Marketing', status: 'done'),
+      ],
+    );
+
+    final taskDropdown = tester
+        .widget<DropdownButton<String>>(find.byKey(const Key('expense-detail-task')));
+    // "(no task)" + only the one non-done task — 't2' is filtered out.
+    expect(taskDropdown.items, hasLength(2));
+    expect(taskDropdown.items!.map((i) => i.value), isNot(contains('t2')));
   });
 
   testWidgets('Delete asks to confirm then invokes removeExpense',

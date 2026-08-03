@@ -8,7 +8,7 @@ part of '../smart_add_parser.dart';
 // "every monday".."every sunday" and the short forms "every mon".."every sun"
 // → weekly on that weekday (+ implies the next such weekday as the due day).
 final RegExp _everyWeekday = RegExp(
-  r'(^|\s)every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)(?=\s|$)',
+  r'(^|\s)every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?=\s|$)',
   caseSensitive: false,
 );
 // "every weekday" / "weekdays" → Mon-Fri.

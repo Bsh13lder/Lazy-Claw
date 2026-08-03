@@ -8,10 +8,14 @@ const Map<String, int> _weekdays = {
   'mon': 1,
   'monday': 1,
   'tue': 2,
+  'tues': 2,
   'tuesday': 2,
   'wed': 3,
+  'weds': 3,
   'wednesday': 3,
   'thu': 4,
+  'thur': 4,
+  'thurs': 4,
   'thursday': 4,
   'fri': 5,
   'friday': 5,
@@ -41,9 +45,16 @@ final RegExp _inNWeeks = RegExp(
   r'(^|\s)in\s+(\d+)\s+weeks?(?=\s|$)',
   caseSensitive: false,
 );
-// `+3d`, `+3 days`, `+3 day` — a forward day offset.
-final RegExp _plusNDays = RegExp(
-  r'(^|\s)\+(\d+)\s*d(?:ays?)?(?=\s|$)',
+// G3: "in 3 months" -> today + 3 CALENDAR months (day-of-month clamped by
+// `_addMonths`, not silently rolled into a later month).
+final RegExp _inNMonths = RegExp(
+  r'(^|\s)in\s+(\d+)\s+months?(?=\s|$)',
+  caseSensitive: false,
+);
+// `+3d`/`+3 days`, `+3w`/`+3 weeks` (G3), `+3m`/`+3 months` (G3) — a forward
+// offset by day/week/calendar-month.
+final RegExp _plusNUnit = RegExp(
+  r'(^|\s)\+(\d+)\s*(d(?:ays?)?|w(?:eeks?)?|m(?:onths?)?)(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _nextWeek = RegExp(
@@ -67,7 +78,7 @@ final RegExp _nextWeekend = RegExp(
   caseSensitive: false,
 );
 final RegExp _nextWeekday = RegExp(
-  r'(^|\s)(?:next|nxt)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)(?=\s|$)',
+  r'(^|\s)(?:next|nxt)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _tomorrow = RegExp(
@@ -98,6 +109,11 @@ final RegExp _yesterday = RegExp(
 );
 final RegExp _eod = RegExp(r'(^|\s)eod(?=\s|$)', caseSensitive: false);
 final RegExp _eow = RegExp(r'(^|\s)eow(?=\s|$)', caseSensitive: false);
+// G3: "eom" -> last day of the current month; "eoy" -> Dec 31 of the current
+// year. Same `(?=\s|$)` tail as `_eod`/`_eow` already protects "eomish"/
+// "eoyish" from matching mid-word.
+final RegExp _eom = RegExp(r'(^|\s)eom(?=\s|$)', caseSensitive: false);
+final RegExp _eoy = RegExp(r'(^|\s)eoy(?=\s|$)', caseSensitive: false);
 
 // Weekday words are split into two matchers because three short forms read
 // as ordinary English far more often than as a date:
@@ -105,14 +121,18 @@ final RegExp _eow = RegExp(r'(^|\s)eow(?=\s|$)', caseSensitive: false);
 //     bride") only count as a date when disambiguated by a cue: an
 //     immediately preceding cue word (see `_weekdayCueWords`), an adjacent
 //     clock token ("sat 5pm" / "5pm sat"), or being the ENTIRE input.
-//   - every full weekday name, plus `mon`/`tue`/`thu`/`fri`, don't collide
-//     with common English and stay unconditionally bare.
+//   - every full weekday name, plus `mon`/`tue`/`tues`/`thu`/`thur`/`thurs`/
+//     `fri`, don't collide with common English and stay unconditionally
+//     bare. `weds` (G3) joins the restricted tier instead — it's the present
+//     tense of "to wed" ("she weds him tomorrow"), the exact same verb
+//     collision `wed` was restricted for, not just a Wednesday
+//     abbreviation.
 final RegExp _weekdayWordBare = RegExp(
-  r'(^|\s)(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|thu|fri)(?=\s|$)',
+  r'(^|\s)(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|thu|thur|thurs|fri)(?=\s|$)',
   caseSensitive: false,
 );
 final RegExp _weekdayWordCued = RegExp(
-  r'(^|\s)(sat|sun|wed)(?=\s|$)',
+  r'(^|\s)(sat|sun|wed|weds)(?=\s|$)',
   caseSensitive: false,
 );
 
@@ -127,7 +147,7 @@ final RegExp _weekdayWordCued = RegExp(
 // earliest-start-wins mechanism `_nextWeekday` already relies on).
 final RegExp _cuedWeekday = RegExp(
   r'(^|\s)(?:by|due|before|until|til|this|coming)\s+'
-  r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)(?=\s|$)',
+  r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?=\s|$)',
   caseSensitive: false,
 );
 
@@ -221,14 +241,30 @@ void _collectDates(_Collector c) {
       date: today.add(Duration(days: 7 * int.parse(m.group(2)!))),
     ),
   );
+  c.scan(_plusNUnit, (m, s) {
+    final n = int.parse(m.group(2)!);
+    final unit = m.group(3)!.toLowerCase();
+    final date = unit.startsWith('w')
+        ? today.add(Duration(days: 7 * n))
+        : unit.startsWith('m')
+        ? _addMonths(today, n)
+        : today.add(Duration(days: n));
+    return Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: date,
+    );
+  });
   c.scan(
-    _plusNDays,
+    _inNMonths,
     (m, s) => Raw(
       s,
       m.end,
       SmartTokenKind.date,
       rank: _rankRelativeDate,
-      date: today.add(Duration(days: int.parse(m.group(2)!))),
+      date: _addMonths(today, int.parse(m.group(2)!)),
     ),
   );
   c.scan(
@@ -352,6 +388,26 @@ void _collectDates(_Collector c) {
       date: _weekdayDate(today, DateTime.sunday, nextWeek: false),
     ),
   );
+  c.scan(
+    _eom,
+    (m, s) => Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: DateTime(today.year, today.month + 1, 0), // last day of this month
+    ),
+  );
+  c.scan(
+    _eoy,
+    (m, s) => Raw(
+      s,
+      m.end,
+      SmartTokenKind.date,
+      rank: _rankRelativeDate,
+      date: DateTime(today.year, 12, 31),
+    ),
+  );
   c.scan(_weekdayWordBare, (m, s) {
     final wd = _weekdays[m.group(2)!.toLowerCase()];
     if (wd == null) return null;
@@ -386,4 +442,18 @@ void _collectDates(_Collector c) {
       date: _weekdayDate(today, wd, nextWeek: false),
     );
   });
+}
+
+/// Adds [months] calendar months to [date], clamping the day-of-month to the
+/// target month's length rather than letting it silently roll into a LATER
+/// month the way `DateTime(year, month, day)` does on its own (e.g. Jan 31 +
+/// 1 month would otherwise silently become Mar 3 instead of Feb 28/29 — the
+/// same class of silent lie `_safeDate` exists to prevent for M/D dates).
+DateTime _addMonths(DateTime date, int months) {
+  final totalMonths = date.month - 1 + months;
+  final year = date.year + totalMonths ~/ 12;
+  final month = totalMonths % 12 + 1;
+  final lastDayOfMonth = DateTime(year, month + 1, 0).day;
+  final day = date.day > lastDayOfMonth ? lastDayOfMonth : date.day;
+  return DateTime(year, month, day);
 }

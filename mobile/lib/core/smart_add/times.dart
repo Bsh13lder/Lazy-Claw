@@ -18,15 +18,27 @@ final RegExp _inNHours = RegExp(
   r'(^|\s)in\s+(\d+)\s*h(?:ours?|rs?)?(?=\s|$)',
   caseSensitive: false,
 );
+// G3: `in 2 min`, `in 2 mins`, `in 2 minutes` — a duration; resolves to now +
+// N minutes. Deliberately requires the literal "min" prefix (no bare "m"
+// shorthand, unlike `_inNHours`'s bare "h") so there is zero ambiguity with
+// the `+Nm` = months convention added alongside this in `_plusNUnit` below —
+// and because the unit literally can't match a prefix of "months" (it
+// requires "min", not just "m") there's no risk of "in 3 months" ever being
+// swallowed by this matcher regardless of scan order.
+final RegExp _inNMinutes = RegExp(
+  r'(^|\s)in\s+(\d+)\s*min(?:ute)?s?(?=\s|$)',
+  caseSensitive: false,
+);
 // Time-of-day keywords -> a wall-clock hour. `midnight` precedes `night` so the
-// longer token wins the alternation. The leading optional cue (G2 #8) is also
+// longer token wins the alternation. `midday` (G3) joins the same tier as
+// `noon` (both -> 12:00). The leading optional cue (G2 #8) is also
 // NON-CAPTURING (same reasoning as `_clock12`/`_clock24` above) — it absorbs
 // "this"/"tomorrow"/"tmrw"/"tmr"/"tom" directly in front of the keyword so
 // e.g. "this morning" doesn't strand "this" in the title. Because it's
 // non-capturing we can't read which cue matched off a group, so the callback
 // below re-derives it from the raw match text instead (see `_collectTimes`).
 final RegExp _timeOfDay = RegExp(
-  r'(^|\s)(?:(?:this|tomorrow|tmrw|tmr|tom)\s+)?(morning|afternoon|evening|midnight|night|noon)(?=\s|$)',
+  r'(^|\s)(?:(?:this|tomorrow|tmrw|tmr|tom)\s+)?(morning|afternoon|evening|midnight|midday|night|noon)(?=\s|$)',
   caseSensitive: false,
 );
 // "tonight" (moved from the date family, G2 #9) -> today at 20:00, reusing
@@ -40,6 +52,7 @@ const Map<String, int> _timesOfDay = {
   'night': 20,
   'noon': 12,
   'midnight': 0,
+  'midday': 12,
 };
 
 // The tomorrow-ish cues `_timeOfDay` can absorb ahead of the keyword. When
@@ -86,6 +99,18 @@ void _collectTimes(_Collector c) {
   );
   c.scan(_inNHours, (m, s) {
     final target = ref.add(Duration(hours: int.parse(m.group(2)!)));
+    return Raw(
+      s,
+      m.end,
+      SmartTokenKind.time,
+      rank: _rankTime,
+      hour: target.hour,
+      minute: target.minute,
+      timeDate: DateTime(target.year, target.month, target.day),
+    );
+  });
+  c.scan(_inNMinutes, (m, s) {
+    final target = ref.add(Duration(minutes: int.parse(m.group(2)!)));
     return Raw(
       s,
       m.end,

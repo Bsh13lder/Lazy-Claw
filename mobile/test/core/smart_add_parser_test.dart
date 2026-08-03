@@ -433,6 +433,167 @@ void main() {
       expect(parse('renew +3d').dueDate, '2026-06-09');
       expect(parse('renew +2 days').dueDate, '2026-06-08');
     });
+
+    test('+Nw and +N weeks both add N*7 days (G3)', () {
+      expect(parse('renew +2w').dueDate, '2026-06-20');
+      expect(parse('renew +2 weeks').dueDate, '2026-06-20');
+    });
+
+    test('+Nm and +N months both add calendar months (G3)', () {
+      expect(parse('renew +1m').dueDate, '2026-07-06');
+      expect(parse('renew +1 month').dueDate, '2026-07-06');
+      expect(parse('renew +2 months').dueDate, '2026-08-06');
+    });
+
+    test('in N months offsets by calendar months (G3)', () {
+      final r = parse('ping in 3 months');
+      expect(r.cleanTitle, 'ping');
+      expect(r.dueDate, '2026-09-06');
+    });
+
+    test(
+      'a month-add clamps day-of-month instead of rolling into a later month',
+      () {
+        // Jan 31 + 1 month must land on Feb 28 (2026 is not a leap year), NOT
+        // silently roll forward into March the way DateTime(y, m+1, d) would
+        // on its own.
+        final r = parseSmartAdd('renew +1 month', now: DateTime(2026, 1, 31));
+        expectWellFormedSpans('renew +1 month', r);
+        expect(r.dueDate, '2026-02-28');
+      },
+    );
+
+    test('a month-add respects a leap-year February', () {
+      final r = parseSmartAdd('renew +1m', now: DateTime(2024, 1, 31));
+      expectWellFormedSpans('renew +1m', r);
+      expect(r.dueDate, '2024-02-29');
+    });
+
+    test('a month-add rolls the year forward past December', () {
+      final r = parseSmartAdd('renew +13m', now: DateTime(2026, 1, 15));
+      expectWellFormedSpans('renew +13m', r);
+      expect(r.dueDate, '2027-02-15');
+    });
+  });
+
+  group('in N minutes (G3)', () {
+    test('sets a time of now + N minutes', () {
+      final input = 'ping in 20 minutes';
+      final r = parseSmartAdd(input, now: DateTime(2026, 6, 6, 14, 30));
+      expectWellFormedSpans(input, r);
+      expect(r.cleanTitle, 'ping');
+      expect(r.dueDate, '2026-06-06T14:50:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('"min" and "mins" both work', () {
+      expect(
+        parseSmartAdd(
+          'ping in 5 min',
+          now: DateTime(2026, 6, 6, 14, 30),
+        ).dueDate,
+        '2026-06-06T14:35:00',
+      );
+      expect(
+        parseSmartAdd(
+          'ping in 5 mins',
+          now: DateTime(2026, 6, 6, 14, 30),
+        ).dueDate,
+        '2026-06-06T14:35:00',
+      );
+    });
+
+    test('rolls the date forward when it crosses midnight', () {
+      final input = 'call in 90 minutes';
+      final r = parseSmartAdd(input, now: DateTime(2026, 6, 6, 23, 30));
+      expectWellFormedSpans(input, r);
+      expect(r.dueDate, '2026-06-07T01:00:00');
+    });
+
+    test(
+      'bare "m" is NOT a minutes shorthand (avoids the +Nm=months clash)',
+      () {
+        final r = parse('ping in 3m');
+        expect(r.dueDate, isNull);
+        expect(r.cleanTitle, 'ping in 3m');
+      },
+    );
+
+    test('"in 3 months" is never swallowed by the minutes matcher', () {
+      final r = parse('ping in 3 months');
+      expect(r.tokens.length, 1);
+      expect(r.tokens.single.kind, SmartTokenKind.date);
+      expect(r.dueDate, '2026-09-06');
+    });
+  });
+
+  group('eom / eoy (G3)', () {
+    test('eom is the last day of the current month', () {
+      expect(parse('wrap eom').dueDate, '2026-06-30');
+    });
+
+    test('eoy is Dec 31 of the current year', () {
+      expect(parse('wrap eoy').dueDate, '2026-12-31');
+    });
+
+    test('abbreviations never match mid-word', () {
+      final r = parse('the eomish plan is eoyish too');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'the eomish plan is eoyish too');
+    });
+  });
+
+  group('midday (G3)', () {
+    test('midday resolves to 12:00, same as noon', () {
+      expect(parse('a midday').dueDate, '2026-06-06T12:00:00');
+    });
+  });
+
+  group('weekday vocabulary fill-in (G3: tues/thur/thurs/weds)', () {
+    test(
+      'tues / thur / thurs resolve like their base short forms (bare, no cue needed)',
+      () {
+        expect(parse('call tues').dueDate, '2026-06-09'); // upcoming Tuesday
+        expect(parse('call thur').dueDate, '2026-06-11'); // upcoming Thursday
+        expect(parse('call thurs').dueDate, '2026-06-11');
+      },
+    );
+
+    test('"weds" joins the restricted tier (present tense of "to wed")', () {
+      // Same collision class as bare "wed" -- a plain sentence must not
+      // pick it up as a date.
+      final r = parse('she weds him tomorrow');
+      final dateTokens = r.tokens
+          .where((t) => t.kind == SmartTokenKind.date)
+          .toList();
+      expect(dateTokens.length, 1);
+      expect(
+        'she weds him tomorrow'.substring(
+          dateTokens.single.start,
+          dateTokens.single.end,
+        ),
+        'tomorrow',
+      );
+      expect(r.cleanTitle, 'she weds him');
+    });
+
+    test('"weds" resolves once disambiguated by a cue', () {
+      final r = parse('due weds');
+      expect(r.cleanTitle, '');
+      expect(r.dueDate, '2026-06-10'); // upcoming Wednesday
+    });
+
+    test('bare "weds" as the sole input resolves too', () {
+      final r = parse('weds');
+      expect(r.dueDate, '2026-06-10');
+      expect(r.cleanTitle, '');
+    });
+
+    test('next/every absorb the new short forms too', () {
+      expect(parse('demo next weds').dueDate, '2026-06-17');
+      final r = parse('standup every thurs');
+      expect(r.recurrence?.weekday, DateTime.thursday);
+    });
   });
 
   group('single-letter am/pm clock', () {

@@ -6,10 +6,16 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 
+import 'smart_add_test_helpers.dart';
+
 void main() {
   // Saturday, 6 June 2026.
   final now = DateTime(2026, 6, 6);
-  ParsedTask parse(String s) => parseSmartAdd(s, now: now);
+  ParsedTask parse(String s) {
+    final r = parseSmartAdd(s, now: now);
+    expectWellFormedSpans(s, r);
+    return r;
+  }
 
   test('full token soup: date + priority + project', () {
     final r = parse('buy milk tomorrow !p1 #groceries');
@@ -329,14 +335,18 @@ void main() {
 
   group('in N hours (duration -> time)', () {
     test('sets a time of now + N hours', () {
-      final r = parseSmartAdd('ship in 2h', now: DateTime(2026, 6, 6, 14, 30));
+      const input = 'ship in 2h';
+      final r = parseSmartAdd(input, now: DateTime(2026, 6, 6, 14, 30));
+      expectWellFormedSpans(input, r);
       expect(r.cleanTitle, 'ship');
       expect(r.dueDate, '2026-06-06T16:30:00');
       expect(r.hasTime, isTrue);
     });
 
     test('rolls the date forward when it crosses midnight', () {
-      final r = parseSmartAdd('call in 3 hours', now: DateTime(2026, 6, 6, 23, 0));
+      const input = 'call in 3 hours';
+      final r = parseSmartAdd(input, now: DateTime(2026, 6, 6, 23, 0));
+      expectWellFormedSpans(input, r);
       expect(r.dueDate, '2026-06-07T02:00:00');
       expect(r.hasTime, isTrue);
     });
@@ -388,11 +398,10 @@ void main() {
     });
 
     test('spans are sorted by start and never overlap', () {
+      // `parse()` already runs `expectWellFormedSpans` (ascending,
+      // non-overlapping, in-bounds); this test pins the additional,
+      // fixture-specific project-token assertion below.
       final r = parse('plan next fri 9am p2 #work later #ignored');
-      for (var i = 1; i < r.tokens.length; i++) {
-        expect(r.tokens[i].start >= r.tokens[i - 1].end, isTrue,
-            reason: 'spans must be non-overlapping and sorted');
-      }
       // Only the FIRST project token is recognized.
       final projects =
           r.tokens.where((t) => t.kind == SmartTokenKind.project).toList();

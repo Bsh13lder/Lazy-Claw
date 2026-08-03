@@ -7,10 +7,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 
+import 'smart_add_test_helpers.dart';
+
 void main() {
   // Saturday, 6 June 2026.
   final now = DateTime(2026, 6, 6);
-  ParsedTask parse(String s) => parseSmartAdd(s, now: now);
+  ParsedTask parse(String s) {
+    final r = parseSmartAdd(s, now: now);
+    expectWellFormedSpans(s, r);
+    return r;
+  }
 
   group('recurrence vocabulary', () {
     test('"every day" → daily, stripped from the title', () {

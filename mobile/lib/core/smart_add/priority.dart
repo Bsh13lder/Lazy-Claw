@@ -15,14 +15,17 @@ final RegExp _priorityCode = RegExp(
   caseSensitive: false,
 );
 
-// Bare `p1`/`p2`/`p3`/`p4` (no leading bang), standalone token only.
-final RegExp _priorityBare = RegExp(
-  r'(^|\s)p([1-4])(?=\s|$)',
-  caseSensitive: false,
-);
+// NOTE: bare `p1`/`p2`/`p3`/`p4` (no leading bang) was deleted (G1 #1) — it
+// was a pure false-positive generator (`my p1 project` → urgent today) with
+// no compensating value: the bang form (`!p1`) already covers the same
+// intent unambiguously.
 
-// Bare bangs: `!`=medium, `!!`=high, `!!!`=urgent — standalone token only.
-final RegExp _priorityBangs = RegExp(r'(^|\s)(!{1,3})(?=\s|$)');
+// Bangs: `!!`=high, `!!!`=urgent — standalone token only. A single `!` is
+// intentionally NOT matched (G1 #2): it used to set `medium`, which is
+// already the app's default when no priority is parsed at all, so matching
+// it was pure downside — it silently ate a literal `!` out of the title for
+// zero semantic gain.
+final RegExp _priorityBangs = RegExp(r'(^|\s)(!{2,3})(?=\s|$)');
 
 /// Every priority matcher, run against the original input. All emit
 /// `SmartTokenKind.priority` [Raw]s ranked `_rankPriority`.
@@ -37,24 +40,14 @@ void _collectPriority(_Collector c) {
       priority: _priorityByCode[m.group(2)!],
     ),
   );
-  c.scan(
-    _priorityBare,
-    (m, s) => Raw(
-      s,
-      m.end,
-      SmartTokenKind.priority,
-      rank: _rankPriority,
-      priority: _priorityByCode[m.group(2)!],
-    ),
-  );
   c.scan(_priorityBangs, (m, s) {
-    final n = m.group(2)!.length;
+    final n = m.group(2)!.length; // 2 or 3, per `_priorityBangs`.
     return Raw(
       s,
       m.end,
       SmartTokenKind.priority,
       rank: _rankPriority,
-      priority: n == 3 ? 'urgent' : (n == 2 ? 'high' : 'medium'),
+      priority: n == 3 ? 'urgent' : 'high',
     );
   });
 }

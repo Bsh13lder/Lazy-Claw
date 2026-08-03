@@ -34,8 +34,11 @@ void main() {
   });
 
   test('weekday matching today resolves to today (future-or-today)', () {
-    final r = parse('water plants sat');
-    expect(r.cleanTitle, 'water plants');
+    // `sat` is a restricted short form (G1 #3) — it needs a disambiguating
+    // cue ("on") to count as a date at all; see the `weekday false positives`
+    // and `weekday cue disambiguation` groups below for the full matrix.
+    final r = parse('water plants on sat');
+    expect(r.cleanTitle, 'water plants on');
     expect(r.dueDate, '2026-06-06');
   });
 
@@ -200,6 +203,137 @@ void main() {
     expect(r.cleanTitle, 'mix 13/45 ratio');
   });
 
+  // ── G1: false-positive removal ──────────────────────────────────────────────
+  //
+  // Every one of these was verified against the PRE-G1 parser: it silently
+  // set a field (or ate a word out of the title) on ordinary English that
+  // had nothing to do with a date/priority. None of them should set any
+  // field, and the title must come back byte-for-byte unchanged.
+
+  group('anti-patterns (G1 false positives)', () {
+    void assertNoMatch(String input) {
+      final r = parse(input);
+      expect(r.dueDate, isNull, reason: 'dueDate for "$input"');
+      expect(r.priority, isNull, reason: 'priority for "$input"');
+      expect(r.project, isNull, reason: 'project for "$input"');
+      expect(r.recurrence, isNull, reason: 'recurrence for "$input"');
+      expect(r.tokens, isEmpty, reason: 'tokens for "$input"');
+      expect(r.cleanTitle, input, reason: 'cleanTitle for "$input"');
+    }
+
+    test('sat down with the team (bare "sat" is not a date)', () {
+      assertNoMatch('sat down with the team');
+    });
+
+    test('fix the sat nav (bare "sat" is not a date, and stays in the title)', () {
+      assertNoMatch('fix the sat nav');
+    });
+
+    test('sun is out (bare "sun" is not a date)', () {
+      assertNoMatch('sun is out');
+    });
+
+    test('wed the bride (bare "wed" is not a date)', () {
+      assertNoMatch('wed the bride');
+    });
+
+    test('my p1 project (bare priority code removed)', () {
+      assertNoMatch('my p1 project');
+    });
+
+    test('ship ! now (single bang is not a priority token)', () {
+      assertNoMatch('ship ! now');
+    });
+
+    test('split 1/2 of the cost (single-digit fraction is not a date)', () {
+      assertNoMatch('split 1/2 of the cost');
+    });
+
+    test('read chapter 3/4 (single-digit fraction is not a date)', () {
+      assertNoMatch('read chapter 3/4');
+    });
+
+    test('aspect ratio 16/9 (invalid month keeps this a non-match)', () {
+      assertNoMatch('aspect ratio 16/9');
+    });
+  });
+
+  group('weekday false positives are fixed by a required cue', () {
+    test('mon/tue/thu/fri and full names stay bare (unaffected by G1)', () {
+      expect(parse('call mon').dueDate, '2026-06-08');
+      expect(parse('call saturday').dueDate, '2026-06-06');
+    });
+  });
+
+  group('weekday cue disambiguation (G1 #3 / G2 #6)', () {
+    test('a preceding cue word ("on") lets a restricted weekday count', () {
+      final r = parse('call on sat');
+      expect(r.dueDate, '2026-06-06');
+      // "on" is deliberately NOT absorbed into the token (G2 ships without
+      // on/from — see the cued-weekday group below) so it stays in the title.
+      expect(r.cleanTitle, 'call on');
+    });
+
+    test('an adjacent clock token after the weekday counts as a cue', () {
+      final r = parse('sat 5pm');
+      expect(r.dueDate, '2026-06-06T17:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('an adjacent clock token before the weekday counts as a cue', () {
+      final r = parse('5pm sat');
+      expect(r.dueDate, '2026-06-06T17:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('being the entire input counts as a cue', () {
+      final r = parse('sat');
+      expect(r.dueDate, '2026-06-06');
+      expect(r.cleanTitle, '');
+    });
+
+    test('without any cue, the restricted weekday stays a false negative', () {
+      final r = parse('the sat show');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'the sat show');
+    });
+  });
+
+  group('_mdDate hardening (G1 #4)', () {
+    test('a two-digit component next to a cue word is still rejected', () {
+      // "page" precedes a genuinely 2-digit-having M/D pair — without the
+      // lookbehind this would parse as a valid (if wrong) date.
+      final r = parse('page 12/31');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'page 12/31');
+    });
+
+    test('pinned: report 6/10 and bare 12/31 still resolve (regression guard)', () {
+      expect(parse('report 6/10').dueDate, '2026-06-10');
+      expect(parse('12/31').dueDate, '2026-12-31');
+    });
+  });
+
+  group('day after tomorrow / overmorrow (G1 #5)', () {
+    test('"day after tomorrow" resolves to today+2, not plain tomorrow', () {
+      final r = parse('day after tomorrow');
+      expect(r.dueDate, '2026-06-08');
+      expect(r.cleanTitle, '');
+    });
+
+    test('"overmorrow" resolves to today+2', () {
+      final r = parse('overmorrow');
+      expect(r.dueDate, '2026-06-08');
+      expect(r.cleanTitle, '');
+    });
+
+    test('embedded in a sentence, the whole phrase is stripped', () {
+      final r = parse('submit report day after tomorrow');
+      expect(r.cleanTitle, 'submit report');
+      expect(r.dueDate, '2026-06-08');
+    });
+  });
+
   // ── Expanded vocabulary (abbreviations) ────────────────────────────────────
 
   group('relative-day abbreviations', () {
@@ -352,22 +486,25 @@ void main() {
     });
   });
 
-  group('bare priority codes', () {
-    test('p1..p4 map across the scale', () {
-      expect(parse('a p1').priority, 'urgent');
-      expect(parse('a p2').priority, 'high');
-      expect(parse('a p3').priority, 'medium');
-      expect(parse('a p4').priority, 'low');
+  group('bare priority codes (removed — G1 #1)', () {
+    // Bare `p1..p4` was deleted: `my p1 project` used to read as "urgent
+    // today", a pure false positive with no upside since `!p1` already
+    // covers the same intent unambiguously. These are now near-misses.
+    test('p1..p4 no longer set a priority', () {
+      expect(parse('a p1').priority, isNull);
+      expect(parse('a p2').priority, isNull);
+      expect(parse('a p3').priority, isNull);
+      expect(parse('a p4').priority, isNull);
     });
 
-    test('bare priority is stripped from the title', () {
+    test('bare priority is left in the title untouched', () {
       final r = parse('upgrade plan p2');
-      expect(r.cleanTitle, 'upgrade plan');
-      expect(r.priority, 'high');
+      expect(r.cleanTitle, 'upgrade plan p2');
+      expect(r.priority, isNull);
     });
 
-    test('case-insensitive', () {
-      expect(parse('a P3').priority, 'medium');
+    test('bare P3 (any case) no longer matches', () {
+      expect(parse('a P3').priority, isNull);
     });
   });
 

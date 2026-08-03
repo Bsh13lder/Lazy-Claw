@@ -5,6 +5,14 @@ class Expense {
   final String id;
   final String projectId;
   final String? taskId;
+
+  /// The sub-task (checklist item) within [taskId] this expense is pinned to,
+  /// or null for a plain task-level (or task-less) expense. Plaintext — no
+  /// user content, same as [taskId]. Server invariant: non-null requires
+  /// [taskId] to be non-null too (an orphan subtask link is rejected at
+  /// write time), and deleting the sub-task DEMOTES this back to null rather
+  /// than deleting the expense — the money always survives on the task.
+  final String? subtaskId;
   final double amount;
   final String currency;
   final String? description;
@@ -33,6 +41,7 @@ class Expense {
     required this.id,
     required this.projectId,
     this.taskId,
+    this.subtaskId,
     required this.amount,
     required this.currency,
     this.description,
@@ -61,6 +70,7 @@ class Expense {
       id: _str(json['id']) ?? '',
       projectId: _str(json['project_id']) ?? '',
       taskId: _str(json['task_id']),
+      subtaskId: _str(json['subtask_id']),
       amount: _double(json['amount']) ?? 0.0,
       currency: _str(json['currency']) ?? 'USD',
       description: _str(json['description']),
@@ -80,6 +90,7 @@ class Expense {
         'id': id,
         'project_id': projectId,
         'task_id': taskId,
+        'subtask_id': subtaskId,
         'amount': amount,
         'currency': currency,
         'description': description,
@@ -94,10 +105,20 @@ class Expense {
         'is_favorite': isFavorite,
       };
 
+  /// [clearTaskId] / [clearSubtaskId] are explicit clear flags: the ordinary
+  /// `taskId ?? this.taskId` / `subtaskId ?? this.subtaskId` fallbacks below
+  /// mean passing `null` for either is indistinguishable from "leave
+  /// unchanged" — there's no other way to actually NULL out an existing link
+  /// through this method. A task change must be able to clear a stale
+  /// sub-task link (a sub-task belongs to exactly one task), so both flags
+  /// are needed, not just one.
   Expense copyWith({
     String? id,
     String? projectId,
     String? taskId,
+    bool clearTaskId = false,
+    String? subtaskId,
+    bool clearSubtaskId = false,
     double? amount,
     String? currency,
     String? description,
@@ -114,7 +135,8 @@ class Expense {
       Expense(
         id: id ?? this.id,
         projectId: projectId ?? this.projectId,
-        taskId: taskId ?? this.taskId,
+        taskId: clearTaskId ? null : (taskId ?? this.taskId),
+        subtaskId: clearSubtaskId ? null : (subtaskId ?? this.subtaskId),
         amount: amount ?? this.amount,
         currency: currency ?? this.currency,
         description: description ?? this.description,

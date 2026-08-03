@@ -11,12 +11,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/local/budgets_dao.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
+import 'package:lazyclaw_mobile/models/expense.dart';
 import 'package:lazyclaw_mobile/models/subtask.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
+import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
+import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
@@ -96,6 +101,60 @@ _StubTasksNotifier _stub() {
   );
 }
 
+// ── budgetsProvider stub ─────────────────────────────────────────────────────
+//
+// TaskDetailSheet now reads budgetsProvider to compute the sub-task money
+// chip's per-sub-task expense totals. The real provider throws unless
+// appDatabaseProvider is overridden with a live DB, so every test needs a
+// stub — [_stubBudgets] optionally seeds [Expense]s for the money-chip
+// integration coverage below.
+
+class _OfflineBudgetsTransport implements BudgetsTransport {
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+          {Map<String, dynamic>? queryParams}) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> postJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async =>
+      throw ApiError(0, 'offline');
+}
+
+class _NoopBudgetsSync extends BudgetsSync {
+  _NoopBudgetsSync(super.dao, super.repo);
+  @override
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async =>
+      const BudgetsSyncResult();
+}
+
+class _StubBudgetsNotifier extends BudgetsNotifier {
+  _StubBudgetsNotifier(super.dao, super.sync, List<Expense> expenses) {
+    state = BudgetsState(expenses: expenses);
+  }
+  @override
+  Future<void> load() async {}
+  @override
+  Future<void> refresh() async {}
+  @override
+  Future<void> syncNow() async {}
+}
+
+_StubBudgetsNotifier _stubBudgets([List<Expense> expenses = const []]) {
+  final dao = BudgetsDao(_FakeDatabase());
+  return _StubBudgetsNotifier(
+    dao,
+    _NoopBudgetsSync(dao, BudgetsRepository(_OfflineBudgetsTransport())),
+    expenses,
+  );
+}
+
 const _withSteps = Task(
   id: 'task-9',
   userId: 'u1',
@@ -111,8 +170,12 @@ const _withSteps = Task(
 );
 
 void main() {
-  Widget host(_StubTasksNotifier stub, Task task) => ProviderScope(
-    overrides: [tasksProvider.overrideWith((ref) => stub)],
+  Widget host(_StubTasksNotifier stub, Task task, {List<Expense> expenses = const []}) =>
+      ProviderScope(
+    overrides: [
+      tasksProvider.overrideWith((ref) => stub),
+      budgetsProvider.overrideWith((ref) => _stubBudgets(expenses)),
+    ],
     child: MaterialApp(
       theme: buildAppTheme(),
       home: Consumer(
@@ -132,11 +195,12 @@ void main() {
     WidgetTester tester,
     _StubTasksNotifier stub, {
     Task task = _withSteps,
+    List<Expense> expenses = const [],
   }) async {
     // Tall surface so the whole sheet (incl. subtasks + Save) fits unscrolled.
     await tester.binding.setSurfaceSize(const Size(600, 2000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.pumpWidget(host(stub, task));
+    await tester.pumpWidget(host(stub, task, expenses: expenses));
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
   }
@@ -319,5 +383,106 @@ void main() {
 
     // Empty string (not null) so the DAO patch includes + clears the column.
     expect(lastSteps(stub), '');
+  });
+
+  // ── Sub-task money chip (expense rollup) ─────────────────────────────────
+
+  group('sub-task money chip', () {
+    Expense expense({
+      required String id,
+      required String taskId,
+      String? subtaskId,
+      double amount = 10.0,
+      String currency = 'USD',
+      String status = 'posted',
+    }) =>
+        Expense(
+          id: id,
+          projectId: 'p1',
+          taskId: taskId,
+          subtaskId: subtaskId,
+          amount: amount,
+          currency: currency,
+          description: 'expense',
+          status: status,
+        );
+
+    testWidgets('shows a total for a sub-task with a linked expense',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(
+        tester,
+        stub,
+        expenses: [
+          expense(id: 'e1', taskId: 'task-9', subtaskId: 's1', amount: 12.5),
+        ],
+      );
+
+      expect(find.byKey(const ValueKey('subtask-expense-s1')), findsOneWidget);
+      expect(find.text('\$12.50'), findsOneWidget);
+      // s2 has no linked expense — no chip.
+      expect(find.byKey(const ValueKey('subtask-expense-s2')), findsNothing);
+    });
+
+    testWidgets('sums multiple expenses linked to the same sub-task',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(
+        tester,
+        stub,
+        expenses: [
+          expense(id: 'e1', taskId: 'task-9', subtaskId: 's1', amount: 10.0),
+          expense(id: 'e2', taskId: 'task-9', subtaskId: 's1', amount: 5.0),
+        ],
+      );
+
+      expect(find.text('\$15'), findsOneWidget);
+    });
+
+    testWidgets(
+        'excludes a void expense and one linked to a different task',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(
+        tester,
+        stub,
+        expenses: [
+          expense(
+              id: 'e-void',
+              taskId: 'task-9',
+              subtaskId: 's1',
+              amount: 99.0,
+              status: 'void'),
+          expense(
+              id: 'e-other-task',
+              taskId: 'task-other',
+              subtaskId: 's1',
+              amount: 50.0),
+        ],
+      );
+
+      expect(find.byKey(const ValueKey('subtask-expense-s1')), findsNothing);
+    });
+
+    testWidgets(
+        'a task-level expense (no subtask_id) does not render a chip on '
+        'either sub-task', (tester) async {
+      final stub = _stub();
+      await openSheet(
+        tester,
+        stub,
+        expenses: [expense(id: 'e1', taskId: 'task-9', amount: 40.0)],
+      );
+
+      expect(find.byIcon(Icons.attach_money_rounded), findsNothing);
+    });
+
+    testWidgets('no chip anywhere when the task has no linked expenses',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub);
+
+      expect(find.byIcon(Icons.attach_money_rounded), findsNothing);
+    });
   });
 }

@@ -414,5 +414,70 @@ void main() {
       expect(starred.isFavorite, isTrue);
       expect(e.isFavorite, isFalse); // original unchanged (immutable)
     });
+
+    // ── subtask_id (attach an expense to a sub-task) ─────────────────────────
+
+    test('fromJson reads subtask_id and toJson round-trips it', () {
+      final e = Expense.fromJson({
+        'id': 'e17',
+        'project_id': 'p1',
+        'task_id': 't1',
+        'subtask_id': 's1',
+        'amount': 10.0,
+      });
+      expect(e.subtaskId, 's1');
+      expect(e.toJson()['subtask_id'], 's1');
+    });
+
+    test('subtaskId is null when absent', () {
+      final e =
+          Expense.fromJson({'id': 'e18', 'project_id': 'p1', 'amount': 10.0});
+      expect(e.subtaskId, isNull);
+      expect(e.toJson()['subtask_id'], isNull);
+    });
+
+    test('copyWith sets subtaskId without mutating the original', () {
+      final e = Expense.fromJson(
+          {'id': 'e19', 'project_id': 'p1', 'task_id': 't1', 'amount': 10.0});
+      final linked = e.copyWith(subtaskId: 's9');
+      expect(linked.subtaskId, 's9');
+      expect(e.subtaskId, isNull); // original unchanged (immutable)
+    });
+
+    test('copyWith clearSubtaskId nulls an existing link', () {
+      final e = Expense.fromJson({
+        'id': 'e20',
+        'project_id': 'p1',
+        'task_id': 't1',
+        'subtask_id': 's1',
+        'amount': 10.0,
+      });
+      final cleared = e.copyWith(clearSubtaskId: true);
+      expect(cleared.subtaskId, isNull);
+      expect(e.subtaskId, 's1'); // original unchanged (immutable)
+    });
+
+    test(
+        'copyWith clearTaskId nulls an existing task link (the plain '
+        '`taskId ?? this.taskId` fallback alone cannot do this)', () {
+      final e = Expense.fromJson(
+          {'id': 'e21', 'project_id': 'p1', 'task_id': 't1', 'amount': 10.0});
+      final cleared = e.copyWith(clearTaskId: true);
+      expect(cleared.taskId, isNull);
+      expect(e.taskId, 't1'); // original unchanged (immutable)
+    });
+
+    test('copyWith without the clear flags preserves taskId/subtaskId', () {
+      final e = Expense.fromJson({
+        'id': 'e22',
+        'project_id': 'p1',
+        'task_id': 't1',
+        'subtask_id': 's1',
+        'amount': 10.0,
+      });
+      final renamed = e.copyWith(description: 'Renamed');
+      expect(renamed.taskId, 't1');
+      expect(renamed.subtaskId, 's1');
+    });
   });
 }

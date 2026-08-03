@@ -20,11 +20,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/local/budgets_dao.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
+import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
+import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:sqflite_common/sqlite_api.dart';
@@ -106,6 +110,56 @@ _StubTasksNotifier _stub() {
   );
 }
 
+// ── budgetsProvider stub ─────────────────────────────────────────────────────
+//
+// TaskDetailSheet now reads budgetsProvider (for the sub-task money chip's
+// expense totals). The real provider throws unless appDatabaseProvider is
+// overridden with a live DB, so this file needs a stub too even though none
+// of these reminder-preservation tests touch money.
+
+class _OfflineBudgetsTransport implements BudgetsTransport {
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+          {Map<String, dynamic>? queryParams}) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> postJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async =>
+      throw ApiError(0, 'offline');
+}
+
+class _NoopBudgetsSync extends BudgetsSync {
+  _NoopBudgetsSync(super.dao, super.repo);
+  @override
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async =>
+      const BudgetsSyncResult();
+}
+
+class _StubBudgetsNotifier extends BudgetsNotifier {
+  _StubBudgetsNotifier(super.dao, super.sync);
+  @override
+  Future<void> load() async {}
+  @override
+  Future<void> refresh() async {}
+  @override
+  Future<void> syncNow() async {}
+}
+
+_StubBudgetsNotifier _stubBudgets() {
+  final dao = BudgetsDao(_FakeDatabase());
+  return _StubBudgetsNotifier(
+    dao,
+    _NoopBudgetsSync(dao, BudgetsRepository(_OfflineBudgetsTransport())),
+  );
+}
+
 /// The canonical broken shape: a respawned recurring occurrence. Its `due_date`
 /// is DATE-ONLY while a real timed `reminder_at` carries the 9:00 AM nag.
 const _respawned = Task(
@@ -139,7 +193,10 @@ const _timed = Task(
 
 void main() {
   Widget host(_StubTasksNotifier stub, Task task) => ProviderScope(
-    overrides: [tasksProvider.overrideWith((ref) => stub)],
+    overrides: [
+      tasksProvider.overrideWith((ref) => stub),
+      budgetsProvider.overrideWith((ref) => _stubBudgets()),
+    ],
     child: MaterialApp(
       theme: buildAppTheme(),
       home: Consumer(

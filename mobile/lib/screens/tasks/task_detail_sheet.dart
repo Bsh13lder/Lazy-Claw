@@ -7,9 +7,11 @@ import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../models/expense.dart';
 import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
+import '../../providers/budgets_provider.dart';
 import '../../providers/tasks_provider.dart';
 import '../../widgets/link_text.dart';
 import '../settings/settings_prefs.dart';
@@ -542,6 +544,14 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       for (final s in live.subtasks)
         s.id: live.taskComments.where((c) => c.subtaskId == s.id).length,
     };
+    // Per-sub-task expense totals — "the money sign" SubtaskEditor renders.
+    // Sourced from the SAME live/saved task id as commentCounts above (an
+    // expense's subtask_id only ever points at a saved sub-task, exactly
+    // like a comment's), so an in-sheet, not-yet-saved sub-task correctly
+    // gets no chip either.
+    final expenses = ref.watch(budgetsProvider).expenses;
+    final expenseTotals = subtaskExpenseTotals(expenses, widget.task.id);
+    final expenseCurrency = subtaskExpenseCurrency(expenses, widget.task.id);
     return SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -882,6 +892,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             subtasks: _subtasks,
             onChanged: (next) => setState(() => _subtasks = next),
             commentCounts: commentCounts,
+            expenseTotals: expenseTotals,
+            expenseCurrency: expenseCurrency,
             onOpenComments: (sid) => showSubtaskCommentsSheet(
               context,
               subtaskTitle: _subtaskTitle(sid),
@@ -1120,6 +1132,40 @@ class _TaskTagChip extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Sub-task expense rollup (pure — feeds SubtaskEditor's money chip) ──────────
+
+/// The per-sub-task expense totals for [taskId], keyed by sub-task id — the
+/// data [SubtaskEditor.expenseTotals] renders as its money chip. Only LIVE
+/// (non-void) expenses actually linked to a sub-task count: a demoted
+/// expense (its sub-task was deleted server-side, per the backend's
+/// demote-never-delete cascade) has `subtaskId == null` and correctly rolls
+/// up only at the task level, not here.
+Map<String, double> subtaskExpenseTotals(
+  List<Expense> expenses,
+  String taskId,
+) {
+  final out = <String, double>{};
+  for (final e in expenses) {
+    final sid = e.subtaskId;
+    if (e.taskId != taskId || sid == null || e.isVoid) continue;
+    out[sid] = (out[sid] ?? 0) + e.amount;
+  }
+  return out;
+}
+
+/// The currency to render [subtaskExpenseTotals] in — taken from the first
+/// live task-linked, sub-task-linked expense found (a task's expenses all
+/// belong to the task's one project, hence share one currency), defaulting
+/// to 'USD' when the task has no such expense yet.
+String subtaskExpenseCurrency(List<Expense> expenses, String taskId) {
+  for (final e in expenses) {
+    if (e.taskId == taskId && e.subtaskId != null && !e.isVoid) {
+      return e.currency;
+    }
+  }
+  return 'USD';
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────

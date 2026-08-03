@@ -13,12 +13,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/local/budgets_dao.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
+import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_detail_sheet.dart';
+import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:lazyclaw_mobile/widgets/link_text.dart';
@@ -55,6 +59,57 @@ class _NoopSync extends TaskSync {
   @override
   Future<SyncResult> sync({bool retryRejected = false}) async =>
       const SyncResult();
+}
+
+// ── budgetsProvider stub ─────────────────────────────────────────────────────
+//
+// TaskDetailSheet now reads budgetsProvider (to compute the sub-task money
+// chip's per-sub-task expense totals — see task_detail_subtasks_test.dart for
+// the dedicated coverage of that). The real budgetsProvider throws unless
+// appDatabaseProvider is overridden with a live DB, so every ProviderScope in
+// this file needs a stub too, even though none of these tests exercise money.
+
+class _OfflineBudgetsTransport implements BudgetsTransport {
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+          {Map<String, dynamic>? queryParams}) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> postJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async =>
+      throw ApiError(0, 'offline');
+}
+
+class _NoopBudgetsSync extends BudgetsSync {
+  _NoopBudgetsSync(super.dao, super.repo);
+  @override
+  Future<BudgetsSyncResult> sync({bool retryRejected = false}) async =>
+      const BudgetsSyncResult();
+}
+
+class _StubBudgetsNotifier extends BudgetsNotifier {
+  _StubBudgetsNotifier(super.dao, super.sync);
+  @override
+  Future<void> load() async {}
+  @override
+  Future<void> refresh() async {}
+  @override
+  Future<void> syncNow() async {}
+}
+
+_StubBudgetsNotifier _stubBudgets() {
+  final dao = BudgetsDao(_FakeDatabase());
+  return _StubBudgetsNotifier(
+    dao,
+    _NoopBudgetsSync(dao, BudgetsRepository(_OfflineBudgetsTransport())),
+  );
 }
 
 /// Records the editor's writes without touching the DAO/network.
@@ -148,7 +203,10 @@ const _withLinkNote = Task(
 void main() {
   Widget host(_StubTasksNotifier stub, {List<Project> projects = const []}) =>
       ProviderScope(
-        overrides: [tasksProvider.overrideWith((ref) => stub)],
+        overrides: [
+          tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets()),
+        ],
         child: MaterialApp(
           theme: buildAppTheme(),
           home: Consumer(
@@ -234,7 +292,10 @@ void main() {
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          overrides: [
+          tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets()),
+        ],
           child: MaterialApp(
             theme: buildAppTheme(),
             home: Consumer(
@@ -270,7 +331,10 @@ void main() {
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          overrides: [
+          tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets()),
+        ],
           child: MaterialApp(
             theme: buildAppTheme(),
             home: Consumer(
@@ -329,7 +393,10 @@ void main() {
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [tasksProvider.overrideWith((ref) => stub)],
+          overrides: [
+          tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets()),
+        ],
           child: MaterialApp(
             theme: buildAppTheme(),
             home: Consumer(
@@ -547,7 +614,10 @@ void main() {
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [tasksProvider.overrideWith((ref) => stub)],
+        overrides: [
+          tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets()),
+        ],
         child: MaterialApp(
           theme: buildAppTheme(),
           home: Consumer(

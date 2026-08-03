@@ -68,6 +68,8 @@ class _RecordingDao extends BudgetsDao {
     String? projectId,
     String? taskId,
     bool taskIdSet = false,
+    String? subtaskId,
+    bool subtaskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -79,6 +81,8 @@ class _RecordingDao extends BudgetsDao {
       'projectId': projectId,
       'taskId': taskId,
       'taskIdSet': taskIdSet,
+      'subtaskId': subtaskId,
+      'subtaskIdSet': subtaskIdSet,
       'notes': notes,
       'spentAt': spentAt,
     });
@@ -223,6 +227,52 @@ void main() {
       final call = dao.updateCalls.single;
       expect(call['taskIdSet'], isFalse);
       expect(call['taskId'], isNull);
+    });
+
+    // ── subtaskId / subtaskIdSet (exact mirror of the taskId group above) ───
+
+    test(
+        '(a) passes subtaskId + subtaskIdSet:true through when assigning a '
+        'sub-task', () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-7', subtaskId: 's1', subtaskIdSet: true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['subtaskId'], 's1');
+      expect(call['subtaskIdSet'], isTrue);
+    });
+
+    test(
+        '(b) passes subtaskId:null + subtaskIdSet:true through for an '
+        'explicit clear', () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-8', subtaskId: null, subtaskIdSet: true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['subtaskId'], isNull);
+      expect(call['subtaskIdSet'], isTrue);
+    });
+
+    test('(c) defaults subtaskIdSet:false when no sub-task args are passed',
+        () async {
+      final dao = await _freshDao();
+      final n = BudgetsNotifier(
+          dao, _NoopSync(dao, BudgetsRepository(_OfflineTransport())));
+
+      await n.updateExpense('exp-9', description: 'x');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final call = dao.updateCalls.single;
+      expect(call['subtaskIdSet'], isFalse);
+      expect(call['subtaskId'], isNull);
     });
   });
 }

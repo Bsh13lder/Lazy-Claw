@@ -44,6 +44,7 @@ Expense _serverExpense({
   double amount = 50.0,
   String description = 'Server expense',
   String? taskId,
+  String? subtaskId,
 }) =>
     Expense(
       id: id,
@@ -53,6 +54,7 @@ Expense _serverExpense({
       description: description,
       status: 'posted',
       taskId: taskId,
+      subtaskId: subtaskId,
     );
 
 BudgetEntry _serverBudgetEntry({
@@ -330,6 +332,103 @@ void main() {
       final updateItem =
           outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
       expect(updateItem.payload.containsKey('task_id'), isFalse);
+    });
+  });
+
+  // ── Expense update: subtaskId (exact mirror of the taskId group above) ─────
+
+  group('BudgetsDao expense update subtaskId', () {
+    test(
+        'upsertExpenseFromServer round-trips subtask_id into the cache row '
+        'and the read-back Expense', () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-srv-sub', taskId: 't1', subtaskId: 's1'));
+
+      final expense = await dao.getExpense('e-srv-sub');
+      expect(expense!.taskId, 't1');
+      expect(expense.subtaskId, 's1');
+
+      final row = await dao.getExpenseRow('e-srv-sub');
+      expect(row?['subtask_id'], 's1');
+    });
+
+    test(
+        'subtaskIdSet:true writes subtask_id into the cache row + outbox '
+        'payload', () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-subtask', taskId: 't1'));
+
+      final updated = await dao.applyLocalExpenseUpdate('e-subtask',
+          subtaskId: 's1', subtaskIdSet: true);
+      expect(updated!.subtaskId, 's1');
+
+      final row = await dao.getExpenseRow('e-subtask');
+      expect(row?['subtask_id'], 's1');
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      expect(updateItem.payload['subtask_id'], 's1');
+    });
+
+    test(
+        'explicit clear: subtaskId:null + subtaskIdSet:true keeps the '
+        'subtask_id key present (JSON null) in both the cache write and the '
+        'outbox payload', () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-sub-clear', taskId: 't1', subtaskId: 's0'));
+
+      final updated = await dao.applyLocalExpenseUpdate('e-sub-clear',
+          subtaskId: null, subtaskIdSet: true);
+      expect(updated!.subtaskId, isNull);
+
+      final row = await dao.getExpenseRow('e-sub-clear');
+      expect(row?['subtask_id'], isNull);
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      expect(updateItem.payload.containsKey('subtask_id'), isTrue);
+      expect(updateItem.payload['subtask_id'], isNull);
+    });
+
+    test(
+        'no subtaskIdSet: subtask_id key is absent from the outbox payload '
+        'and the cached subtask_id is left untouched', () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+          _serverExpense(id: 'e-sub-untouched', taskId: 't1', subtaskId: 's0'));
+
+      final updated = await dao.applyLocalExpenseUpdate('e-sub-untouched',
+          description: 'x');
+      expect(updated!.subtaskId, 's0');
+
+      final row = await dao.getExpenseRow('e-sub-untouched');
+      expect(row?['subtask_id'], 's0');
+
+      final outbox = await dao.readBudgetsOutbox();
+      final updateItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.update);
+      expect(updateItem.payload.containsKey('subtask_id'), isFalse);
+    });
+
+    test(
+        'a plain applyLocalExpenseCreate never carries subtask_id (mirrors '
+        'task_id — the link is only ever set via a later PATCH)', () async {
+      final dao = await _freshDao();
+      final created =
+          await dao.applyLocalExpenseCreate('p1', 5.0, 'New expense');
+      expect(created.subtaskId, isNull);
+      expect(created.taskId, isNull);
+
+      final outbox = await dao.readBudgetsOutbox();
+      final createItem =
+          outbox.firstWhere((o) => o.op == BudgetsOutboxOp.create);
+      expect(createItem.payload.containsKey('subtask_id'), isFalse);
+      expect(createItem.payload.containsKey('task_id'), isFalse);
     });
   });
 

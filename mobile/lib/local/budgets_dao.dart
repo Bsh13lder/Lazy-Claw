@@ -644,18 +644,26 @@ class BudgetsDao {
   /// to the live project list (which carries the correct current name) until
   /// the next pull re-stamps it.
   ///
-  /// `taskId`/`taskIdSet` follow null-vs-absent semantics (load-bearing, see
+  /// `taskId`/`taskIdSet` (and `subtaskId`/`subtaskIdSet`, its exact mirror)
+  /// follow null-vs-absent semantics (load-bearing, see
   /// `feedback_patch_null_vs_absent`): most fields use the `?value`
   /// null-aware map-entry syntax, which omits the key whenever the value is
   /// null — fine for fields that are never explicitly cleared to null via
-  /// this call. `task_id` is different: callers (the task picker) need to be
-  /// able to clear a task link by passing `taskId: null`. So `taskIdSet`
-  /// carries that intent explicitly — when false (the default; every
-  /// existing caller — favorite toggles, plain field edits — never sets it),
-  /// the `task_id` key is omitted entirely so the task link is left
-  /// untouched; when true, the key is always included (even when `taskId` is
-  /// null) so it rides through as a real JSON `null` on the wire and the
-  /// server's `exclude_unset` PATCH handler clears the link.
+  /// this call. `task_id`/`subtask_id` are different: callers (the task/
+  /// sub-task pickers) need to be able to clear a link by passing
+  /// `taskId: null` / `subtaskId: null`. So `taskIdSet`/`subtaskIdSet` carry
+  /// that intent explicitly — when false (the default; every existing
+  /// caller — favorite toggles, plain field edits — never sets them), the
+  /// key is omitted entirely so the link is left untouched; when true, the
+  /// key is always included (even when the value is null) so it rides
+  /// through as a real JSON `null` on the wire and the server's
+  /// `exclude_unset` PATCH handler clears the link. Note there is
+  /// deliberately no cross-field coupling here (setting `taskIdSet` does NOT
+  /// implicitly clear `subtask_id`) — the server enforces the
+  /// `subtask_id != null implies task_id != null` invariant itself, and the
+  /// UI callers that change a task are responsible for also clearing the
+  /// stale sub-task link (see `ExpenseDetailSheet`'s task picker and
+  /// `ExpensesScreen`'s bulk-assign flows).
   Future<Expense?> applyLocalExpenseUpdate(
     String id, {
     double? amount,
@@ -664,6 +672,8 @@ class BudgetsDao {
     String? projectId,
     String? taskId,
     bool taskIdSet = false,
+    String? subtaskId,
+    bool subtaskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -680,6 +690,7 @@ class BudgetsDao {
       'vendor': ?vendor,
       'project_id': ?projectId,
       if (taskIdSet) 'task_id': taskId,
+      if (subtaskIdSet) 'subtask_id': subtaskId,
       'notes': ?notes,
       'spent_at': ?spentAt,
     };
@@ -1342,6 +1353,7 @@ class BudgetsDao {
         id: row['id'] as String? ?? '',
         projectId: row['project_id'] as String? ?? '',
         taskId: row['task_id'] as String?,
+        subtaskId: row['subtask_id'] as String?,
         amount: (row['amount'] as num?)?.toDouble() ?? 0.0,
         currency: row['currency'] as String? ?? 'USD',
         description: row['description'] as String?,
@@ -1361,6 +1373,7 @@ class BudgetsDao {
         'id': e.id,
         'project_id': e.projectId,
         'task_id': e.taskId,
+        'subtask_id': e.subtaskId,
         'amount': e.amount,
         'currency': e.currency,
         'description': e.description,

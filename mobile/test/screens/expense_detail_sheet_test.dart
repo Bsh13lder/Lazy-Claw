@@ -82,6 +82,8 @@ class _StubBudgetsNotifier extends BudgetsNotifier {
     String? projectId,
     String? taskId,
     bool taskIdSet = false,
+    String? subtaskId,
+    bool subtaskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -93,6 +95,8 @@ class _StubBudgetsNotifier extends BudgetsNotifier {
       'projectId': projectId,
       'taskId': taskId,
       'taskIdSet': taskIdSet,
+      'subtaskId': subtaskId,
+      'subtaskIdSet': subtaskIdSet,
       'notes': notes,
       'spentAt': spentAt,
     });
@@ -152,7 +156,8 @@ class _StubTasksNotifier extends TasksNotifier {
   }
 }
 
-Task _task(String id, String title, {String? category}) => Task(
+Task _task(String id, String title, {String? category, String? steps}) =>
+    Task(
       id: id,
       userId: 'u1',
       title: title,
@@ -160,6 +165,7 @@ Task _task(String id, String title, {String? category}) => Task(
       priority: 'medium',
       status: 'todo',
       owner: 'user',
+      steps: steps,
       nagCount: 0,
       createdAt: '2026-06-06T00:00:00Z',
     );
@@ -216,6 +222,10 @@ void main() {
     List<Task> tasks = const [],
     Expense expense = _sample,
   }) async {
+    // Tall surface so the whole sheet (now incl. the sub-task picker) fits
+    // without scrolling — mirrors task_detail_subtasks_test.dart's openSheet.
+    await tester.binding.setSurfaceSize(const Size(600, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(host(stub, tasks: tasks, expense: expense));
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
@@ -410,5 +420,253 @@ void main() {
 
     expect(stub.deleteCalls, ['exp-42']);
     expect(find.byKey(const Key('expense-detail-amount')), findsNothing);
+  });
+
+  // ── Sub-task picker ──────────────────────────────────────────────────────
+
+  group('sub-task picker', () {
+    const stepsJson = '[{"id":"s1","title":"Buy flour","done":false},'
+        '{"id":"s2","title":"Preheat oven","done":true}]';
+
+    testWidgets(
+        'disabled (no items, no hint of a value) until a task is selected',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(
+        tester,
+        stub,
+        tasks: [_task('t1', 'Book flights', category: 'Marketing')],
+      );
+
+      final subtaskDropdown = tester.widget<DropdownButton<String>>(
+          find.byKey(const Key('expense-detail-subtask')));
+      expect(subtaskDropdown.value, isNull);
+      expect(subtaskDropdown.onChanged, isNull);
+      expect(subtaskDropdown.items, isEmpty);
+      expect(find.text('Select a task first'), findsOneWidget);
+    });
+
+    testWidgets('lists the selected task\'s sub-tasks once a task is picked',
+        (tester) async {
+      final stub = _stub();
+      const withTask = Expense(
+        id: 'exp-90',
+        projectId: 'proj-1',
+        taskId: 't1',
+        amount: 5,
+        currency: 'USD',
+        description: 'Snack',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+        ],
+        expense: withTask,
+      );
+
+      final subtaskDropdown = tester.widget<DropdownButton<String>>(
+          find.byKey(const Key('expense-detail-subtask')));
+      expect(subtaskDropdown.onChanged, isNotNull);
+      // "No subtask" + the two sub-tasks.
+      expect(subtaskDropdown.items, hasLength(3));
+
+      // Open the dropdown's overlay menu — a closed DropdownButton only
+      // renders its currently-SELECTED item (here: the "Select subtask"
+      // hint, since nothing is picked yet), so the other options only
+      // materialize in the widget tree once the menu is open.
+      await tester.tap(find.byKey(const Key('expense-detail-subtask')));
+      await tester.pumpAndSettle();
+      expect(find.text('Buy flour'), findsOneWidget);
+      expect(find.text('Preheat oven'), findsOneWidget);
+    });
+
+    testWidgets('pre-fills the linked sub-task and Save submits it',
+        (tester) async {
+      final stub = _stub();
+      const withSubtask = Expense(
+        id: 'exp-91',
+        projectId: 'proj-1',
+        taskId: 't1',
+        subtaskId: 's1',
+        amount: 5,
+        currency: 'USD',
+        description: 'Flour',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+        ],
+        expense: withSubtask,
+      );
+
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        's1',
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+
+      expect(stub.updateCalls.single['subtaskId'], 's1');
+      expect(stub.updateCalls.single['subtaskIdSet'], isTrue);
+    });
+
+    testWidgets('changing the task clears the sub-task selection',
+        (tester) async {
+      final stub = _stub();
+      const withSubtask = Expense(
+        id: 'exp-92',
+        projectId: 'proj-1',
+        taskId: 't1',
+        subtaskId: 's1',
+        amount: 5,
+        currency: 'USD',
+        description: 'Flour',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+          _task('t2', 'Other task', category: 'Marketing'),
+        ],
+        expense: withSubtask,
+      );
+
+      // Sanity: pre-filled from the expense.
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        's1',
+      );
+
+      await tester.tap(find.byKey(const Key('expense-detail-task')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other task').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-task')))
+            .value,
+        't2',
+      );
+      // The sub-task belonged to the old task ('t2' has none anyway) — it
+      // must reset, not carry over.
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        isNull,
+      );
+    });
+
+    testWidgets('picking "No subtask" clears an existing link on Save',
+        (tester) async {
+      final stub = _stub();
+      const withSubtask = Expense(
+        id: 'exp-93',
+        projectId: 'proj-1',
+        taskId: 't1',
+        subtaskId: 's1',
+        amount: 5,
+        currency: 'USD',
+        description: 'Flour',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+        ],
+        expense: withSubtask,
+      );
+
+      await tester.tap(find.byKey(const Key('expense-detail-subtask')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('No subtask').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        isNull,
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+
+      expect(stub.updateCalls.single['subtaskId'], isNull);
+      expect(stub.updateCalls.single['subtaskIdSet'], isTrue);
+    });
+
+    testWidgets(
+        'falls back to no-selection when the linked sub-task no longer '
+        'exists on the task', (tester) async {
+      final stub = _stub();
+      const withGhostSubtask = Expense(
+        id: 'exp-94',
+        projectId: 'proj-1',
+        taskId: 't1',
+        subtaskId: 'ghost-subtask',
+        amount: 5,
+        currency: 'USD',
+        description: 'Flour',
+        status: 'posted',
+      );
+      await openSheet(
+        tester,
+        stub,
+        tasks: [
+          _task('t1', 'Bake a cake', category: 'Marketing', steps: stepsJson),
+        ],
+        expense: withGhostSubtask,
+      );
+
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+                find.byKey(const Key('expense-detail-subtask')))
+            .value,
+        isNull,
+      );
+    });
+
+    testWidgets(
+        'Save with no task selected still submits subtaskIdSet:true (the '
+        'default "No subtask" state is an explicit clear/no-op)',
+        (tester) async {
+      final stub = _stub();
+      await openSheet(tester, stub);
+
+      await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('expense-detail-save')));
+      await tester.pumpAndSettle();
+
+      expect(stub.updateCalls.single['subtaskId'], isNull);
+      expect(stub.updateCalls.single['subtaskIdSet'], isTrue);
+    });
   });
 }

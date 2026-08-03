@@ -730,7 +730,11 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
   /// possible since the bar disables while busy, but a safe habit regardless)
   /// can never change what's being moved out from under the loop. Each PATCH
   /// clears the expense's old task link (`taskIdSet: true` even when `taskId`
-  /// is null) — a moved expense's old task belonged to the old project.
+  /// is null) — a moved expense's old task belonged to the old project. The
+  /// sub-task link is cleared alongside it (`subtaskIdSet: true`,
+  /// `subtaskId: null`) for the same reason AND because the server rejects a
+  /// `subtask_id` that survives a `task_id` change — a sub-task belongs to
+  /// exactly one task, so a stale one would 400 the whole PATCH.
   Future<void> _runBulkAssign(String targetProjectId, String? taskId) async {
     if (_bulkBusy || _selected.isEmpty) return;
     final ids = _selected.toList();
@@ -743,6 +747,8 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
             projectId: targetProjectId,
             taskId: taskId,
             taskIdSet: true,
+            subtaskId: null,
+            subtaskIdSet: true,
           );
       if (ok) {
         moved++;
@@ -818,7 +824,7 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
 
   /// Applies every high/medium-confidence, matched suggestion
   /// ([confidentSuggestions]) via the same clear-on-move PATCH semantics as
-  /// [_runBulkAssign] (task link cleared, project set).
+  /// [_runBulkAssign] (task AND sub-task link cleared, project set).
   Future<void> _applyConfidentSuggestions() async {
     if (_bulkBusy) return;
     final confident = confidentSuggestions(_suggestions.values.toList());
@@ -832,6 +838,8 @@ class _LedgerTabState extends ConsumerState<_LedgerTab> {
             projectId: s.projectId!,
             taskId: null,
             taskIdSet: true,
+            subtaskId: null,
+            subtaskIdSet: true,
           );
       if (ok) {
         moved++;

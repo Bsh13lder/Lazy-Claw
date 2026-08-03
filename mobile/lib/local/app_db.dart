@@ -55,7 +55,16 @@ import 'uuid.dart';
 ///     `updated_at > since`), which is how server-minted recurring respawns
 ///     and agent/web edits went permanently missing from the phone while
 ///     local-only rows kept showing (2026-08-03 incident).
-const int kAppDbVersion = 13;
+/// v14: adds `expense_cache.subtask_id` (TEXT, nullable, plaintext — mirrors
+///     `task_id`) so an expense can be pinned to one checklist item of its
+///     linked task, not just the task as a whole. Round-trips through the
+///     budgets sync exactly like `task_id`: carried on the update outbox
+///     payload only (never on create), mapped both ways in
+///     `_expenseFromRow`/`_rowFromExpense`. The server enforces
+///     `subtask_id != null implies task_id != null` and DEMOTES (never
+///     deletes) an expense's `subtask_id` to null when its sub-task is
+///     removed — the money always survives on the task.
+const int kAppDbVersion = 14;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -178,6 +187,7 @@ const List<String> kAppDbSchema = [
     id TEXT PRIMARY KEY,
     project_id TEXT,
     task_id TEXT,
+    subtask_id TEXT,
     amount REAL,
     currency TEXT,
     description TEXT,
@@ -439,6 +449,32 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
     if (tables.isNotEmpty) {
       await db.delete('sync_state',
           where: 'entity = ?', whereArgs: [kTaskEntity]);
+    }
+  }
+  // v13 → v14: add the sub-task expense link column. Idempotent — only
+  // ALTERed in when genuinely absent, so a re-run can't throw (clones the
+  // v8 is_favorite / v10→v11 column-add pattern).
+  //
+  // Guarded on `expense_cache` itself existing (clones the v13 branch's
+  // `sync_state`-existence guard, same rationale): every branch here is
+  // gated purely on `oldVersion` — `newVersion` is NOT consulted, so calling
+  // `migrateAppDb(db, oldVersion, anyTarget)` with `oldVersion < 14` always
+  // runs this branch too, including from an earlier migration's own test
+  // exercising a hand-built PARTIAL schema (e.g. the v11 test's
+  // `task_cache`/`project_cache`-only DB) that never created
+  // `expense_cache` in the first place. On-device `expense_cache` has
+  // existed since v3, so this is a no-op check in production.
+  if (oldVersion < 14) {
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='expense_cache'",
+    );
+    if (tables.isNotEmpty) {
+      final cols = await db.rawQuery("PRAGMA table_info('expense_cache')");
+      final hasSubtaskId = cols.any((c) => c['name'] == 'subtask_id');
+      if (!hasSubtaskId) {
+        await db.execute(
+            'ALTER TABLE expense_cache ADD COLUMN subtask_id TEXT');
+      }
     }
   }
 }

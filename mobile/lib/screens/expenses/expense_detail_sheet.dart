@@ -4,6 +4,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/expense.dart';
 import '../../models/project.dart';
+import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../models/task_project_link.dart';
 import '../../providers/budgets_provider.dart';
@@ -30,6 +31,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
   late final TextEditingController _vendorController;
   late String? _projectId;
   late String? _taskId;
+  late String? _subtaskId;
   String? _spentAt;
   bool _saving = false;
   bool _deleting = false;
@@ -44,6 +46,7 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
     _vendorController = TextEditingController(text: e.vendor ?? '');
     _projectId = e.projectId.isEmpty ? null : e.projectId;
     _taskId = e.taskId;
+    _subtaskId = e.subtaskId;
     _spentAt = _dateOnly(e.spentAt);
   }
 
@@ -91,6 +94,8 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           projectId: _projectId,
           taskId: _taskId,
           taskIdSet: true,
+          subtaskId: _subtaskId,
+          subtaskIdSet: true,
           spentAt: _spentAt,
         );
 
@@ -123,6 +128,16 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
   List<Task> _tasksForCurrentProject(List<Project> projects, List<Task> all) {
     for (final p in projects) {
       if (p.id == _projectId) return tasksForProject(all, p);
+    }
+    return const [];
+  }
+
+  /// The sub-tasks (checklist items) of the currently-selected task — empty
+  /// when no task is selected or it matches none of [tasks] (e.g. it was
+  /// deleted, mirrors [_tasksForCurrentProject]'s same defensive fallback).
+  List<Subtask> _subtasksForSelectedTask(List<Task> tasks) {
+    for (final t in tasks) {
+      if (t.id == _taskId) return t.subtasks;
     }
     return const [];
   }
@@ -185,11 +200,13 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
             projects: projects,
             selectedId: _projectId,
             // A task belongs to one project, so switching the expense's
-            // project invalidates whatever task was linked — reset it rather
-            // than carry a task from the old project forward.
+            // project invalidates whatever task (and, transitively, sub-task)
+            // was linked — reset both rather than carry them from the old
+            // project forward.
             onChanged: (id) => setState(() {
               _projectId = id;
               _taskId = null;
+              _subtaskId = null;
             }),
           ),
 
@@ -199,7 +216,22 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
           _TaskPicker(
             tasks: availableTasks,
             selectedId: _taskId,
-            onChanged: (id) => setState(() => _taskId = id),
+            // A sub-task belongs to exactly one task — switching (or
+            // clearing) the task invalidates whatever sub-task was linked.
+            onChanged: (id) => setState(() {
+              _taskId = id;
+              _subtaskId = null;
+            }),
+          ),
+
+          const SizedBox(height: AppSpacing.lg),
+
+          // ── Sub-task picker (optional; only meaningful with a task) ─────
+          _SubtaskPicker(
+            subtasks: _subtasksForSelectedTask(availableTasks),
+            selectedId: _subtaskId,
+            enabled: _taskId != null,
+            onChanged: (id) => setState(() => _subtaskId = id),
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -496,6 +528,95 @@ class _TaskPicker extends StatelessWidget {
                   ),
               ],
               onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A token-styled dropdown sub-task picker — links this expense to one
+/// checklist item of the (already-selected) task. "No subtask" is always the
+/// first option and represents an explicit clear, not "leave unchanged" (the
+/// sheet always saves with `subtaskIdSet: true`, mirroring [_TaskPicker]'s
+/// own `taskIdSet: true`). Disabled (greyed hint, no items, `onChanged: null`)
+/// until a task is selected — a sub-task can't exist without one. Visually
+/// mirrors [_TaskPicker] so all three pickers feel like one family.
+class _SubtaskPicker extends StatelessWidget {
+  const _SubtaskPicker({
+    required this.subtasks,
+    required this.selectedId,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final List<Subtask> subtasks;
+  final String? selectedId;
+  final bool enabled;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    // Guard against a stale selectedId that isn't among the current options
+    // (e.g. its sub-task was deleted, or the task changed since) so the
+    // DropdownButton's assert doesn't fire — mirrors _TaskPicker's guard.
+    final hasSelected = enabled && subtasks.any((s) => s.id == selectedId);
+    final value = hasSelected ? selectedId : null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Subtask (optional)',
+          style: AppText.label.copyWith(color: AppColors.textSecondary),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rMd,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              key: const Key('expense-detail-subtask'),
+              value: value,
+              isExpanded: true,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              dropdownColor: AppColors.bgSurfaceElevated,
+              style: AppText.body,
+              icon: const Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: AppColors.textMuted,
+              ),
+              hint: Text(
+                enabled ? 'Select subtask' : 'Select a task first',
+                style: AppText.body.copyWith(color: AppColors.textMuted),
+              ),
+              items: !enabled
+                  ? const []
+                  : [
+                      DropdownMenuItem<String>(
+                        value: null,
+                        child: Text(
+                          'No subtask',
+                          style: AppText.body.copyWith(
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ),
+                      for (final s in subtasks)
+                        DropdownMenuItem<String>(
+                          value: s.id,
+                          child: Text(
+                            s.title,
+                            style: AppText.body,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+              onChanged: enabled ? onChanged : null,
             ),
           ),
         ),

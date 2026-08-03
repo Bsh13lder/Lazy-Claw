@@ -366,11 +366,12 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   /// syncs. Returns true on success, false (with `state.error` set) when the
   /// local write throws.
   ///
-  /// `taskId`/`taskIdSet` are a null-vs-absent pair (see
-  /// [BudgetsDao.applyLocalExpenseUpdate] for the full rationale): pass
-  /// `taskIdSet: true` to make the task link an explicit part of this patch
-  /// (including clearing it via `taskId: null`); leave `taskIdSet` at its
-  /// default `false` to leave the existing task link untouched.
+  /// `taskId`/`taskIdSet` (and `subtaskId`/`subtaskIdSet`, its exact mirror)
+  /// are null-vs-absent pairs (see [BudgetsDao.applyLocalExpenseUpdate] for
+  /// the full rationale): pass `taskIdSet: true` / `subtaskIdSet: true` to
+  /// make the link an explicit part of this patch (including clearing it via
+  /// `taskId: null` / `subtaskId: null`); leave the `*Set` flag at its
+  /// default `false` to leave the existing link untouched.
   Future<bool> updateExpense(
     String id, {
     double? amount,
@@ -379,6 +380,8 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     String? projectId,
     String? taskId,
     bool taskIdSet = false,
+    String? subtaskId,
+    bool subtaskIdSet = false,
     String? notes,
     String? spentAt,
   }) async {
@@ -392,6 +395,8 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
         projectId: projectId,
         taskId: taskId,
         taskIdSet: taskIdSet,
+        subtaskId: subtaskId,
+        subtaskIdSet: subtaskIdSet,
         notes: notes,
         spentAt: spentAt,
       );

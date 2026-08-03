@@ -4,6 +4,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:lazyclaw_mobile/widgets/link_text.dart';
 
 import '../../models/subtask.dart';
+import '../expenses/money_helpers.dart';
 import 'task_sort.dart';
 
 /// A controlled checklist editor for a task's sub-tasks (Todoist/Taskade-style).
@@ -19,6 +20,8 @@ class SubtaskEditor extends StatelessWidget {
     required this.onChanged,
     this.commentCounts = const {},
     this.onOpenComments,
+    this.expenseTotals = const {},
+    this.expenseCurrency = 'USD',
   });
 
   final List<Subtask> subtasks;
@@ -29,6 +32,19 @@ class SubtaskEditor extends StatelessWidget {
   /// mapped to zero) means comments aren't available for it yet — see
   /// [onOpenComments].
   final Map<String, int> commentCounts;
+
+  /// The sum of live (non-void) expenses linked to each sub-task, keyed by
+  /// sub-task id — "the money sign" on a sub-task row. A sub-task's id being
+  /// absent (or mapped to a non-positive total) hides the chip entirely;
+  /// this is display-only, mirroring [commentCounts]'s badge. Defaults to
+  /// `const {}` so every existing call site (task detail sheet, add-task
+  /// sheet, task row) compiles and renders unchanged.
+  final Map<String, double> expenseTotals;
+
+  /// The currency [expenseTotals] amounts are formatted in via [fmtMoney].
+  /// A task's expenses all belong to the task's one project, hence one
+  /// currency — there is no per-sub-task currency to track.
+  final String expenseCurrency;
 
   /// When supplied, a tile shows a small comment icon (+count when > 0)
   /// between the title and the delete affordance ONLY when its sub-task's id
@@ -95,6 +111,8 @@ class SubtaskEditor extends StatelessWidget {
                 (onOpenComments == null || !commentCounts.containsKey(s.id))
                 ? null
                 : () => onOpenComments!(s.id),
+            expenseTotal: expenseTotals[s.id],
+            expenseCurrency: expenseCurrency,
           ),
         _AddSubtaskField(onAdd: _add),
       ],
@@ -113,6 +131,8 @@ class _SubtaskTile extends StatefulWidget {
     required this.onDelete,
     this.commentCount = 0,
     this.onOpenComments,
+    this.expenseTotal,
+    this.expenseCurrency = 'USD',
   });
 
   final Subtask subtask;
@@ -121,6 +141,11 @@ class _SubtaskTile extends StatefulWidget {
   final VoidCallback onDelete;
   final int commentCount;
   final VoidCallback? onOpenComments;
+
+  /// This sub-task's expense total, or null when it has none — see
+  /// [SubtaskEditor.expenseTotals].
+  final double? expenseTotal;
+  final String expenseCurrency;
 
   @override
   State<_SubtaskTile> createState() => _SubtaskTileState();
@@ -206,6 +231,9 @@ class _SubtaskTileState extends State<_SubtaskTile> {
           // ── Title (inline-editable) ────────────────────────────────────────
           Expanded(child: _buildText(done)),
 
+          // ── Expense money chip (only when this sub-task has one) ────────────
+          if ((widget.expenseTotal ?? 0) > 0) _buildMoneyChip(),
+
           // ── Comments badge (only when the callback is wired) ────────────────
           if (widget.onOpenComments != null) _buildCommentBadge(),
 
@@ -221,6 +249,33 @@ class _SubtaskTileState extends State<_SubtaskTile> {
               padding: EdgeInsets.all(AppSpacing.xs),
               child: Icon(Icons.close, size: 16, color: AppColors.textMuted),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A small money icon + formatted total — "the money sign" on a sub-task
+  /// that has at least one expense linked to it. Display-only (no tap
+  /// handler): editing/removing the link happens from the expense's own
+  /// detail sheet, not here. Mirrors [_buildCommentBadge]'s row-affordance
+  /// shape (icon + text, same padding/sizing/muted color).
+  Widget _buildMoneyChip() {
+    return Padding(
+      key: ValueKey('subtask-expense-${widget.subtask.id}'),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.attach_money_rounded,
+            size: 14,
+            color: AppColors.textMuted,
+          ),
+          const SizedBox(width: 2),
+          Text(
+            fmtMoney(widget.expenseCurrency, widget.expenseTotal!),
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
           ),
         ],
       ),

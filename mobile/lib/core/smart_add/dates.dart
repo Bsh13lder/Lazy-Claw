@@ -76,9 +76,11 @@ final RegExp _tomorrow = RegExp(
 );
 // "day after tomorrow" / "overmorrow" -> today + 2. Must be scanned so it
 // out-ranks the plain `_tomorrow` match on the shared "tomorrow" substring
-// (it does: same start, longer span — `_resolveOverlaps` picks the longer
-// on a start tie). Before this, "day after tomorrow" matched bare
-// `tomorrow` (wrong day) and stranded "day after" in the title.
+// (it does: `_dayAfterTomorrow`'s span starts at "day", strictly EARLIER
+// than `_tomorrow`'s span starting at "tomorrow" — `_resolveOverlaps`'
+// primary earliest-start rule alone picks it, no length/rank tiebreak
+// needed). Before this, "day after tomorrow" matched bare `tomorrow`
+// (wrong day) and stranded "day after" in the title.
 final RegExp _dayAfterTomorrow = RegExp(
   r'(^|\s)(?:day\s+after\s+tomorrow|overmorrow)(?=\s|$)',
   caseSensitive: false,

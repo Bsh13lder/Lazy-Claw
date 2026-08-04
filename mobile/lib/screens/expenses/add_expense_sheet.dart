@@ -275,7 +275,6 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
       // bottom edge — the user's report was literally "there is no save sign".
       submit: LzFloatingSubmit(
         key: const Key('expense-submit-fab'),
-        icon: Icons.add_rounded,
         tooltip: 'Add expense',
         loading: _loading,
         onPressed: _loading ? null : _submit,

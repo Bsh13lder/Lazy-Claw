@@ -12,6 +12,8 @@
 // ANY access — so a future edit that accidentally reintroduces a real DB call
 // fails loudly instead of hanging.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
@@ -114,6 +116,13 @@ class StubTasksNotifier extends TasksNotifier {
   final List<String> commentDeletes = [];
   int _seq = 0;
 
+  /// When non-null, every [updateTask] records its arguments and then PARKS
+  /// here until the test completes it. Lets an auto-save test hold one write
+  /// "in flight" and prove that edits landing during it collapse into exactly
+  /// one follow-up rather than racing. Null (the default) keeps every existing
+  /// test's behaviour unchanged.
+  Completer<void>? updateGate;
+
   @override
   Future<void> updateTask(
     String id, {
@@ -134,12 +143,19 @@ class StubTasksNotifier extends TasksNotifier {
       'id': id,
       'title': title,
       'description': description,
+      'priority': priority,
+      'dueDate': dueDate,
       'category': category,
       'steps': steps,
+      'reminderAt': reminderAt,
+      'recurring': recurring,
+      'recurUntil': recurUntil,
       'tags': tags,
       'allocatedBudget': allocatedBudget,
       'clearAllocatedBudget': clearAllocatedBudget,
     });
+    final gate = updateGate;
+    if (gate != null) await gate.future;
   }
 
   @override

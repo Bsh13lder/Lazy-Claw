@@ -85,3 +85,57 @@ Future<TimeOfDay?> showTaskTimePicker(
   initialTime: initial ?? const TimeOfDay(hour: 9, minute: 0),
   builder: _themed,
 );
+
+// ── Seeded pickers ──────────────────────────────────────────────────────────
+//
+// The detail sheet used to hold these three as `State` methods that each did
+// the same three things: compute the seed, compute the range, `setState` the
+// result. Only the middle step was ever sheet-specific, and it isn't really —
+// so the whole "which window does this picker open on" decision lives here
+// with the seeds it depends on, and the sheet is left with the assignment.
+// (It also bought back the lines auto-save needed; that file is on the
+// 800-line ceiling.)
+
+/// Pick a DUE day. Returns the chosen `yyyy-MM-dd`, or null when dismissed.
+///
+/// The ±365-day window is deliberately symmetric: a task can be back-dated
+/// (logging something already missed) as easily as scheduled.
+Future<String?> pickTaskDueDay(
+  BuildContext context, {
+  required String? currentDay,
+}) async {
+  final now = DateTime.now();
+  final picked = await showTaskDatePicker(
+    context,
+    initialDate: dueDayPickerSeed(currentDay, now: now),
+    firstDate: now.subtract(const Duration(days: 365)),
+    lastDate: now.add(const Duration(days: 365)),
+  );
+  return picked == null ? null : isoDay(picked);
+}
+
+/// Pick the recurring series' END day. Returns `yyyy-MM-dd`, or null when
+/// dismissed.
+///
+/// A long horizon (10 years) so a yearly recurrence can still be given a
+/// meaningful end date, and no past dates — an already-elapsed end would
+/// retire the series on the spot.
+Future<String?> pickTaskRecurUntilDay(
+  BuildContext context, {
+  required String? currentDay,
+}) async {
+  final now = DateTime.now();
+  final picked = await showTaskDatePicker(
+    context,
+    initialDate: recurUntilPickerSeed(currentDay, now: now),
+    firstDate: now,
+    lastDate: now.add(const Duration(days: 3650)),
+  );
+  return picked == null ? null : isoDay(picked);
+}
+
+/// Today as `yyyy-MM-dd`.
+String isoToday() => isoDay(DateTime.now());
+
+/// Tomorrow as `yyyy-MM-dd`.
+String isoTomorrow() => isoDay(DateTime.now().add(const Duration(days: 1)));

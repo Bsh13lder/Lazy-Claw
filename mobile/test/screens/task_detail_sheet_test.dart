@@ -462,9 +462,10 @@ void main() {
 
   // Both controls moved behind an affordance in the 2026-08-03 pass: TAGS
   // into a popup (the sheet was dominated by an always-on field), and the
-  // allocated-budget field behind the BUDGET money dropdown. The SAVE
-  // semantics they exercise are unchanged, so these tests only gained the
-  // step that opens each surface.
+  // allocated-budget field behind the allocated FIGURE itself (tap it to edit
+  // it in place — see task_budget_control.dart). The SAVE semantics they
+  // exercise are unchanged, so these tests only gained the step that opens
+  // each surface.
 
   testWidgets('adding a tag + budget then Save passes them to updateTask', (
     tester,
@@ -485,21 +486,24 @@ void main() {
     await tester.tap(find.byKey(kTaskTagsDoneKey));
     await tester.pumpAndSettle();
 
-    // Reveal the allocated-budget field from the money dropdown, then fill it.
-    await tester.tap(find.byKey(kTaskBudgetMenuKey));
+    // Tap the allocated figure to edit it in place, then fill it.
+    await tester.tap(find.byKey(kTaskBudgetSummaryTapKey));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(kTaskBudgetAllocatedItemKey));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('task-detail-budget')), '250');
+    await tester.enterText(find.byKey(kTaskBudgetFieldKey), '250');
 
     await tester.tap(find.byKey(const Key('task-detail-save')));
     await tester.pumpAndSettle();
 
-    final call = stub.updateCalls.single;
+    // Auto-save commits each decision on its own beat: submitting the tag is
+    // a discrete change (written at once), the allocation rides the flush the
+    // floating submit performs. Both land; they simply no longer share one
+    // payload — and the second write correctly omits `tags`, because by then
+    // the tag IS the baseline.
+    expect(stub.updateCalls, hasLength(2));
     // tags ride as the JSON-array string the DAO/cache carry.
-    expect(jsonDecode(call['tags'] as String), ['work']);
-    expect(call['allocatedBudget'], 250.0);
-    expect(call['clearAllocatedBudget'], false);
+    expect(jsonDecode(stub.updateCalls.first['tags'] as String), ['work']);
+    expect(stub.updateCalls.last['allocatedBudget'], 250.0);
+    expect(stub.updateCalls.last['clearAllocatedBudget'], false);
   });
 
   testWidgets('an un-submitted tag is folded in on Save', (tester) async {

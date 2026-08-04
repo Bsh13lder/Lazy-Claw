@@ -421,7 +421,6 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       submit: LzFloatingSubmit(
         key: kAddTaskSubmitKey,
         tooltip: 'Add Task',
-        icon: Icons.add_rounded,
         loading: _submitting,
         onPressed: _submit,
       ),

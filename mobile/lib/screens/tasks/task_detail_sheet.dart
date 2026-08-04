@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lazyclaw_mobile/core/autosave.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
-import 'package:lazyclaw_mobile/core/project_resolver.dart';
 import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
@@ -13,15 +13,15 @@ import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/budgets_provider.dart';
 import '../../providers/tasks_provider.dart';
-import '../../widgets/link_text.dart';
-import '../expenses/add_expense_for_task.dart';
+import '../../widgets/autosave_indicator.dart';
 import '../settings/settings_prefs.dart';
-import 'add_link_dialog.dart';
 import 'chip_edit.dart';
-import 'reschedule_sheet.dart';
 import 'task_attribute_chips.dart';
 import 'task_budget_control.dart';
+import 'task_budget_edit_state.dart';
 import 'task_comments_section.dart';
+import 'task_detail_actions.dart';
+import 'task_detail_live_data.dart';
 import 'task_detail_patch.dart';
 import 'task_detail_pickers.dart';
 import 'task_due_model.dart';
@@ -40,10 +40,18 @@ import 'task_tags_field.dart';
 export 'task_expense_rollup.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
-/// the user change the title, notes, priority, project and due date, then Save
-/// (patch via [TasksNotifier.updateTask]) or Delete (confirm, then
-/// [TasksNotifier.deleteTask]). Mirrors the add-task sheet's look so the two
-/// surfaces feel like one family.
+/// the user change the title, notes, priority, project and due date.
+///
+/// It AUTO-SAVES: text is committed a beat after typing stops, discrete
+/// controls (chips, pickers, the repeat menu) the moment they change, and
+/// anything still pending is flushed when the sheet is dismissed or the app is
+/// backgrounded. The floating check no longer means "make this real" — it means
+/// "commit now and close". Delete stays explicit (confirm, then
+/// [TasksNotifier.deleteTask]).
+///
+/// The write itself is unchanged: one [TasksNotifier.updateTask] carrying the
+/// patch [buildTaskDetailPatch] builds, whose three-way (untouched / clear /
+/// set) rules are what make auto-save safe to run repeatedly — see [_commit].
 class TaskDetailSheet extends ConsumerStatefulWidget {
   const TaskDetailSheet({
     super.key,
@@ -73,105 +81,108 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late String _priority;
 
   /// Whether the Notes block shows the editable field vs. a read-only
-  /// [LinkText] preview. Seeded so empty notes open straight in the editor
-  /// (today's behavior); non-empty notes start collapsed into the preview and
-  /// only switch to the editor when the user taps it.
+  /// preview. Seeded so empty notes open straight in the editor (today's
+  /// behavior); non-empty notes start collapsed and switch on tap.
   late bool _editingNotes;
   late final FocusNode _notesFocus;
 
-  /// Working copy of the task's tags. Edited in-sheet (add/remove chips) and
-  /// committed on Save. [_originalTagsJson] snapshots the on-open serialization
-  /// so Save only writes `tags` when they actually changed (no churn on a
-  /// title-only edit). The wire/cache shape is a JSON-array string.
+  /// Working copy of the task's tags. [_originalTagsJson] is the SAVED
+  /// serialization — the baseline that decides whether `tags` rides in the
+  /// patch at all. It advances on every successful write (see [_rebase]).
   late List<String> _tags;
   late String _originalTagsJson;
   final TextEditingController _tagController = TextEditingController();
 
-  /// The task's allocated budget on open (null = none). Save compares the
-  /// parsed field against this to decide set / clear / untouched.
-  double? _originalBudget;
-
-  /// Whether the allocated-budget field is on screen. Seeded true only when
-  /// the task already HAS an allocation — otherwise the field is a permanently
-  /// empty box in a sheet that is already too long, and the money dropdown is
-  /// the discoverable way in. Once revealed it stays revealed for the session
-  /// (never auto-hidden mid-edit).
-  late bool _showBudgetField;
+  /// The BUDGET block's whole state (saved baseline, working draft, open
+  /// editor, inline rejection) as ONE immutable value.
+  late TaskBudgetEditState _budget;
   final FocusNode _budgetFocus = FocusNode();
 
-  /// The due date is split into a date-only day string (`_dueDay`) and a
-  /// separate time-of-day (`_dueTime`), pre-filled from the task's stored
-  /// dueDate (which may be date-only or a full ISO datetime).
+  /// The due date, split into a date-only day and a separate time-of-day.
   String? _dueDay;
   TimeOfDay? _dueTime;
-  bool _saving = false;
   bool _deleting = false;
 
-  /// The user's explicit reminder-lead choice. Seeded from the task's existing
-  /// reminderAt; null when the task has no reminder yet, so the global default
-  /// applies once a due time is present.
+  /// The inline rejection under the TITLE. Non-null blocks every write: an
+  /// auto-save that wrote a half-deleted title over a good one would be the
+  /// exact data loss this feature exists to prevent.
+  String? _titleError;
+
+  /// The user's explicit reminder-lead choice. Null until they touch it, so
+  /// the global default applies once a due time is present.
   ReminderLead? _explicitLead;
 
-  /// The task's `reminderAt` on open (null / '' = none). A reminder is modelled
-  /// as `due − lead`, so for a DATE-ONLY due date the lead — and therefore the
-  /// composed reminder — is not derivable at all; this absolute value is the only
-  /// record of it. Kept so Save can tell "untouched" (preserve) from "cleared"
-  /// (send the `''` sentinel), and so the sheet can still SHOW it.
+  /// The task's PERSISTED `reminderAt` (null / '' = none). A reminder is
+  /// modelled as `due − lead`, so for a DATE-ONLY due date the lead — and the
+  /// composed reminder — is not derivable at all; this absolute value is the
+  /// only record of it. It tells Save "untouched" (preserve) from "cleared"
+  /// (send the `''` sentinel), and advances with every write.
   String? _originalReminderAt;
 
-  /// Set once the user touches the REMIND control — a lead chip, or the ✕ on the
-  /// read-only reminder row. Only then may Save send the clear sentinel.
+  /// Set once the user touches the REMIND control. Only then may a write send
+  /// the clear sentinel. Reset by [_rebase] — after a write the persisted
+  /// value IS the baseline again.
   bool _reminderTouched = false;
 
-  /// Set once the user changes the due day or the due time. Gates re-anchoring a
-  /// date-only task's reminder onto the new day (and clearing it outright when
-  /// the due date is removed), so an edit that never went near the date chips
-  /// can't move or destroy the reminder.
+  /// Set once the user changes the due day or time. Gates re-anchoring a
+  /// date-only task's reminder onto the new day. Reset by [_rebase].
   bool _dueTouched = false;
 
-  /// Working copy of the task's sub-tasks. Edited in-sheet and committed as part
-  /// of Save (one atomic [TasksNotifier.updateTask] call). [_originalSteps]
-  /// snapshots the on-open serialization so Save only writes `steps` when the
-  /// checklist actually changed (no churn on a title-only edit).
+  /// Working copy of the sub-tasks; [_originalSteps] is the saved baseline.
   late List<Subtask> _subtasks;
   String? _originalSteps;
 
-  /// The selected project (`category`). Seeded from the task; null/blank means
-  /// "No project". [_categoryTouched] gates whether Save writes the column, so a
-  /// title-only edit never churns the category.
+  /// The selected project (`category`). [_categoryTouched] gates whether a
+  /// write touches the column at all.
   String? _category;
   bool _categoryTouched = false;
 
-  /// The selected recurrence. Seeded from the task's stored cron via
-  /// [recurrenceFromCron]. [_recurrenceTouched] gates whether Save writes the
-  /// `recurring` column, so a title-only edit never churns it (and a non-editable
-  /// "custom" cron is preserved untouched until the user picks a known kind).
+  /// The selected recurrence, seeded from the stored cron. [_recurrenceTouched]
+  /// keeps a non-editable "custom" cron intact until the user picks a kind.
   late Recurrence _recurrence;
   bool _recurrenceTouched = false;
 
-  /// The recurring series' end day (`yyyy-MM-dd`), or null = repeats forever
-  /// ("Never"). Seeded from the task (the stored value may be a full ISO
-  /// datetime — only the day part is edited here). [_recurUntilTouched] gates
-  /// whether Save writes the column (sending the `''` sentinel to clear), so a
-  /// title-only edit never churns it.
+  /// The series' end day (`yyyy-MM-dd`), null = "Never".
   String? _recurUntil;
   bool _recurUntilTouched = false;
+
+  /// Auto-save scheduling. Owns the debounce, the coalescing and the
+  /// background flush; [_commit] owns every decision about WHAT to write.
+  late final AutosaveController _autosave;
+
+  /// Fingerprint of the state that is currently PERSISTED. Auto-save writes
+  /// only when the live state differs — see [taskEditSignature].
+  late String _savedSignature;
+
+  /// Mirrors [_autosave.status] into the tree for the indicator.
+  AutosaveStatus _status = AutosaveStatus.idle;
+
+  /// Set at the top of [dispose] so the dismiss-time flush can update fields
+  /// without calling `setState` on a State that is going away.
+  bool _disposing = false;
+
+  /// The notifier, captured while this widget is definitely alive. The
+  /// dismiss-time flush runs from [dispose], where `ref` is no longer legal to
+  /// use — and that flush is precisely the write this feature exists for.
+  late final TasksNotifier _tasks;
 
   @override
   void initState() {
     super.initState();
     final t = widget.task;
+    _tasks = ref.read(tasksProvider.notifier);
     _titleController = TextEditingController(text: t.title);
     _notesController = TextEditingController(text: t.description ?? '');
     _editingNotes = t.description?.trim().isNotEmpty != true;
     _notesFocus = FocusNode();
-    _tags = _parseTags(t.tags);
+    _tags = parseTaskTags(t.tags);
     _originalTagsJson = jsonEncode(_tags);
-    _originalBudget = t.allocatedBudget;
+    _budget = TaskBudgetEditState.forTask(t.allocatedBudget);
     _budgetController = TextEditingController(
-      text: _formatBudget(t.allocatedBudget),
+      text: t.allocatedBudget == null
+          ? ''
+          : formatTaskAllocation(t.allocatedBudget!),
     );
-    _showBudgetField = t.allocatedBudget != null;
     // Fall back rather than trust a stored value the chips can't show.
     _priority = kTaskPriorities.contains(t.priority) ? t.priority : 'medium';
     final raw = t.dueDate;
@@ -196,12 +207,18 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _recurUntil = (t.recurUntil == null || t.recurUntil!.isEmpty)
         ? null
         : dueDateDayPart(t.recurUntil!);
+
+    _savedSignature = _signature(_titleController.text.trim());
+    _autosave = AutosaveController(onCommit: _commit)
+      ..addListener(_onAutosaveStatus)
+      ..bindText(_titleController)
+      ..bindText(_notesController)
+      ..bindText(_budgetController);
   }
 
   /// The due/reminder derivations, rebuilt from the current fields on every
-  /// read. Cheap (a const-shaped value object over seven fields) and always
-  /// consistent — there is no cached copy to invalidate. See
-  /// `task_due_model.dart` for the rules themselves.
+  /// read. Cheap and always consistent — there is no cached copy to
+  /// invalidate. See `task_due_model.dart` for the rules themselves.
   TaskDueModel get _due => TaskDueModel(
     dueDay: _dueDay,
     dueTime: _dueTime,
@@ -214,6 +231,16 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
   @override
   void dispose() {
+    // ORDER IS LOAD-BEARING. `_disposing` first so a flush-triggered field
+    // update doesn't call setState on a dying State; then detach the status
+    // listener; then flush — which runs [_commit] synchronously as far as the
+    // `await` on the write, so the whole payload is captured off the
+    // controllers BEFORE they are disposed two lines below. Awaiting is not an
+    // option in dispose, and is not needed: the notifier outlives this sheet.
+    _disposing = true;
+    _autosave.removeListener(_onAutosaveStatus);
+    _autosave.flush();
+    _autosave.dispose();
     _titleController.dispose();
     _notesController.dispose();
     _budgetController.dispose();
@@ -223,122 +250,79 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     super.dispose();
   }
 
-  /// Parse the task's stored `tags` (a JSON-array string) into a list. Tolerant:
-  /// null / empty / malformed → `[]`.
-  static List<String> _parseTags(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return [];
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is List) return decoded.map((e) => e.toString()).toList();
-    } catch (_) {}
-    return [];
+  void _onAutosaveStatus() {
+    if (!mounted || _disposing) return;
+    setState(() => _status = _autosave.status);
   }
 
-  /// Format a budget for the numeric field: null → empty; a whole number drops
-  /// the trailing `.0` (`250.0` → `250`).
-  static String _formatBudget(double? v) {
-    if (v == null) return '';
-    if (v == v.roundToDouble()) return v.toInt().toString();
-    return v.toString();
+  /// `setState` while the sheet is alive, a plain assignment once it isn't.
+  /// The dismiss-time flush legitimately updates baselines after the element
+  /// is gone; there is simply nothing left to rebuild.
+  void _apply(VoidCallback change) {
+    if (!mounted || _disposing) {
+      change();
+      return;
+    }
+    setState(change);
   }
 
-  /// Open the TASK-level comment thread (the same sheet a sub-task's 💬 badge
-  /// opens, just scoped to the task).
-  ///
-  /// [live] is the freshly-watched task, not `widget.task`: comments write
-  /// through the notifier immediately, so the snapshot the sheet was opened
-  /// with goes stale the moment one is added.
-  Future<void> _openTaskComments(Task live) async {
-    await showCommentsSheet(
-      context,
-      title: 'Comments',
-      comments: taskLevelComments(live.taskComments),
-      onAdd: (text) =>
-          ref.read(tasksProvider.notifier).addComment(widget.task.id, text),
-      onDelete: (cid) =>
-          ref.read(tasksProvider.notifier).deleteComment(widget.task.id, cid),
-      onAddLink: () => showAddLinkDialog(context),
-    );
-  }
+  // ── Auto-save ───────────────────────────────────────────────────────────
 
-  /// Open ONE sub-task's comment thread — the same sheet as
-  /// [_openTaskComments], scoped to [subtaskId] instead of to the task.
-  Future<void> _openSubtaskComments(Task live, String subtaskId) async {
-    await showCommentsSheet(
-      context,
-      title: _subtaskTitle(subtaskId),
-      comments: [
-        for (final c in live.taskComments)
-          if (c.subtaskId == subtaskId) c,
-      ],
-      onAdd: (text) => ref
-          .read(tasksProvider.notifier)
-          .addComment(widget.task.id, text, subtaskId: subtaskId),
-      onDelete: (cid) =>
-          ref.read(tasksProvider.notifier).deleteComment(widget.task.id, cid),
-      onAddLink: () => showAddLinkDialog(context),
-    );
-  }
-
-  /// Open the tags popup. The text controller stays owned by THIS state, not
-  /// by the popup, so a tag typed but never submitted survives the popup
-  /// closing and is still folded in by [_foldPendingTag] on Save — the
-  /// behavior the old always-on field had.
-  Future<void> _openTags() async {
-    await showTaskTagsSheet(
-      context,
+  /// Fingerprint of the RESULTING RECORD (never of the patch) — see
+  /// [taskEditSignature] for why that distinction decides correctness.
+  String _signature(String title) {
+    final due = _due;
+    return taskEditSignature(
+      title: title,
+      description: _notesController.text.trim(),
+      priority: _priority,
+      composedDue: due.composedDue,
       tags: _tags,
-      controller: _tagController,
-      onChanged: (next) => setState(() => _tags = next),
+      budgetText: _budgetController.text.trim(),
+      steps: serializeSubtasks(_subtasks),
+      category: _category,
+      recurring: recurrenceToCron(
+        _recurrence,
+        dueAnchor: recurrenceAnchorFromDue(due.composedDue),
+      ),
+      recurUntil: _recurUntil,
+      // The reminder that SURVIVES this edit, not `reminderArg` — the latter
+      // collapses to null once the value becomes the baseline, which would
+      // leave the sheet permanently dirty and loop the writer.
+      effectiveReminderAt: dueDateHasTime(due.composedDue)
+          ? due.composedReminderAt
+          : (due.survivingReminderAt ?? ''),
     );
   }
 
-  /// Commit any un-submitted text in the tag field into [_tags]. Called from
-  /// Save, which pops immediately afterwards — no `setState` needed (and the
-  /// `_saving` flag's own `setState` rebuilds anyway).
-  void _foldPendingTag() {
-    if (_tagController.text.trim().isEmpty) return;
-    _tags = tagsWithAdded(_tags, _tagController.text);
-    _tagController.clear();
-  }
+  /// Persist the sheet — the dirty gate, the validity gate and the writer, in
+  /// that order. Called by [AutosaveController]; never directly.
+  Future<AutosaveOutcome> _commit() async {
+    // A queued write must never resurrect columns on a row being deleted.
+    if (_deleting) return AutosaveOutcome.unchanged;
 
-  /// Switches the Notes block from the read-only preview to the editable
-  /// field and focuses it — mirrors the tap-to-edit pattern used by the
-  /// title/sub-task inline editors elsewhere in this sheet.
-  void _beginEditNotes() {
-    setState(() => _editingNotes = true);
-    _notesFocus.requestFocus();
-  }
-
-  /// Opens the "Add link" dialog and, when the user inserts a link, splices
-  /// the returned `[text](url)` markdown into `_notesController` at the
-  /// current cursor position. Falls back to appending at the end when the
-  /// selection is invalid (e.g. the field hasn't been focused yet, so the
-  /// controller's selection is still the default collapsed-at--1).
-  Future<void> _addLink() async {
-    final result = await showAddLinkDialog(context);
-    if (result == null || !mounted) return;
-    final text = _notesController.text;
-    final selection = _notesController.selection;
-    final start = selection.isValid ? selection.start : text.length;
-    final end = selection.isValid ? selection.end : text.length;
-    final nextText = text.replaceRange(start, end, result);
-    setState(() {
-      _notesController.value = TextEditingValue(
-        text: nextText,
-        selection: TextSelection.collapsed(offset: start + result.length),
-      );
-    });
-  }
-
-  Future<void> _save() async {
     final title = _titleController.text.trim();
-    if (title.isEmpty || _saving || _deleting) return;
-    // Fold any un-committed text in the tag field into the list before saving.
+    if (title.isEmpty) {
+      _apply(() => _titleError = kTaskTitleRequiredError);
+      return AutosaveOutcome.blocked;
+    }
+    // Junk in the allocation used to be dropped silently by the patch builder
+    // (it parses to null = "untouched"), indistinguishable from a save.
+    final budgetError = taskAllocationError(_budgetController.text);
+    if (budgetError != null) {
+      _apply(() => _budget = _budget.rejected(budgetError));
+      return AutosaveOutcome.blocked;
+    }
+    if (_titleError != null) _apply(() => _titleError = null);
+
+    // Fold un-submitted tag text before fingerprinting, so a tag typed but
+    // never committed is part of what gets saved (matches the old Save).
     _foldPendingTag();
-    setState(() => _saving = true);
-    // Every three-way (untouched / clear / set) rule lives in the pure
-    // builder — see task_detail_patch.dart for why it is not inlined here.
+    final signature = _signature(title);
+    if (signature == _savedSignature) return AutosaveOutcome.unchanged;
+
+    // Every three-way (untouched / clear / set) rule lives in the pure builder
+    // — see task_detail_patch.dart for why it is not inlined here.
     final patch = buildTaskDetailPatch(
       title: title,
       description: _notesController.text.trim(),
@@ -347,7 +331,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       tags: _tags,
       originalTagsJson: _originalTagsJson,
       budgetText: _budgetController.text,
-      originalBudget: _originalBudget,
+      originalBudget: _budget.original,
       nextSteps: serializeSubtasks(_subtasks),
       originalSteps: _originalSteps,
       categoryTouched: _categoryTouched,
@@ -362,99 +346,121 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       // Untouched reminders ride as null (absent) — see TaskDueModel.reminderArg.
       reminderArg: _due.reminderArg,
     );
-    await ref
-        .read(tasksProvider.notifier)
-        .updateTask(
-          widget.task.id,
-          title: patch.title,
-          description: patch.description,
-          priority: patch.priority,
-          category: patch.category,
-          dueDate: patch.dueDate,
-          steps: patch.steps,
-          reminderAt: patch.reminderAt,
-          recurring: patch.recurring,
-          recurUntil: patch.recurUntil,
-          tags: patch.tags,
-          allocatedBudget: patch.allocatedBudget,
-          clearAllocatedBudget: patch.clearAllocatedBudget,
-        );
+    await _tasks.updateTask(
+      widget.task.id,
+      title: patch.title,
+      description: patch.description,
+      priority: patch.priority,
+      category: patch.category,
+      dueDate: patch.dueDate,
+      steps: patch.steps,
+      reminderAt: patch.reminderAt,
+      recurring: patch.recurring,
+      recurUntil: patch.recurUntil,
+      tags: patch.tags,
+      allocatedBudget: patch.allocatedBudget,
+      clearAllocatedBudget: patch.clearAllocatedBudget,
+    );
+    _apply(() => _rebase(patch));
+    _savedSignature = signature;
+    return AutosaveOutcome.written;
+  }
+
+  /// Advance every three-way baseline onto what was just persisted.
+  ///
+  /// WITHOUT this, a value the user auto-saves and then REVERTS is read as
+  /// "untouched" and never written back: clear an auto-saved allocation and
+  /// the number survives in the database; delete an auto-saved tag and it
+  /// comes back on reload. The one-shot Save this sheet used to have could
+  /// freeze its baselines at open precisely because there was only ever one
+  /// write.
+  void _rebase(TaskDetailPatch patch) {
+    _originalTagsJson = jsonEncode(_tags);
+    _originalSteps = serializeSubtasks(_subtasks);
+    _categoryTouched = false;
+    _recurrenceTouched = false;
+    _recurUntilTouched = false;
+    // A null reminderAt means the column was left alone, so the baseline
+    // stands; '' means it was cleared.
+    final written = patch.reminderAt;
+    if (written != null) {
+      _originalReminderAt = written.isEmpty ? null : written;
+    }
+    _reminderTouched = false;
+    _dueTouched = false;
+    final text = _budgetController.text.trim();
+    _budget = _budget.savedAs(text.isEmpty ? null : double.tryParse(text));
+  }
+
+  /// The floating check: commit whatever is outstanding, then close. It is no
+  /// longer the only path to persistence, so a blocked write keeps the sheet
+  /// open with its error visible rather than closing over the problem.
+  Future<void> _submit() async {
+    if (_deleting) return;
+    await _autosave.flush();
     if (!mounted) return;
+    if (_autosave.status == AutosaveStatus.blocked) return;
     Navigator.of(context).pop();
   }
 
-  /// Close this sheet and open the Smart Fast Reschedule sheet for the task.
-  /// The reschedule writes through [TasksNotifier.updateTask] itself, so we just
-  /// hand off — any in-progress edits here are intentionally discarded (a quick
-  /// reschedule is a deliberate "just move the date" action).
-  Future<void> _reschedule() async {
-    final navigator = Navigator.of(context);
-    // Use the navigator's (still-mounted) context to present the next sheet —
-    // this sheet's own context becomes defunct once we pop it below.
-    final rootContext = navigator.context;
-    final task = widget.task;
-    navigator.pop();
-    await showRescheduleSheet(rootContext, ref, task);
-  }
+  // ── Editing ─────────────────────────────────────────────────────────────
 
-  // ── Money ───────────────────────────────────────────────────────────────
-
-  /// The task's destination project row, resolved from its `category` NAME
-  /// (tasks store a project name, expenses need the project's id).
-  ///
-  /// Prefers the picker list the caller handed in; falls back to the budgets
-  /// cache because some call sites open this sheet without surfacing project
-  /// editing at all (`projects: const []`) — the task still HAS a project
-  /// there, and "add expense" must not be dead just because the picker is.
-  /// Returns null when the name is blank or doesn't resolve to exactly one
-  /// project ([resolveProjectMatch] never guesses on an ambiguous match).
-  Project? _resolveProject(List<Project> cached) {
-    final name = _category;
-    if (name == null || name.trim().isEmpty) return null;
-    final pool = widget.projects.isNotEmpty ? widget.projects : cached;
-    return resolveProjectMatch(name, pool);
-  }
-
-  /// Reveal (and focus) the allocated-budget field. Never hides it again — a
-  /// second pick while it's already open just re-focuses, so the action can't
-  /// destroy a half-typed number.
-  void _revealAllocatedBudget() {
-    setState(() => _showBudgetField = true);
-    _budgetFocus.requestFocus();
-  }
-
-  /// Open the task-scoped Add Expense sheet for this task, optionally pinned
-  /// to one of its sub-tasks.
-  ///
-  /// [subtaskId] must name a SAVED sub-task — the affordance that reaches this
-  /// is hidden for in-sheet, not-yet-saved ones (see [SubtaskEditor]).
-  ///
-  /// No explicit refresh afterwards: `build` watches [budgetsProvider], and
-  /// `addExpense` writes an optimistic row into that state, so the rollup and
-  /// the sub-task chips re-render on the same frame the sheet stays open for.
-  Future<void> _addExpense({
-    required Project project,
-    String? subtaskId,
-    String? contextLabel,
-  }) async {
-    await showAddExpenseForTaskSheet(
+  /// Open the tags popup. The text controller stays owned by THIS state, not
+  /// by the popup, so a tag typed but never submitted survives the popup
+  /// closing and is still folded in by [_foldPendingTag].
+  Future<void> _openTags() async {
+    await showTaskTagsSheet(
       context,
-      ref,
-      projectId: project.id,
-      taskId: widget.task.id,
-      subtaskId: subtaskId,
-      contextLabel: contextLabel,
+      tags: _tags,
+      controller: _tagController,
+      onChanged: (next) {
+        setState(() => _tags = next);
+        _autosave.markDirtyNow();
+      },
     );
   }
 
-  /// Explain, rather than silently do nothing, when a sub-task's money sign is
-  /// tapped on a task with no (resolvable) project. The sheet deliberately
-  /// still SHOWS the affordance — hiding it would make the feature look absent
-  /// instead of blocked.
-  void _warnNoProject() {
-    ScaffoldMessenger.maybeOf(
-      context,
-    )?.showSnackBar(const SnackBar(content: Text(kTaskBudgetNoProjectReason)));
+  /// Commit any un-submitted text in the tag field into [_tags].
+  void _foldPendingTag() {
+    if (_tagController.text.trim().isEmpty) return;
+    _tags = tagsWithAdded(_tags, _tagController.text);
+    _tagController.clear();
+  }
+
+  /// Switches the Notes block from the read-only preview to the editable
+  /// field and focuses it.
+  void _beginEditNotes() {
+    setState(() => _editingNotes = true);
+    _notesFocus.requestFocus();
+  }
+
+  Future<void> _addLink() async {
+    final inserted = await insertLinkIntoNotes(context, _notesController);
+    // The controller binding has already scheduled the save; this rebuild is
+    // only so the field re-renders with the spliced text.
+    if (inserted && mounted) setState(() {});
+  }
+
+  /// Edit the allocation in place. Nothing needs seeding — the figure the user
+  /// tapped IS the controller's text (empty = no allocation yet).
+  void _editAllocated() {
+    setState(() => _budget = _budget.editing());
+    _budgetFocus.requestFocus();
+  }
+
+  /// Commit a validated top-up: [total] is the NEW allocation (summed,
+  /// validated and rounded by [previewTaskTopUp]). Writing it into the very
+  /// controller the save path parses keeps a top-up "the allocation, edited"
+  /// rather than a second concept — and it is a direct adjustment, NOT a
+  /// `budget_entries` credit row (see `task_budget_math.dart`).
+  void _commitTopUp(double total) {
+    setState(() {
+      _budgetController.text = formatTaskAllocation(total);
+      _budget = _budget.toppedUp(total);
+    });
+    // A top-up is a decision, not a keystroke — persist it now rather than
+    // making the user hope the debounce ran.
+    _autosave.markDirtyNow();
   }
 
   Future<void> _pickProject() async {
@@ -470,10 +476,19 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           ? null
           : result.category;
     });
+    _autosave.markDirtyNow();
+  }
+
+  /// Hand off to the Smart Fast Reschedule sheet. Flushes first: that sheet
+  /// pops this one, and everything typed here would otherwise be discarded.
+  Future<void> _reschedule() async {
+    await _autosave.flush();
+    if (!mounted) return;
+    await handOffToReschedule(context, ref, widget.task);
   }
 
   Future<void> _delete() async {
-    if (_saving || _deleting) return;
+    if (_deleting) return;
     final confirmed = await LzConfirm.show(
       context,
       title: 'Delete task?',
@@ -482,84 +497,60 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       danger: true,
     );
     if (!confirmed || !mounted) return;
+    // Drop anything queued BEFORE flagging: a debounced field write landing
+    // after the delete would re-create columns on a row on its way out.
+    _autosave.cancelPending();
     setState(() => _deleting = true);
-    await ref.read(tasksProvider.notifier).deleteTask(widget.task.id);
+    await _tasks.deleteTask(widget.task.id);
     if (!mounted) return;
     Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
-    // Comments are IMMEDIATE (they write straight through the notifier, not
-    // save-gated like the rest of this sheet's fields) — so the sheet must
-    // watch the fresh row rather than the snapshot `widget.task` it was opened
-    // with, or a just-added comment wouldn't appear until Save/reopen.
-    final live =
-        ref
-            .watch(tasksProvider)
-            .tasks
-            .where((t) => t.id == widget.task.id)
-            .firstOrNull ??
-        widget.task;
-    // Keyed off `live.subtasks` (the SAVED task's parsed steps) rather than
-    // `_subtasks` (this sheet's un-saved working list) — a comment writes
-    // through the notifier IMMEDIATELY, but a locally-added sub-task doesn't
-    // exist server-side until Save. Opening the comment sheet for one before
-    // then would replay `comment_add` against an unknown `subtask_id` (a
-    // definitive 400 the outbox then drains, silently erasing the comment).
-    // A subtask id absent here — new/unsaved — gets no key, and
-    // SubtaskEditor hides the 💬 affordance entirely for ids missing from
-    // this map (see its `onOpenComments` doc).
-    final commentCounts = <String, int>{
-      for (final s in live.subtasks)
-        s.id: live.taskComments.where((c) => c.subtaskId == s.id).length,
-    };
-    // Per-sub-task expense totals — "the money sign" SubtaskEditor renders.
-    // Sourced from the SAME live/saved task id as commentCounts above (an
-    // expense's subtask_id only ever points at a saved sub-task, exactly
-    // like a comment's), so an in-sheet, not-yet-saved sub-task correctly
-    // gets no chip either.
-    final budgets = ref.watch(budgetsProvider);
-    final expenses = budgets.expenses;
-    final expenseTotals = subtaskExpenseTotals(expenses, widget.task.id);
-    final expenseCurrency = subtaskExpenseCurrency(expenses, widget.task.id);
-    // The destination project for any money added from this sheet. Null =
-    // the task has no project (or names one that can't be resolved), which
-    // disables the "Add expense" action with a stated reason.
-    final project = _resolveProject(budgets.projects);
-    // The SAVED sub-task ids — the only ones an expense's `subtask_id` may
-    // point at, exactly like `commentCounts` above.
-    final savedSubtaskIds = {for (final s in live.subtasks) s.id};
+    // Every derivation from live provider state (the fresh task, the saved
+    // sub-task ids comments/expenses may reference, the spend rollups, the
+    // destination project) — see task_detail_live_data.dart for the rules.
+    final data = TaskDetailLiveData.resolve(
+      fallback: widget.task,
+      liveTasks: ref.watch(tasksProvider).tasks,
+      budgets: ref.watch(budgetsProvider),
+      pickerProjects: widget.projects,
+      category: _category,
+    );
+    final live = data.task;
+    final project = data.project;
     return LzFloatingSubmitLayout(
-      // Square, always-on-screen Save. The old footer button was anchored to
+      // Square, always-on-screen submit. The old footer button was anchored to
       // the END of this (very long) column, so on a short viewport — or with
-      // the keyboard up — it was simply off screen: the user's report was
-      // that there was no save button at all. NOTE: this layout brings its
-      // own scroll view, so the column below must NOT be wrapped in another.
+      // the keyboard up — it was simply off screen. It now means "commit and
+      // close": the sheet is already saving as the user works.
       submit: LzFloatingSubmit(
         key: const Key('task-detail-save'),
-        tooltip: 'Save task',
-        loading: _saving,
-        onPressed: (_saving || _deleting) ? null : _save,
+        tooltip: 'Save and close',
+        loading: _status == AutosaveStatus.saving,
+        onPressed: _deleting ? null : _submit,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // ── Destructive action, parked far from the thumb ──────────────
+          // ── Save state, then the destructive action ────────────────────
           //
-          // Delete used to sit shoulder-to-shoulder with Save in a footer
-          // Row. Now that Save is a bottom-right floating target this sheet
-          // is thumb-driven, and "one mis-tap deletes the task" is not an
-          // acceptable failure mode — so Delete lives at the TOP-RIGHT
-          // (furthest reachable corner from the submit), rendered muted and
-          // icon-only, and still behind a confirm dialog.
-          Align(
-            alignment: Alignment.centerRight,
-            child: TaskDeleteAction(
-              deleting: _deleting,
-              onPressed: _saving ? null : _delete,
-            ),
+          // The indicator sits at the TOP because that is where the eye
+          // starts, and it is the only remaining evidence that typing here
+          // does anything. Delete keeps the far corner from the submit: this
+          // sheet is thumb-driven and "one mis-tap deletes the task" is not
+          // an acceptable failure mode. It is still behind a confirm.
+          Row(
+            children: [
+              AutosaveIndicator(status: _status),
+              const Spacer(),
+              TaskDeleteAction(
+                deleting: _deleting,
+                onPressed: _status == AutosaveStatus.saving ? null : _delete,
+              ),
+            ],
           ),
 
           // ── Title ──────────────────────────────────────────────────────
@@ -569,6 +560,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             hint: 'What needs to be done?',
             prefixIcon: Icons.task_alt_outlined,
             textInputAction: TextInputAction.next,
+            errorText: _titleError,
           ),
 
           const SizedBox(height: AppSpacing.lg),
@@ -583,8 +575,13 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               TaskSectionLabel('NOTES'),
               const Spacer(),
               TaskCommentsBadge(
-                count: taskLevelComments(live.taskComments).length,
-                onTap: () => _openTaskComments(live),
+                count: taskLevelComments(data.task.taskComments).length,
+                onTap: () => openTaskCommentsSheet(
+                  context,
+                  ref,
+                  live: live,
+                  taskId: widget.task.id,
+                ),
               ),
             ],
           ),
@@ -602,7 +599,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           // ── Priority + Project/Tags chips (see task_attribute_chips) ───
           TaskPriorityChips(
             priority: _priority,
-            onChanged: (p) => setState(() => _priority = p),
+            onChanged: (p) {
+              setState(() => _priority = p);
+              _autosave.markDirtyNow();
+            },
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -619,19 +619,34 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
 
           // ── Budget (extracted: see TaskBudgetSection) ──────────────────
           TaskBudgetSection(
-            allocated: _originalBudget,
-            spent: taskExpenseTotal(expenses, widget.task.id),
-            currency: taskExpenseCurrency(expenses, widget.task.id),
+            // The DRAFT, not the saved figure: a pending edit or a committed
+            // top-up shows in the readout before the write lands.
+            allocated: _budget.draft,
+            spent: data.spent,
+            currency: data.currency,
             canAddExpense: project != null,
-            showAllocatedField: _showBudgetField,
+            editor: _budget.editor,
             allocatedController: _budgetController,
             allocatedFocusNode: _budgetFocus,
-            onEditAllocated: _revealAllocatedBudget,
+            allocatedError: _budget.error,
+            // Debounced, not immediate: the controller binding already
+            // scheduled the write, and committing per keystroke would fight
+            // nextDraftAllocation's deliberate tolerance of half-typed input.
+            onAllocatedChanged: (text) =>
+                setState(() => _budget = _budget.typed(text)),
+            onEditAllocated: _editAllocated,
+            onTopUp: () => setState(() => _budget = _budget.toppingUp()),
+            onTopUpCommitted: _commitTopUp,
+            onCancelTopUp: () => setState(() => _budget = _budget.closed()),
             // Unreachable while `canAddExpense` is false (the row is disabled),
             // but a non-null callback keeps the widget's contract simple.
-            onAddExpense: () => project == null
-                ? _warnNoProject()
-                : _addExpense(project: project, contextLabel: live.title),
+            onAddExpense: () => openTaskExpenseSheet(
+              context,
+              ref,
+              project: project,
+              taskId: widget.task.id,
+              contextLabel: live.title,
+            ),
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -643,29 +658,24 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             composedDue: _due.composedDue,
             survivingReminderAt: _due.survivingReminderAt,
             effectiveLead: _due.effectiveLead,
-            todayIso: _isoToday(),
-            tomorrowIso: _isoTomorrow(),
+            todayIso: isoToday(),
+            tomorrowIso: isoTomorrow(),
             onReschedule: _reschedule,
-            onToggleDay: (iso) => setState(() {
-              _dueTouched = true;
+            onToggleDay: (iso) => _editDue(() {
               _dueDay = _dueDay == iso ? null : iso;
             }),
             onPickDay: _pickDate,
             onPickTime: _pickTime,
-            onClearTime: () => setState(() {
-              _dueTouched = true;
-              _dueTime = null;
-            }),
-            onClearDue: () => setState(() {
-              _dueTouched = true;
+            onClearTime: () => _editDue(() => _dueTime = null),
+            onClearDue: () => _editDue(() {
               _dueDay = null;
               _dueTime = null;
             }),
-            onLeadChanged: (lead) => setState(() {
+            onLeadChanged: (lead) => _editNow(() {
               _reminderTouched = true;
               _explicitLead = lead;
             }),
-            onClearReminder: () => setState(() => _reminderTouched = true),
+            onClearReminder: () => _editNow(() => _reminderTouched = true),
           ),
 
           // ── Repeat + series end (extracted: see TaskRepeatSection) ────
@@ -676,12 +686,12 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             anchorWeekday: _due.composedDue == null
                 ? null
                 : DateTime.tryParse(_due.composedDue!)?.weekday,
-            onRecurrenceChanged: (r) => setState(() {
+            onRecurrenceChanged: (r) => _editNow(() {
               _recurrenceTouched = true;
               _recurrence = r;
             }),
             onPickUntil: _pickRecurUntil,
-            onClearUntil: () => setState(() {
+            onClearUntil: () => _editNow(() {
               _recurUntilTouched = true;
               _recurUntil = null;
             }),
@@ -692,88 +702,77 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           // ── Sub-tasks (extracted: see TaskSubtasksSection) ─────────────
           TaskSubtasksSection(
             subtasks: _subtasks,
-            onChanged: (next) => setState(() => _subtasks = next),
-            commentCounts: commentCounts,
-            expenseTotals: expenseTotals,
-            expenseCurrency: expenseCurrency,
-            savedSubtaskIds: savedSubtaskIds,
+            onChanged: (next) => _editNow(() => _subtasks = next),
+            commentCounts: data.commentCounts,
+            expenseTotals: data.expenseTotals,
+            expenseCurrency: data.expenseCurrency,
+            savedSubtaskIds: data.savedSubtaskIds,
             // Always wired, even with no project: the money sign stays
             // visible and EXPLAINS itself (snackbar) instead of vanishing,
             // which would read as "this task can't have expenses".
-            onAddExpense: (sid) => project == null
-                ? _warnNoProject()
-                : _addExpense(
-                    project: project,
-                    subtaskId: sid,
-                    contextLabel: 'Sub-task: ${_subtaskTitle(sid)}',
-                  ),
-            onOpenComments: (sid) => _openSubtaskComments(live, sid),
+            onAddExpense: (sid) => openTaskExpenseSheet(
+              context,
+              ref,
+              project: project,
+              taskId: widget.task.id,
+              subtaskId: sid,
+              contextLabel: 'Sub-task: ${subtaskTitleById(_subtasks, sid)}',
+            ),
+            onOpenComments: (sid) => openSubtaskCommentsSheet(
+              context,
+              ref,
+              live: live,
+              taskId: widget.task.id,
+              subtaskId: sid,
+              title: subtaskTitleById(_subtasks, sid),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final picked = await showTaskDatePicker(
-      context,
-      initialDate: dueDayPickerSeed(_dueDay, now: now),
-      firstDate: now.subtract(const Duration(days: 365)),
-      lastDate: now.add(const Duration(days: 365)),
-    );
-    if (picked == null) return;
-    setState(() {
-      _dueTouched = true;
-      _dueDay = isoDay(picked);
-    });
+  /// Apply a DISCRETE edit and persist it at once. Chips, pickers, menus and
+  /// toggles carry a finished decision — there is nothing to debounce, and a
+  /// user who taps "high" and closes the sheet expects "high".
+  void _editNow(VoidCallback change) {
+    setState(change);
+    _autosave.markDirtyNow();
   }
 
-  /// Pick the series' end day. A long horizon (10 years) so a yearly
-  /// recurrence can still be given a meaningful end date.
+  /// [_editNow] for the due controls, which additionally flag that the due
+  /// date moved (which is what lets a date-only task's reminder re-anchor).
+  void _editDue(VoidCallback change) => _editNow(() {
+    _dueTouched = true;
+    change();
+  });
+
+  Future<void> _pickDate() async {
+    final picked = await pickTaskDueDay(context, currentDay: _dueDay);
+    if (picked == null || !mounted) return;
+    _editDue(() => _dueDay = picked);
+  }
+
   Future<void> _pickRecurUntil() async {
-    final now = DateTime.now();
-    final picked = await showTaskDatePicker(
-      context,
-      initialDate: recurUntilPickerSeed(_recurUntil, now: now),
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 3650)),
-    );
-    if (picked == null) return;
-    setState(() {
+    final picked = await pickTaskRecurUntilDay(context, currentDay: _recurUntil);
+    if (picked == null || !mounted) return;
+    _editNow(() {
       _recurUntilTouched = true;
-      _recurUntil = isoDay(picked);
+      _recurUntil = picked;
     });
   }
 
   Future<void> _pickTime() async {
     final picked = await showTaskTimePicker(context, initial: _dueTime);
-    if (picked == null) return;
-    setState(() {
-      _dueTouched = true;
-      _dueTime = picked;
-    });
+    if (picked == null || !mounted) return;
+    _editDue(() => _dueTime = picked);
   }
-
-  String _isoToday() => isoDay(DateTime.now());
-
-  String _isoTomorrow() => isoDay(DateTime.now().add(const Duration(days: 1)));
-
-  /// The sub-task's title for the comments sheet header, falling back to a
-  /// generic label if the id somehow no longer matches (defensive only — the
-  /// badge that opens this sheet is only ever rendered for a live sub-task).
-  String _subtaskTitle(String id) => _subtasks
-      .firstWhere(
-        (s) => s.id == id,
-        orElse: () => const Subtask(id: '', title: 'Sub-task', done: false),
-      )
-      .title;
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────
 
 /// Open the task detail/edit sheet for [task]. The sheet reads
-/// [tasksProvider] for Save/Delete; [ref] is accepted so the call site (the
+/// [tasksProvider] for its writes; [ref] is accepted so the call site (the
 /// Tasks screen, which already holds a [WidgetRef]) owns the invocation.
 /// [projects] populates the project picker.
 Future<void> showTaskDetailSheet(

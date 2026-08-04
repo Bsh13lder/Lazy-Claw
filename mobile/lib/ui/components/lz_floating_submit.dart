@@ -35,8 +35,11 @@ class LzFloatingSubmit extends StatelessWidget {
   /// — this is the only thing a screen reader can announce.
   final String tooltip;
 
-  /// The glyph. Defaults to a check; use `Icons.add_rounded` for "create"
-  /// surfaces, `Icons.check_rounded` for "save" surfaces.
+  /// The glyph. Defaults to a check, and every current caller takes that
+  /// default: the button reads as "commit what I just typed" on create and
+  /// edit surfaces alike, so a `＋` on the create sheets only made the same
+  /// affordance look like two different ones. Kept configurable for a future
+  /// surface that genuinely means something else — but prefer the check.
   final IconData icon;
 
   /// Swaps the glyph for a spinner and hard-blocks taps (independently of

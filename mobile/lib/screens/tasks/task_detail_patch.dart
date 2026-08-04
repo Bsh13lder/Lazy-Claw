@@ -14,6 +14,60 @@ library;
 
 import 'dart:convert';
 
+import '../../core/autosave.dart';
+
+/// Shown under the TITLE when it is blank. A task with no title is not a task,
+/// and auto-save must refuse it rather than overwrite a good title with ''.
+const String kTaskTitleRequiredError = 'A task needs a title';
+
+/// A fingerprint of the sheet's EDITABLE state, for auto-save's "never write
+/// when nothing changed" gate.
+///
+/// It lives beside [buildTaskDetailPatch] because it is the same contract read
+/// from the other end, and getting the two out of step is expensive in both
+/// directions: a signature that misses a field silently DROPS that edit, and
+/// one that moves on its own churns `updated_at` on every keystroke — which,
+/// under last-write-wins sync, can clobber a real remote edit.
+///
+/// Two rules make it correct:
+///
+/// 1. It fingerprints the RESULTING RECORD, never the patch. The patch encodes
+///    `null` = untouched, so "set the project to Marketing" and "leave the
+///    project alone" differ in the patch even when the stored value is
+///    identical — signing the patch would write on a picker round-trip that
+///    changed nothing.
+/// 2. Every part must be BASELINE-STABLE: computing it again straight after a
+///    successful write (once the sheet re-baselines) must give the same string.
+///    This is why [effectiveReminderAt] is the reminder that SURVIVES the edit
+///    rather than `TaskDueModel.reminderArg` — `reminderArg` collapses to null
+///    the moment the value becomes the baseline, so signing it would leave the
+///    sheet permanently "dirty" and loop the writer.
+String taskEditSignature({
+  required String title,
+  required String description,
+  required String priority,
+  required String? composedDue,
+  required List<String> tags,
+  required String budgetText,
+  required String? steps,
+  required String? category,
+  required String? recurring,
+  required String? recurUntil,
+  required String effectiveReminderAt,
+}) => autosaveSignature([
+  title,
+  description,
+  priority,
+  composedDue,
+  tags,
+  budgetText,
+  steps,
+  category,
+  recurring,
+  recurUntil,
+  effectiveReminderAt,
+]);
+
 /// The arguments a Save hands to `TasksNotifier.updateTask`.
 class TaskDetailPatch {
   const TaskDetailPatch({

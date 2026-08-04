@@ -11,7 +11,30 @@
 /// without a widget tree (see `test/screens/tasks/task_expense_rollup_test.dart`).
 library;
 
+import '../../core/project_resolver.dart';
 import '../../models/expense.dart';
+import '../../models/project.dart';
+
+// ── Project resolution (feeds every money action on the sheet) ────────────────
+
+/// The task's destination project row, resolved from its `category` NAME
+/// (tasks store a project name, expenses need the project's id).
+///
+/// Prefers [preferred] — the picker list the caller handed in — and falls back
+/// to [fallback] (the budgets cache) because some call sites open the detail
+/// sheet without surfacing project editing at all (`projects: const []`): the
+/// task still HAS a project there, and "add expense" must not be dead just
+/// because the picker is. Returns null when the name is blank or doesn't
+/// resolve to exactly one project ([resolveProjectMatch] never guesses on an
+/// ambiguous match).
+Project? resolveTaskProject({
+  required String? name,
+  required List<Project> preferred,
+  required List<Project> fallback,
+}) {
+  if (name == null || name.trim().isEmpty) return null;
+  return resolveProjectMatch(name, preferred.isNotEmpty ? preferred : fallback);
+}
 
 // ── Task level (feeds the BUDGET control's "spent" figure) ────────────────────
 

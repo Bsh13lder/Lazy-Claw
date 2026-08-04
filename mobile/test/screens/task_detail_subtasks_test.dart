@@ -248,9 +248,17 @@ void main() {
   ) async {
     final stub = _stub();
     await openSheet(tester, stub);
+    // Actually edit the title. The sheet auto-saves, so an open-and-save with
+    // NOTHING changed writes nothing at all now — which would make this
+    // assertion vacuously true and stop guarding the churn rule.
+    await tester.enterText(
+      find.byKey(const Key('task-detail-title')),
+      'Renamed but same checklist',
+    );
     await save(tester);
 
     expect(stub.updateCalls, hasLength(1));
+    expect(stub.updateCalls.single['title'], 'Renamed but same checklist');
     expect(lastSteps(stub), isNull);
   });
 

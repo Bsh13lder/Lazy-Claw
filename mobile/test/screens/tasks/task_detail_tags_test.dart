@@ -152,9 +152,10 @@ void main() {
     expect(find.text('work +1'), findsOneWidget);
 
     await save(tester);
-    // A no-op add leaves the list identical to the on-open snapshot, so Save
-    // correctly writes NOTHING (the sheet's existing no-churn rule).
-    expect(stub.updateCalls.single['tags'], isNull);
+    // A no-op add leaves the list identical to the on-open snapshot. Under
+    // auto-save the no-churn rule is now absolute: not "a write with tags
+    // absent", but no write at all.
+    expect(stub.updateCalls, isEmpty);
   });
 
   testWidgets(

@@ -11,6 +11,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/models/expense.dart';
+import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/screens/tasks/task_expense_rollup.dart';
 
 Expense _e({
@@ -139,6 +140,62 @@ void main() {
           _e(id: 'pinned', taskId: 't1', subtaskId: 's1', currency: 'EUR'),
         ], 't1'),
         'EUR',
+      );
+    });
+  });
+
+  // Moved out of the detail sheet's `_resolveProject` (the sheet was at its
+  // file-size ceiling); the rules are the ones that were already there.
+  group('resolveTaskProject (moved, unchanged behavior)', () {
+    Project p(String id, String name) => Project(
+      id: id,
+      name: name,
+      budget: 0,
+      currency: 'USD',
+      status: 'active',
+    );
+
+    test('a blank / absent category resolves to no project', () {
+      expect(
+        resolveTaskProject(name: null, preferred: [p('p1', 'Home')], fallback: const []),
+        isNull,
+      );
+      expect(
+        resolveTaskProject(name: '  ', preferred: [p('p1', 'Home')], fallback: const []),
+        isNull,
+      );
+    });
+
+    test('the picker list wins when the caller supplied one', () {
+      final match = resolveTaskProject(
+        name: 'Home',
+        preferred: [p('picker', 'Home')],
+        fallback: [p('cache', 'Home')],
+      );
+      expect(match?.id, 'picker');
+    });
+
+    test(
+      'falls back to the budgets cache — call sites that open the sheet with '
+      'no picker projects still have a real project on the task',
+      () {
+        final match = resolveTaskProject(
+          name: 'Home',
+          preferred: const [],
+          fallback: [p('cache', 'Home')],
+        );
+        expect(match?.id, 'cache');
+      },
+    );
+
+    test('an unmatched name resolves to no project rather than guessing', () {
+      expect(
+        resolveTaskProject(
+          name: 'Nowhere',
+          preferred: [p('p1', 'Home')],
+          fallback: const [],
+        ),
+        isNull,
       );
     });
   });

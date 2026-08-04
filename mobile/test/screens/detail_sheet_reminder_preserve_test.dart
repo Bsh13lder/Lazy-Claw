@@ -320,8 +320,10 @@ void main() {
     await tester.pumpAndSettle();
 
     await save(tester);
-    expect(stub.updateCalls.single['dueDate'], '');
-    expect(stub.updateCalls.single['reminderAt'], '');
+    // Each chip tap is a discrete change the sheet commits on the spot, so
+    // there are two writes; the LAST one is the state the user left behind.
+    expect(stub.updateCalls.last['dueDate'], '');
+    expect(stub.updateCalls.last['reminderAt'], '');
   });
 
   testWidgets('a timed due with no reminder still gets the default lead', (
@@ -330,6 +332,14 @@ void main() {
     final stub = _stub();
     await openSheet(tester, stub, _timed);
 
+    // An UNRELATED edit, deliberately: the sheet auto-saves and refuses to
+    // write when nothing changed, so merely opening and closing a task no
+    // longer silently grants it a reminder. The guarantee under test is what
+    // rides ALONG with a real write.
+    await tester.enterText(
+      find.byKey(const Key('task-detail-title')),
+      'Renamed',
+    );
     await save(tester);
 
     // kDefaultReminderLead is "At time" → the reminder fires AT 17:00.

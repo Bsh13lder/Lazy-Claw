@@ -308,6 +308,11 @@ void main() {
         .widget<DropdownButton<String>>(find.byKey(const Key('expense-detail-task')));
     expect(taskDropdown.value, 't1');
 
+    // Make a real edit first: the sheet auto-saves and refuses to write when
+    // nothing changed, so an open-and-Save would (correctly) produce no call
+    // at all and this assertion would have nothing to inspect.
+    await tester.enterText(
+        find.byKey(const Key('expense-detail-amount')), '9');
     await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('expense-detail-save')));
@@ -410,6 +415,11 @@ void main() {
     // The picker's stale-selectedId guard trips on render — that must reset
     // the SHEET's own _taskId state too, so Save can never resubmit the
     // ghost id the UI just stopped showing.
+    // Make a real edit first: the sheet auto-saves and refuses to write when
+    // nothing changed, so an open-and-Save would (correctly) produce no call
+    // at all and this assertion would have nothing to inspect.
+    await tester.enterText(
+        find.byKey(const Key('expense-detail-amount')), '9');
     await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('expense-detail-save')));
@@ -601,6 +611,11 @@ void main() {
         's1',
       );
 
+      // Make a real edit first: the sheet auto-saves and refuses to write when
+      // nothing changed, so an open-and-Save would (correctly) produce no call
+      // at all and this assertion would have nothing to inspect.
+      await tester.enterText(
+          find.byKey(const Key('expense-detail-amount')), '9');
       await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('expense-detail-save')));
@@ -810,6 +825,11 @@ void main() {
       final stub = _stub();
       await openSheet(tester, stub);
 
+      // Make a real edit first: the sheet auto-saves and refuses to write when
+      // nothing changed, so an open-and-Save would (correctly) produce no call
+      // at all and this assertion would have nothing to inspect.
+      await tester.enterText(
+          find.byKey(const Key('expense-detail-amount')), '9');
       await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('expense-detail-save')));

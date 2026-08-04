@@ -6,6 +6,7 @@ import 'package:lazyclaw_mobile/widgets/link_text.dart';
 import '../../models/subtask.dart';
 import '../expenses/money_helpers.dart';
 import 'task_sort.dart';
+import 'task_timestamps.dart';
 
 /// A controlled checklist editor for a task's sub-tasks (Todoist/Taskade-style).
 ///
@@ -24,10 +25,25 @@ class SubtaskEditor extends StatelessWidget {
     this.expenseCurrency = 'USD',
     this.savedSubtaskIds = const {},
     this.onAddExpense,
+    this.nowIso = subtaskNowIso,
   });
 
   final List<Subtask> subtasks;
   final ValueChanged<List<Subtask>> onChanged;
+
+  /// The clock used to stamp `created_at` / `completed_at`.
+  ///
+  /// Stamping lives HERE rather than in the model because this widget is the
+  /// only place that knows a row was just born or just ticked — the model is
+  /// a dumb value type and `copyWith(done: true)` is also how unrelated code
+  /// re-shapes a list without meaning "the user completed this now".
+  ///
+  /// The server enforces the same invariant independently, so the two must
+  /// AGREE rather than fight: a value stamped here survives the round-trip
+  /// untouched instead of being re-stamped on arrival.
+  ///
+  /// Injectable so tests can freeze it; production always gets the real clock.
+  final String Function() nowIso;
 
   /// Comment counts keyed by sub-task id, used to show a `+count` badge next
   /// to the comment icon. A sub-task's id being ABSENT from this map (not just
@@ -88,10 +104,23 @@ class SubtaskEditor extends StatelessWidget {
   /// it compile and render unchanged.
   final ValueChanged<String>? onOpenComments;
 
+  /// Toggle done, keeping `completed_at` in lockstep: ticking stamps it,
+  /// un-ticking CLEARS it. Leaving a stale completion time on an un-ticked row
+  /// would strand a "finished at 09:30" reading on something visibly open.
+  ///
+  /// A legacy row with no `created_at` is NOT backfilled on the way through —
+  /// we still don't know when it was created, and guessing "now" would date
+  /// every old checklist item to the day it happened to be ticked.
   void _toggle(String id) {
+    final stamp = nowIso();
     onChanged([
       for (final s in subtasks)
-        if (s.id == id) s.copyWith(done: !s.done) else s,
+        if (s.id != id)
+          s
+        else if (s.done)
+          s.copyWith(done: false, clearCompletedAt: true)
+        else
+          s.copyWith(done: true, completedAt: stamp),
     ]);
   }
 
@@ -120,12 +149,24 @@ class SubtaskEditor extends StatelessWidget {
     if (trimmed.isEmpty) return;
     onChanged([
       ...subtasks,
-      Subtask(id: newSubtaskId(), title: trimmed, done: false),
+      Subtask(
+        id: newSubtaskId(),
+        title: trimmed,
+        done: false,
+        // A brand-new row is the ONE moment we genuinely observe a creation
+        // time, so it is the only place `created_at` is ever set.
+        createdAt: nowIso(),
+      ),
     ]);
   }
 
   @override
   Widget build(BuildContext context) {
+    // The RENDER clock is the STAMPING clock, read back once per build rather
+    // than accepting a second injection point. One hook means a test that
+    // freezes `nowIso` can't stamp 2026 and then measure "ago" against the
+    // real wall clock — the two would silently disagree by years.
+    final now = DateTime.tryParse(nowIso());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -133,6 +174,7 @@ class SubtaskEditor extends StatelessWidget {
           _SubtaskTile(
             key: ValueKey('subtask-tile-${s.id}'),
             subtask: s,
+            now: now,
             onToggle: () => _toggle(s.id),
             onTextChanged: (t) => _editText(s.id, t),
             onDelete: () => _delete(s.id),
@@ -168,9 +210,15 @@ class _SubtaskTile extends StatefulWidget {
     this.expenseTotal,
     this.expenseCurrency = 'USD',
     this.onAddExpense,
+    this.now,
   });
 
   final Subtask subtask;
+
+  /// The clock the created/completed line measures "ago" against — see
+  /// [SubtaskEditor.build]. Null falls back to the real clock.
+  final DateTime? now;
+
   final VoidCallback onToggle;
   final ValueChanged<String> onTextChanged;
   final VoidCallback onDelete;
@@ -396,7 +444,41 @@ class _SubtaskTileState extends State<_SubtaskTile> {
     );
   }
 
+  /// The title, plus the quiet created/completed line under it.
+  ///
+  /// A SECOND LINE rather than a fifth chip: this row already carries a
+  /// checkbox, an inline-editable title, a money sign and a 💬 badge, and a
+  /// date competing for that lane would win attention it doesn't deserve. It
+  /// stays visible during inline edit so correcting a title doesn't make the
+  /// whole checklist jump vertically.
+  ///
+  /// Legacy rows have neither timestamp and render nothing at all — see
+  /// [TaskTimestampsLine].
   Widget _buildText(bool done) {
+    return Column(
+      // STRETCH, not start. This Column replaced a bare child of the row's
+      // `Expanded`, which handed that child a TIGHT full-row width — and the
+      // tap-to-edit GestureDetector below relies on it: under `start` it
+      // shrinks to the ~127px the words occupy, so tapping the empty space
+      // beside a short sub-task silently stops opening the editor.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildTitle(done),
+        TaskTimestampsLine(
+          keyPrefix: 'subtask-${widget.subtask.id}',
+          createdAt: widget.subtask.createdAt,
+          // Gated on `done` for the same reason the task's own line is: an
+          // un-ticked row must never read "Done …", whatever a hand-edited
+          // or half-migrated blob happens to carry.
+          completedAt: done ? widget.subtask.completedAt : null,
+          now: widget.now,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTitle(bool done) {
     if (_editing) {
       return TextField(
         key: ValueKey('subtask-edit-${widget.subtask.id}'),

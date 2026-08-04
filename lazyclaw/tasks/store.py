@@ -310,41 +310,162 @@ def _normalize_progress_source(source: str | None) -> str:
     return s if s in _VALID_PROGRESS_SOURCES else "manual"
 
 
+def _step_timestamp(value: object) -> str | None:
+    """Coerce a sub-task timestamp onto a canonical ISO string, or None.
+
+    Deliberately TOLERANT, unlike ``_validate_iso_dt`` which raises. That gate
+    guards ``reminder_at``, where a bad value silently stops the heartbeat from
+    firing and is worth a loud 400. A sub-task timestamp is decoration: it is
+    read by the UI and nothing schedules off it. ``_normalize_steps`` sits on
+    EVERY steps write path, so raising here would turn one malformed field
+    inside one checklist item — an epoch int from an older mobile build, a
+    half-migrated row, a hand-written agent payload — into a 500 that loses the
+    user's whole task edit. Junk therefore degrades to "absent" and the caller
+    re-stamps.
+
+    ``''`` is how form-bound clients spell "unset", so it maps to absent too.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    try:
+        datetime.fromisoformat(trimmed)
+    except (ValueError, TypeError):
+        return None
+    return trimmed
+
+
 def _normalize_steps(steps: list[dict] | None) -> list[dict]:
-    """Coerce a steps payload into the canonical shape [{id, title, done}].
+    """Coerce a steps payload into the canonical shape.
+
+    Canonical sub-task::
+
+        {id, title, done, created_at, completed_at?}
 
     Accepts loose input (plain strings, partial dicts) so callers — including
     the NL parser and the AI quick-add — don't need to pre-shape everything.
+
+    Timestamps use ``datetime.now(timezone.utc).isoformat()`` — the SAME shape
+    a task's own ``created_at`` carries (see ``create_task``), so sub-task times
+    sort and render alongside task times instead of needing a second parser.
+
+    Two rules make the timestamps trustworthy no matter which client wrote the
+    row (Flutter, web, an agent skill, an offline-sync replay):
+
+    * ``created_at`` is stamped ONLY when this call is MINTING the step — i.e.
+      the payload arrived with no ``id``. Steps are born server-side too (the
+      NL parser and the AI quick-add build them as bare ``{"title": ...}``, the
+      recurring respawn rebuilds the checklist from titles alone), and those
+      must not be permanently blank. But an incoming ``id`` means the step
+      already existed somewhere, and this function never observed its creation.
+
+      Stamping those too was a real bug: every steps write re-normalises the
+      WHOLE list, so ticking one item in a checklist created last year came
+      back with every untouched sibling claiming it was created today. The
+      Flutter side deliberately refuses to invent creation times for legacy
+      rows (see ``subtask.dart``); backfilling here erased that honesty one hop
+      later. A legacy step keeps NO ``created_at``, and the UI renders nothing
+      rather than a date we made up.
+
+    * ``completed_at`` is PRESERVED when a step is ticked and CLEARED when it
+      is un-ticked, but never derived. This function is stateless — it cannot
+      tell "ticked by this very write" from "ticked months ago by a client that
+      sent no timestamp", and guessing ``now`` for the second case dates old
+      work to today just as wrongly. The callers that genuinely observe the
+      transition stamp it themselves: ``toggle_step`` and
+      ``_cascade_complete_steps`` server-side, ``subtask_editor.dart`` on
+      mobile.
+
+    Omitted-when-null keeps the wire lean: an unfinished item has no
+    ``completed_at`` key at all, so no client has to special-case a ``null``.
     """
     if not steps:
         return []
+    now = datetime.now(timezone.utc).isoformat()
     out: list[dict] = []
     for i, raw in enumerate(steps):
         if isinstance(raw, str):
             title = raw.strip()
             if not title:
                 continue
-            out.append({"id": f"s{i}-{uuid4().hex[:6]}", "title": title, "done": False})
+            out.append({
+                "id": f"s{i}-{uuid4().hex[:6]}",
+                "title": title,
+                "done": False,
+                "created_at": now,
+            })
             continue
         if not isinstance(raw, dict):
             continue
         title = str(raw.get("title", "")).strip()
         if not title:
             continue
+        done = bool(raw.get("done", False))
+        incoming_id = str(raw.get("id") or "").strip()
         step = {
-            "id": str(raw.get("id") or f"s{i}-{uuid4().hex[:6]}"),
+            "id": incoming_id or f"s{i}-{uuid4().hex[:6]}",
             "title": title,
-            "done": bool(raw.get("done", False)),
+            "done": done,
         }
+        # Minting (no incoming id) is the only case where we actually witness
+        # the creation, so it is the only case that may stamp one.
+        created_at = _step_timestamp(raw.get("created_at"))
+        if created_at is None and not incoming_id:
+            created_at = now
+        if created_at is not None:
+            step["created_at"] = created_at
+
+        if done:
+            # Preserved verbatim, never re-derived — see the docstring. A
+            # ticked step that arrives without one stays without one; the
+            # caller that saw the tick is responsible for stamping it.
+            completed_at = _step_timestamp(raw.get("completed_at"))
+            if completed_at is None and not incoming_id:
+                completed_at = now
+            if completed_at is not None:
+                step["completed_at"] = completed_at
+        # ...and an un-ticked step gets NO completed_at, so re-opening an item
+        # drops the stale time instead of showing "completed 3 days ago" beside
+        # an empty checkbox.
+
         # Preserve the parent-completion cascade marker. Every steps write is
         # funnelled through this normaliser, so dropping the key here would
         # evaporate the "which steps did the user actually finish" record on the
         # next unrelated edit and make the tag decorative. Only carried when
-        # true, so an ordinary checklist keeps its lean {id,title,done} shape.
+        # true, so an ordinary checklist keeps its lean shape.
         if raw.get("cascaded"):
             step["cascaded"] = True
         out.append(step)
     return out
+
+
+def _cascade_complete_steps(steps: list[dict]) -> list[dict]:
+    """Tick every unfinished step for a parent-task completion.
+
+    Returns a NEW list; the input dicts are never mutated (``complete_task``
+    keeps using the decoded task afterwards for the LazyBrain mirror and the
+    recurring respawn).
+
+    Steps the user genuinely ticked pass through untouched — same ``done``,
+    same ``completed_at``, no ``cascaded`` tag — so a later reopen can un-tick
+    exactly the auto-ticked ones and never erase real work.
+
+    The ``completed_at`` is stamped HERE rather than left to
+    ``_normalize_steps``, because this is the only place that actually observes
+    the transition. The normaliser is stateless and deliberately never derives
+    a completion time (it cannot tell a fresh tick from a legacy one), so an
+    unstamped cascade would leave these items permanently without a completion
+    time.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    return _normalize_steps([
+        step
+        if step.get("done")
+        else {**step, "done": True, "cascaded": True, "completed_at": now}
+        for step in steps
+    ])
 
 
 def decode_steps(raw: str | list | None) -> list[dict]:
@@ -1477,17 +1598,15 @@ async def complete_task(
     # tag lets a reopen un-tick exactly the auto-ticked ones and lets the UI
     # distinguish "auto-completed" from "you did this". Steps the user really
     # completed are left untouched — never tagged — so restoring them is safe.
+    # ``_cascade_complete_steps`` also stamps ``completed_at`` on the ones it
+    # ticks (see its docstring), so an auto-completed item carries the parent's
+    # completion moment rather than whenever the next edit happened to land.
     existing_steps = decode_steps(task.get("steps"))
     cascade_steps_enc: str | None = None
     if existing_steps and not all(s.get("done") for s in existing_steps):
         key = await get_user_dek(config, user_id)
         cascade_steps_enc = _encrypt_field(
-            json.dumps([
-                step if step.get("done")
-                else {**step, "done": True, "cascaded": True}
-                for step in existing_steps
-            ]),
-            key,
+            json.dumps(_cascade_complete_steps(existing_steps)), key,
         )
 
     async with db_session(config) as db:
@@ -2121,16 +2240,29 @@ async def toggle_step(
 
     current = _parse_steps(task.get("steps"))
     matched = False
+    now = datetime.now(timezone.utc).isoformat()
+    updated: list[dict] = []
     for step in current:
-        if step.get("id") == step_id:
-            step["done"] = not bool(step.get("done"))
-            matched = True
-            break
+        if matched or step.get("id") != step_id:
+            updated.append(step)
+            continue
+        matched = True
+        done = not bool(step.get("done"))
+        # This is one of the two places that WITNESSES a tick, so it stamps the
+        # completion time itself — `_normalize_steps` never derives one (it
+        # cannot distinguish a fresh tick from a legacy already-done step).
+        # Un-ticking drops the key so a reopened item shows no completion time.
+        flipped = {**step, "done": done}
+        if done:
+            flipped["completed_at"] = now
+        else:
+            flipped.pop("completed_at", None)
+        updated.append(flipped)
 
     if not matched:
         return None
 
-    await set_steps(config, user_id, task_id, current)
+    await set_steps(config, user_id, task_id, updated)
     return await get_task(config, user_id, task_id)
 
 

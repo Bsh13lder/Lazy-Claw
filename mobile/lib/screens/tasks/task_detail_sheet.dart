@@ -13,7 +13,6 @@ import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/budgets_provider.dart';
 import '../../providers/tasks_provider.dart';
-import '../../widgets/autosave_indicator.dart';
 import '../settings/settings_prefs.dart';
 import 'chip_edit.dart';
 import 'task_attribute_chips.dart';
@@ -21,6 +20,7 @@ import 'task_budget_control.dart';
 import 'task_budget_edit_state.dart';
 import 'task_comments_section.dart';
 import 'task_detail_actions.dart';
+import 'task_detail_header.dart';
 import 'task_detail_live_data.dart';
 import 'task_detail_patch.dart';
 import 'task_detail_pickers.dart';
@@ -535,32 +535,20 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // ── Save state, then the destructive action ────────────────────
+          // ── Save state, delete, title + the record's timestamps ────────
           //
-          // The indicator sits at the TOP because that is where the eye
-          // starts, and it is the only remaining evidence that typing here
-          // does anything. Delete keeps the far corner from the submit: this
-          // sheet is thumb-driven and "one mis-tap deletes the task" is not
-          // an acceptable failure mode. It is still behind a confirm.
-          Row(
-            children: [
-              AutosaveIndicator(status: _status),
-              const Spacer(),
-              TaskDeleteAction(
-                deleting: _deleting,
-                onPressed: _status == AutosaveStatus.saving ? null : _delete,
-              ),
-            ],
-          ),
-
-          // ── Title ──────────────────────────────────────────────────────
-          LzTextField(
-            controller: _titleController,
-            fieldKey: const Key('task-detail-title'),
-            hint: 'What needs to be done?',
-            prefixIcon: Icons.task_alt_outlined,
-            textInputAction: TextInputAction.next,
-            errorText: _titleError,
+          // Extracted (see TaskDetailHeader) — `live`, not `widget.task`, so
+          // a completion landing from elsewhere while the sheet is open
+          // surfaces without a reopen.
+          TaskDetailHeader(
+            titleController: _titleController,
+            titleError: _titleError,
+            status: _status,
+            deleting: _deleting,
+            onDelete: _delete,
+            createdAt: live.createdAt,
+            completedAt: live.completedAt,
+            isDone: live.isDone,
           ),
 
           const SizedBox(height: AppSpacing.lg),

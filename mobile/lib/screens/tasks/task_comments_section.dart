@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lazyclaw_mobile/core/relative_time.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:lazyclaw_mobile/widgets/link_text.dart';
 
@@ -276,7 +277,11 @@ class _CommentThread extends StatelessWidget {
                       ),
                       const SizedBox(width: AppSpacing.sm),
                       Text(
-                        _relativeTime(c.ts),
+                        // Same helper the task's and each sub-task's
+                        // created/completed line uses — three spellings of
+                        // "when" inside one sheet read as three different
+                        // things. Empty (not "—") when the ts is unusable.
+                        formatTimestampLabel(c.ts) ?? '',
                         style: AppText.caption.copyWith(
                           color: AppColors.textMuted,
                         ),
@@ -409,19 +414,4 @@ class _CommentInputRowState extends State<_CommentInputRow> {
       ],
     );
   }
-}
-
-/// A tiny relative-time label ("just now" / "5m ago" / …). The codebase's
-/// convention is a small private helper per screen rather than one shared
-/// utility (see `activity_row.dart`, `audit_screen.dart`,
-/// `notifications_center_screen.dart` for precedent) — this mirrors that.
-String _relativeTime(String iso) {
-  final dt = DateTime.tryParse(iso)?.toLocal();
-  if (dt == null) return '';
-  final diff = DateTime.now().difference(dt);
-  if (diff.inSeconds < 60) return 'just now';
-  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-  if (diff.inHours < 24) return '${diff.inHours}h ago';
-  if (diff.inDays < 7) return '${diff.inDays}d ago';
-  return '${dt.day}/${dt.month}/${dt.year}';
 }

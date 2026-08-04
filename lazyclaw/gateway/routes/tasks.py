@@ -54,6 +54,15 @@ class StepDraft(BaseModel):
     id: str | None = None
     title: str
     done: bool = False
+    # Sub-task timestamps must be DECLARED here or they never reach the store:
+    # pydantic v2 defaults to `extra='ignore'`, and this model is consumed via
+    # `s.model_dump()` on both write paths (create_task_route, set_steps_route),
+    # so an undeclared field is dropped silently at the boundary. The client
+    # stamps these when it sees the create/tick (it is the only party that
+    # observes the moment for an offline edit); dropping them here would make
+    # `_normalize_steps` see every client tick as untimestamped.
+    created_at: str | None = None
+    completed_at: str | None = None
 
 
 class CommentBody(BaseModel):

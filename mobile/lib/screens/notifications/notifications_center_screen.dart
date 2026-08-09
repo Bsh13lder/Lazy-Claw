@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/actions/pending_deep_link.dart';
+import 'notification_detail_sheet.dart';
 import '../../providers/notifications_center_provider.dart';
 import '../../repositories/notifications_repository.dart';
 import '../../ui/ui.dart';
@@ -39,11 +40,20 @@ class _NotificationsCenterScreenState
 
   void _onTap(ServerNotification n) {
     ref.read(notificationsCenterProvider.notifier).markRead(n.id);
-    // Only navigate away when the row has a specific target — a generic row
-    // (routePath == the center itself) just marks read in place.
+    // Navigate when the row has a specific target; a generic row (routePath
+    // == the center itself) opens the full-message detail sheet instead —
+    // the list body is 2-line ellipsized, so without this the tap was a
+    // visible dead end and the rest of the message was unreachable.
     final route = n.routePath;
     if (route != '/notifications') {
       ref.read(pendingDeepLinkProvider.notifier).state = route;
+    } else {
+      showNotificationDetailSheet(
+        context,
+        n,
+        accent: _severityColor(n.severity),
+        icon: _kindIcon(n.kind),
+      );
     }
   }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'chat_message.dart';
 import 'chat_socket.dart';
@@ -26,6 +27,10 @@ class ChatReducer {
 
   /// How many recent (non-empty) assistant messages the duplicate check scans.
   static const int _dupScanWindow = 3;
+
+  /// How many recent local messages a history delta-merge scans when matching
+  /// a fetched row to an id-less live bubble by content (id adoption).
+  static const int _mergeAdoptScanWindow = 20;
 
   /// Usage metrics from a standalone `usage` frame, attached when `done`
   /// arrives (the `done` payload's own usage wins when both exist).
@@ -86,6 +91,68 @@ class ChatReducer {
   void seedHistory(List<ChatMessage> history) {
     if (history.isEmpty) return;
     messages.insertAll(0, history);
+  }
+
+  /// Delta-merges a freshly fetched history tail (oldest-first) into the
+  /// current list. Dedup is by server message id first; a fetched row whose
+  /// id is unknown is matched by (role + normalized content) against recent
+  /// id-less live bubbles and ADOPTS its id onto the match instead of
+  /// duplicating it. Genuinely new rows are inserted at the end — but always
+  /// BEFORE a trailing in-flight streaming bubble, because token/done frames
+  /// land on `messages.last` and must keep doing so. Rows without an id that
+  /// match nothing are dropped (id is the merge contract; inserting them
+  /// would duplicate on every re-fetch). Returns true when anything changed.
+  bool mergeHistoryTail(List<ChatMessage> tail) {
+    if (tail.isEmpty) return false;
+    final knownIds = <String>{
+      for (final m in messages)
+        if (m.id != null && m.id!.isNotEmpty) m.id!,
+    };
+    var changed = false;
+    for (final incoming in tail) {
+      final id = incoming.id ?? '';
+      if (id.isNotEmpty && knownIds.contains(id)) continue;
+      final localIdx = _findMergeMatchByContent(incoming);
+      if (localIdx != null) {
+        // A still-streaming bubble with the same content is this very row
+        // mid-flight — its `done` frame owns finalization; a later merge
+        // adopts the id once it settles. Never touch it now.
+        if (messages[localIdx].streaming) continue;
+        if (id.isEmpty) continue;
+        messages[localIdx] =
+            messages[localIdx].withServerIdentity(id: id, kind: incoming.kind);
+        knownIds.add(id);
+        changed = true;
+        continue;
+      }
+      if (id.isEmpty) continue;
+      var insertAt = messages.length;
+      while (insertAt > 0 && messages[insertAt - 1].streaming) {
+        insertAt--;
+      }
+      messages.insert(insertAt, incoming);
+      knownIds.add(id);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /// Index of the most recent id-less local message matching [incoming] by
+  /// role + whitespace-normalized content, scanning at most
+  /// [_mergeAdoptScanWindow] messages back. Null when nothing matches.
+  int? _findMergeMatchByContent(ChatMessage incoming) {
+    final content = _normalizeWs(incoming.content);
+    if (content.isEmpty) return null;
+    var scanned = 0;
+    for (var i = messages.length - 1;
+        i >= 0 && scanned < _mergeAdoptScanWindow;
+        i--, scanned++) {
+      final m = messages[i];
+      if (m.role != incoming.role) continue;
+      if (m.id != null && m.id!.isNotEmpty) continue;
+      if (_normalizeWs(m.content) == content) return i;
+    }
+    return null;
   }
 
   /// Makes sure the live frame has a streaming assistant bubble to land on —
@@ -315,6 +382,13 @@ class ChatReducer {
           messages[idx] = messages[idx].copyWith(planResolved: true);
         }
 
+      case NotificationFrame():
+        // Deliberately no optimistic paint: the frame may be only a HINT
+        // that new server-side rows exist, and its title/body may not match
+        // the persisted row text. The controller answers with a history
+        // delta-merge (source of truth) — see ChatController._onServerPing.
+        break;
+
       case UnknownFrame():
         break; // ignored
     }
@@ -463,36 +537,113 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   final ChatReducer _reducer = ChatReducer();
   late final StreamSubscription<ServerFrame> _frameSub;
   late final StreamSubscription<int> _flushSub;
+  StreamSubscription<bool>? _connSub;
 
   // Callback for firing local notifications — injected externally so the
   // controller has no hard dependency on the notification plugin.
   final void Function(String title, String body)? onNotify;
 
-  bool _seeded = false;
+  /// Fetches the freshest chat history tail (oldest-first, already mapped to
+  /// [ChatMessage]s) for the initial seed and every delta-merge refresh.
+  /// Null (e.g. in reducer-only tests) disables refreshes entirely.
+  final Future<List<ChatMessage>> Function()? historyLoader;
 
-  ChatController(this._socket, {this.onNotify}) : super(const []) {
+  /// Delay before the follow-up refresh after a `notification` frame — the
+  /// frame can beat the server's own history write, so one settle-delayed
+  /// re-fetch closes that race. Injectable so tests run fast.
+  final Duration notificationFollowUp;
+
+  bool _seeded = false;
+  bool _refreshing = false;
+  bool _refreshQueued = false;
+  bool _wasConnected = false;
+  Timer? _followUpTimer;
+
+  ChatController(
+    this._socket, {
+    this.onNotify,
+    this.historyLoader,
+    this.notificationFollowUp = const Duration(seconds: 2),
+  }) : super(const []) {
     _frameSub = _socket.frames.listen((f) {
       _handleNotification(f);
       _reducer.onFrame(f);
       state = List.unmodifiable(_reducer.messages);
+      if (f is NotificationFrame) _onServerPing();
     });
     _flushSub = _socket.outboxFlushed.listen((count) {
       _reducer.onOutboxFlushed(count);
       state = List.unmodifiable(_reducer.messages);
     });
+    // Every (re)connect may have missed frames while the socket was down —
+    // catch up from the history endpoint (the source of truth). Only the
+    // down→up edge triggers, so steady-state `true` repeats are free.
+    _connSub = _socket.connectionState.listen((up) {
+      final was = _wasConnected;
+      _wasConnected = up;
+      if (up && !was) unawaited(refreshHistory());
+    });
   }
 
-  /// Seed prior conversation once per controller lifetime (idempotent).
-  ///
-  /// Called by the chat screen after it fetches history from the backend.
-  /// Marks itself done on the first call so a reconnect can't double-seed; an
-  /// empty [history] (no prior conversation) still counts as seeded.
+  /// Seeds prior conversation on the FIRST call (history inserted above any
+  /// live messages); every LATER call delta-merges by message id instead —
+  /// so reconnect / resume / notification refreshes can always land without
+  /// double-seeding or duplicating. An empty first [history] still counts as
+  /// seeded (no prior conversation).
   void seedHistory(List<ChatMessage> history) {
-    if (_seeded) return;
+    if (_seeded) {
+      if (_reducer.mergeHistoryTail(history)) {
+        state = List.unmodifiable(_reducer.messages);
+      }
+      return;
+    }
     _seeded = true;
     if (history.isEmpty) return;
     _reducer.seedHistory(history);
     state = List.unmodifiable(_reducer.messages);
+  }
+
+  /// Fetches the freshest history via [historyLoader] and seeds (first time)
+  /// or delta-merges it in. Safe to call unconditionally — the stale-chat
+  /// fix: the chat screen calls this on mount, on app-lifecycle resume, and
+  /// the controller itself on WS reconnect and `notification` frames.
+  /// Concurrent triggers coalesce into one trailing re-fetch; errors are
+  /// logged and swallowed (best-effort — the next trigger retries).
+  Future<void> refreshHistory() async {
+    final loader = historyLoader;
+    if (loader == null) return;
+    if (_refreshing) {
+      _refreshQueued = true;
+      return;
+    }
+    _refreshing = true;
+    try {
+      do {
+        _refreshQueued = false;
+        try {
+          final tail = await loader();
+          if (!mounted) return;
+          seedHistory(tail);
+        } catch (e) {
+          // Best-effort: reconnect / resume / next ping retries.
+          debugPrint('ChatController.refreshHistory failed: $e');
+        }
+      } while (_refreshQueued && mounted);
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  /// A `notification` frame arrived: new server-side chat rows (may) exist.
+  /// Refresh now, and once more after [notificationFollowUp] in case the
+  /// frame outran the server's history write. Follow-ups coalesce.
+  void _onServerPing() {
+    unawaited(refreshHistory());
+    _followUpTimer?.cancel();
+    _followUpTimer = Timer(notificationFollowUp, () {
+      _followUpTimer = null;
+      unawaited(refreshHistory());
+    });
   }
 
   void _handleNotification(ServerFrame f) {
@@ -545,8 +696,10 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
 
   @override
   void dispose() {
+    _followUpTimer?.cancel();
     _frameSub.cancel();
     _flushSub.cancel();
+    _connSub?.cancel();
     super.dispose();
   }
 }

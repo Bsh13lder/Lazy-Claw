@@ -158,41 +158,102 @@ class _BubbleContent extends StatelessWidget {
         style: AppText.body.copyWith(color: AppColors.textPrimary),
       );
     }
+    // Proactive server ping persisted as an assistant row (reminders, cron
+    // results, watcher alerts): bell glyph + emphasized title line. Rows
+    // without the kind field fall through to the normal bubble (graceful).
+    if (m.kind == 'notification' && m.content.isNotEmpty) {
+      return _NotificationContent(content: m.content);
+    }
     // Assistant: markdown render. Show ellipsis when content is empty +
     // not yet streaming (edge case).
     final data = m.content.isEmpty && !m.streaming ? '…' : m.content;
     return MarkdownBody(
       data: data,
-      styleSheet: MarkdownStyleSheet(
-        p: AppText.body.copyWith(color: AppColors.textPrimary),
-        strong: AppText.body.copyWith(
-          color: AppColors.textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        em: AppText.body.copyWith(
-          color: AppColors.textSecondary,
-          fontStyle: FontStyle.italic,
-        ),
-        code: AppText.caption.copyWith(
-          color: AppColors.accent,
-          fontFamily: 'monospace',
-          backgroundColor: AppColors.bgSurfaceElevated,
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: AppColors.bgSurfaceElevated,
-          borderRadius: AppRadii.rSm,
-          border: Border.all(color: AppColors.borderSubtle),
-        ),
-        blockquoteDecoration: BoxDecoration(
-          border: Border(
-            left: BorderSide(color: AppColors.accent, width: 3),
-          ),
-        ),
-        h1: AppText.titleL.copyWith(color: AppColors.textPrimary),
-        h2: AppText.title.copyWith(color: AppColors.textPrimary),
-        h3: AppText.label.copyWith(color: AppColors.textPrimary),
-        listBullet: AppText.body.copyWith(color: AppColors.accent),
+      styleSheet: _assistantMarkdownStyle(),
+    );
+  }
+}
+
+/// Shared markdown styling for assistant-authored text (normal replies and
+/// notification bodies) — design-system tokens only.
+MarkdownStyleSheet _assistantMarkdownStyle() => MarkdownStyleSheet(
+      p: AppText.body.copyWith(color: AppColors.textPrimary),
+      strong: AppText.body.copyWith(
+        color: AppColors.textPrimary,
+        fontWeight: FontWeight.w600,
       ),
+      em: AppText.body.copyWith(
+        color: AppColors.textSecondary,
+        fontStyle: FontStyle.italic,
+      ),
+      code: AppText.caption.copyWith(
+        color: AppColors.accent,
+        fontFamily: 'monospace',
+        backgroundColor: AppColors.bgSurfaceElevated,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        borderRadius: AppRadii.rSm,
+        border: Border.all(color: AppColors.borderSubtle),
+      ),
+      blockquoteDecoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(color: AppColors.accent, width: 3),
+        ),
+      ),
+      h1: AppText.titleL.copyWith(color: AppColors.textPrimary),
+      h2: AppText.title.copyWith(color: AppColors.textPrimary),
+      h3: AppText.label.copyWith(color: AppColors.textPrimary),
+      listBullet: AppText.body.copyWith(color: AppColors.accent),
+    );
+
+/// Subtle distinct treatment for `kind == 'notification'` rows inside an
+/// otherwise standard assistant bubble. The content contract is
+/// "{title}\n{body}" — the first line renders as an emphasized header next
+/// to a bell glyph, the rest as normal assistant markdown. Degrades to a
+/// title-only card when there is no body line.
+class _NotificationContent extends StatelessWidget {
+  const _NotificationContent({required this.content});
+  final String content;
+
+  @override
+  Widget build(BuildContext context) {
+    final nl = content.indexOf('\n');
+    final title = (nl == -1 ? content : content.substring(0, nl)).trim();
+    final body = nl == -1 ? '' : content.substring(nl + 1).trim();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 1),
+              child: Icon(
+                Icons.notifications_none_rounded,
+                size: 15,
+                color: AppColors.accent,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.xs),
+            Flexible(
+              child: Text(
+                title.isEmpty ? 'Notification' : title,
+                style: AppText.label.copyWith(color: AppColors.textPrimary),
+              ),
+            ),
+          ],
+        ),
+        if (body.isNotEmpty) ...[
+          const SizedBox(height: AppSpacing.xs),
+          MarkdownBody(
+            data: body,
+            styleSheet: _assistantMarkdownStyle(),
+          ),
+        ],
+      ],
     );
   }
 }

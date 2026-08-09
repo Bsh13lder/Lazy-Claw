@@ -167,6 +167,30 @@ class PlanApprovedFrame extends ServerFrame {
   const PlanApprovedFrame(this.autoApproveSession);
 }
 
+/// Proactive server ping (reminder / cron result / watcher alert) arriving on
+/// the chat WebSocket:
+/// `{"type":"notification","id":…,"kind":…,"title":…,"body":…,"created_at":…}`.
+///
+/// May be only a HINT that new server-side chat rows exist — [id] does not
+/// necessarily correspond to a history row. The history endpoint is the
+/// source of truth, so the controller answers with a delta history refresh
+/// instead of painting [body] directly. All fields are tolerant: anything
+/// missing or oddly typed degrades to an empty string, never a throw.
+class NotificationFrame extends ServerFrame {
+  final String id;
+  final String kind;
+  final String title;
+  final String body;
+  final String createdAt;
+  const NotificationFrame({
+    this.id = '',
+    this.kind = '',
+    this.title = '',
+    this.body = '',
+    this.createdAt = '',
+  });
+}
+
 class UnknownFrame extends ServerFrame {
   final String type;
   const UnknownFrame(this.type);
@@ -349,6 +373,14 @@ ServerFrame parseServerFrame(String raw) {
           failed: status == 'failed',
           taskId: m['task_id'] as String?,
         );
+      case 'notification':
+        return NotificationFrame(
+          id: _stringField(m, 'id'),
+          kind: _stringField(m, 'kind'),
+          title: _stringField(m, 'title'),
+          body: _stringField(m, 'body'),
+          createdAt: _stringField(m, 'created_at'),
+        );
       case 'browser_event':
         return _parseBrowserEvent(m);
       default:
@@ -363,6 +395,10 @@ ServerFrame parseServerFrame(String raw) {
 /// name (same string the bg_* frames carry as `task_name`).
 String _taskSubject(Map m) =>
     _firstNonEmpty([m['name'], m['task_name']]) ?? 'task';
+
+/// Tolerant string coercion for a frame field: null → '', non-strings are
+/// stringified (server ids may arrive as ints), whitespace trimmed.
+String _stringField(Map m, String key) => m[key]?.toString().trim() ?? '';
 
 /// First non-empty string from [candidates], else null.
 String? _firstNonEmpty(List<dynamic> candidates) {

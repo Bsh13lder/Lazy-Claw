@@ -410,6 +410,53 @@ void main() {
         isA<UnknownFrame>());
   });
 
+  // ── notification frames (proactive server pings) ───────────────────────────
+
+  test('parses a full notification frame', () {
+    final f = parseServerFrame(
+        '{"type":"notification","id":"n-42","kind":"reminder","title":"Task due",'
+        '"body":"Pay the invoice today","created_at":"2026-08-09T10:00:00Z"}');
+    expect(f, isA<NotificationFrame>());
+    final n = f as NotificationFrame;
+    expect(n.id, 'n-42');
+    expect(n.kind, 'reminder');
+    expect(n.title, 'Task due');
+    expect(n.body, 'Pay the invoice today');
+    expect(n.createdAt, '2026-08-09T10:00:00Z');
+  });
+
+  test('minimal notification frame parses with empty fields (never throws)',
+      () {
+    final f = parseServerFrame('{"type":"notification"}');
+    expect(f, isA<NotificationFrame>());
+    final n = f as NotificationFrame;
+    expect(n.id, '');
+    expect(n.kind, '');
+    expect(n.title, '');
+    expect(n.body, '');
+    expect(n.createdAt, '');
+  });
+
+  test('malformed notification fields degrade gracefully (never throw)', () {
+    // Wrong types everywhere: int id, null title, object body, list kind.
+    final f = parseServerFrame(
+        '{"type":"notification","id":7,"title":null,"body":{"x":1},"kind":[1]}');
+    expect(f, isA<NotificationFrame>());
+    final n = f as NotificationFrame;
+    expect(n.id, '7', reason: 'server ids may arrive as ints');
+    expect(n.title, '');
+    // Odd shapes stringify rather than crash the frame stream.
+    expect(() => n.body, returnsNormally);
+  });
+
+  test('notification with whitespace-padded fields is trimmed', () {
+    final f = parseServerFrame(
+            '{"type":"notification","id":" n1 ","title":"  Ping  "}')
+        as NotificationFrame;
+    expect(f.id, 'n1');
+    expect(f.title, 'Ping');
+  });
+
   test('encodes a cancel frame', () {
     expect(encodeCancel(), '{"type":"cancel"}');
   });

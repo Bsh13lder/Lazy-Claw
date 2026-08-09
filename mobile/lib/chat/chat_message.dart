@@ -140,6 +140,16 @@ class BackgroundTaskResult {
 enum SendState { sent, sending, failed }
 
 class ChatMessage {
+  /// Server-side message id from the history endpoint. Null for live bubbles
+  /// minted from WS frames — a later history delta-merge adopts the id onto
+  /// them so re-fetches dedupe instead of duplicating.
+  final String? id;
+
+  /// Optional server row kind. `'notification'` marks a proactive server ping
+  /// (reminder / cron result / watcher alert) persisted as an assistant row —
+  /// renders with the bell treatment. Null / anything else = normal bubble.
+  final String? kind;
+
   final String role; // 'user' | 'assistant' | 'bg_task' | 'plan'
   final String content;
   final bool streaming;
@@ -172,6 +182,8 @@ class ChatMessage {
   const ChatMessage({
     required this.role,
     required this.content,
+    this.id,
+    this.kind,
     this.streaming = false,
     this.sendState = SendState.sent,
     this.pendingApprovalId,
@@ -192,6 +204,8 @@ class ChatMessage {
   /// Single cloning seam — every public copy helper delegates here so a new
   /// field only has to be threaded through once.
   ChatMessage _clone({
+    String? id,
+    String? kind,
     String? content,
     bool? streaming,
     SendState? sendState,
@@ -209,6 +223,8 @@ class ChatMessage {
       ChatMessage(
         role: role,
         content: content ?? this.content,
+        id: id ?? this.id,
+        kind: kind ?? this.kind,
         streaming: streaming ?? this.streaming,
         sendState: sendState ?? this.sendState,
         pendingApprovalId: clearApprovalFields
@@ -256,6 +272,12 @@ class ChatMessage {
         pendingApprovalId: requestId,
         pendingApprovalSkill: skill,
       );
+
+  /// Adopts the server-side identity of a history row onto a live bubble
+  /// minted from WS frames (delta-merge dedup: once the id is attached,
+  /// later re-fetches recognize this message instead of duplicating it).
+  ChatMessage withServerIdentity({String? id, String? kind}) =>
+      _clone(id: id, kind: kind);
 
   /// Returns a copy with approval fields cleared (prevents double-tap).
   ChatMessage clearApproval() => _clone(clearApprovalFields: true);

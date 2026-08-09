@@ -68,6 +68,30 @@ void main() {
       expect(mapApiMessage({'role': 'tool', 'content': 'output'}), isNull);
       expect(mapApiMessage({'role': 'system', 'content': 'x'}), isNull);
     });
+
+    test('carries the server row id (stringified) on user and assistant rows',
+        () {
+      final u = mapApiMessage({'role': 'user', 'content': 'q', 'id': 17});
+      expect(u!.id, '17');
+      final a =
+          mapApiMessage({'role': 'assistant', 'content': 'a', 'id': 'msg-9'});
+      expect(a!.id, 'msg-9');
+    });
+
+    test('carries kind == notification; rows without kind stay null', () {
+      final n = mapApiMessage({
+        'role': 'assistant',
+        'content': 'Reminder\nCall Buchvardi',
+        'id': 'n1',
+        'kind': 'notification',
+      });
+      expect(n!.kind, 'notification');
+      expect(n.content, 'Reminder\nCall Buchvardi');
+
+      final plain = mapApiMessage({'role': 'assistant', 'content': 'hi'});
+      expect(plain!.kind, isNull, reason: 'graceful when the field is absent');
+      expect(plain.id, isNull);
+    });
   });
 
   group('ChatHistoryRepository.loadPrimaryHistory', () {

@@ -42,9 +42,14 @@ class ChatSessionInfo {
 ChatMessage? mapApiMessage(Map<String, dynamic> json) {
   final role = json['role']?.toString() ?? '';
   final content = json['content']?.toString() ?? '';
+  // Server row identity: id drives delta-merge dedup; kind == 'notification'
+  // marks proactive-ping rows (rendered with the bell treatment). Both are
+  // optional — old rows without them still render as plain bubbles.
+  final id = json['id']?.toString();
+  final kind = json['kind']?.toString();
 
   if (role == 'user') {
-    return ChatMessage(role: 'user', content: content);
+    return ChatMessage(role: 'user', content: content, id: id);
   }
 
   if (role == 'assistant') {
@@ -67,6 +72,8 @@ ChatMessage? mapApiMessage(Map<String, dynamic> json) {
     return ChatMessage(
       role: 'assistant',
       content: content,
+      id: id,
+      kind: kind,
       streaming: false,
       toolActivities: activities,
     );

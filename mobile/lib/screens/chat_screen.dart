@@ -53,6 +53,11 @@ final chatControllerProvider =
               ref.watch(chatSocketProvider),
               onNotify: (title, body) =>
                   LocalNotifications.showTaskNotification(title, body),
+              // Seed + delta-merge source for `notification` frames, WS
+              // reconnects and app resumes. NOTE: chat delivery must never
+              // fire local banners — the notifications feed poller owns those.
+              historyLoader: () =>
+                  ref.read(chatHistoryRepositoryProvider).loadPrimaryHistory(),
             ));
 
 /// Loads prior conversation history so the chat isn't empty on open.
@@ -76,7 +81,8 @@ class ChatScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends ConsumerState<ChatScreen> {
+class _ChatScreenState extends ConsumerState<ChatScreen>
+    with WidgetsBindingObserver {
   final _input = TextEditingController();
   final _scrollController = ScrollController();
   bool _connected = false;
@@ -90,30 +96,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Initialise local notifications the first time the chat screen mounts.
     // Safe to call multiple times — the implementation is idempotent.
     LocalNotifications.init();
     _connect();
-    // Replay prior conversation so the screen isn't empty on open. Best-effort
-    // and independent of the socket — the live chat works without it.
-    unawaited(_loadHistory());
+    // Replay prior conversation so the screen isn't empty on open (first call
+    // seeds; later calls delta-merge). Best-effort and independent of the
+    // socket — the live chat works without it.
+    unawaited(ref.read(chatControllerProvider.notifier).refreshHistory());
   }
 
-  /// Fetch the primary session's history and seed the controller once.
-  /// Swallows errors: history is a nicety, never a blocker.
-  Future<void> _loadHistory() async {
-    try {
-      final history =
-          await ref.read(chatHistoryRepositoryProvider).loadPrimaryHistory();
-      if (!mounted) return;
-      ref.read(chatControllerProvider.notifier).seedHistory(history);
-    } catch (_) {
-      // History is best-effort — leave the chat empty and carry on live.
+  /// The chat screen mounts once per app process (StatefulShellRoute keeps it
+  /// alive across tabs), so history must catch up on every foreground resume —
+  /// UNCONDITIONALLY, never gated on a change-detector or reachability probe
+  /// ("reported reachable" ≠ reachable). The merge dedupes, so a redundant
+  /// refresh is free; a skipped one is a stale chat.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(ref.read(chatControllerProvider.notifier).refreshHistory());
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _input.dispose();
     _scrollController.dispose();
     super.dispose();

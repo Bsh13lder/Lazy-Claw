@@ -18,6 +18,8 @@ interface MessageBubbleProps {
   // ECO router fallback surfacing — see agent.py "done" event + chat_ws payload.
   fallbackReason?: string;
   modelUsed?: string;
+  // "cron" on user rows injected by scheduled jobs — renders a subtle badge.
+  kind?: string;
 }
 
 const FALLBACK_REASON_LABELS: Record<string, string> = {
@@ -95,6 +97,7 @@ export default function MessageBubble({
   latency_ms,
   fallbackReason,
   modelUsed,
+  kind,
 }: MessageBubbleProps) {
   const isUser = role === "user";
   const hasMeta = !isUser && !isStreaming && (tokens != null || cost != null || model != null);
@@ -131,6 +134,11 @@ export default function MessageBubble({
             {timestamp && (
               <span className="text-[11px] text-text-muted/60">
                 {formatTime(timestamp)}
+              </span>
+            )}
+            {isUser && kind === "cron" && (
+              <span className="msg-meta-pill bg-bg-tertiary text-text-muted">
+                ⏰ scheduled
               </span>
             )}
           </div>

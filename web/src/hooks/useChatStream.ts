@@ -3,6 +3,9 @@ import { useWebSocket, type ConnectionStatus } from "./useWebSocket";
 
 export interface ToolCallInfo {
   name: string;
+  // Pretty label minted server-side (frame field `display_name`).
+  // Cards prefer this over the raw tool name when present.
+  display?: string;
   args: Record<string, unknown>;
   preview?: string;
   status: "running" | "done" | "error";
@@ -360,6 +363,7 @@ export function useChatStream({
         case "tool_call": {
           const tool: ToolCallInfo = {
             name: msg.name as string,
+            display: msg.display_name as string | undefined,
             args: (msg.args as Record<string, unknown>) ?? {},
             status: "running",
             started_at: Date.now(),

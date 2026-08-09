@@ -168,7 +168,19 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool";
   content: string;
   tool_name: string | null;
-  tool_calls: { name: string; args: Record<string, unknown>; result?: string }[] | null;
+  tool_calls:
+    | {
+        id: string;
+        name: string;
+        /** Pretty label from the server (e.g. "Read conversation"). */
+        display?: string;
+        arguments?: Record<string, unknown>;
+        result?: string;
+        status?: "done" | "unknown";
+      }[]
+    | null;
+  /** "cron" on user rows injected by scheduled jobs (content starts with "[JOB:name]"). */
+  kind?: string;
   created_at: string;
 }
 

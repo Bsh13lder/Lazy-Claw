@@ -36,7 +36,9 @@ export default function ToolCallCard({ tool }: { readonly tool: ToolCallInfo }) 
   const [expanded, setExpanded] = useState(false);
 
   const isTeam = tool.name.startsWith("team:");
-  const displayName = isTeam ? tool.name.slice(5) : tool.name;
+  // Server-minted pretty label wins; fall back to the raw name with the
+  // legacy `team:` prefix stripped.
+  const displayName = tool.display ?? (isTeam ? tool.name.slice(5) : tool.name);
   const accent = colorFor(tool.name);
   const brief = argSummary(tool.args);
 

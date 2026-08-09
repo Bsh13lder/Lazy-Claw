@@ -201,6 +201,7 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
                 latency_ms={m.latency_ms}
                 modelUsed={m.modelUsed}
                 fallbackReason={m.fallbackReason}
+                kind={m.kind}
               />
             ))}
 

@@ -37,6 +37,8 @@ export interface Message {
   // brain (e.g. Sonnet → Haiku via Claude CLI on 529 overload).
   fallbackReason?: string;
   modelUsed?: string;
+  // "cron" on user rows injected by scheduled jobs ("[JOB:name] ..." content).
+  kind?: string;
 }
 
 export interface ChatSessionLocal {
@@ -253,10 +255,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         role: m.role === "tool" ? "assistant" as const : m.role,
         content: m.content,
         timestamp: new Date(m.created_at).getTime(),
+        kind: m.kind,
         toolCalls: m.tool_calls?.map((tc) => ({
           name: tc.name,
-          args: tc.args,
-          status: "done" as const,
+          display: tc.display,
+          args: tc.arguments ?? {},
+          // Web has no "unknown" visual — map it to done so a historic
+          // call with no persisted result never renders a spinner.
+          status: tc.status === "unknown"
+            ? ("done" as const)
+            : (tc.status ?? ("done" as const)),
           preview: tc.result,
         })),
       }));

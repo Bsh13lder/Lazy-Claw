@@ -304,9 +304,14 @@ class WebSocketCallback:
             await self._send({"type": "token", "content": event.detail})
 
         elif kind == "tool_call":
-            name = event.metadata.get("tool_name", event.detail)
-            args = event.metadata.get("arguments", {})
-            tool_call_id = event.metadata.get("tool_call_id")
+            md = event.metadata
+            name = md.get("tool_name", event.detail)
+            # The agent emits `args` (agent.py tool_call event); older /
+            # provider paths used `arguments` — accept both (mirrors the
+            # dual-key readers in runtime/task_runner.py).
+            args = md.get("args") or md.get("arguments") or {}
+            display_name = md.get("display_name")
+            tool_call_id = md.get("tool_call_id")
             if _bg_id:
                 await self._send({
                     "type": "bg_tool_call",
@@ -315,6 +320,7 @@ class WebSocketCallback:
                     "name": name,
                     "args": args,
                     "tool_call_id": tool_call_id,
+                    "display_name": display_name,
                 })
             else:
                 await self._send({
@@ -322,13 +328,17 @@ class WebSocketCallback:
                     "name": name,
                     "args": args,
                     "tool_call_id": tool_call_id,
+                    "display_name": display_name,
                 })
 
         elif kind == "tool_result":
-            name = event.metadata.get("tool_name", event.detail)
-            result = event.metadata.get("result", "")
+            md = event.metadata
+            name = md.get("tool_name", event.detail)
+            # Dual-key read (same rationale as tool_call above).
+            result = md.get("result") or md.get("preview") or ""
             preview = result[:200] if isinstance(result, str) else str(result)[:200]
-            tool_call_id = event.metadata.get("tool_call_id")
+            display_name = md.get("display_name")
+            tool_call_id = md.get("tool_call_id")
             if _bg_id:
                 await self._send({
                     "type": "bg_tool_result",
@@ -337,6 +347,7 @@ class WebSocketCallback:
                     "name": name,
                     "preview": preview,
                     "tool_call_id": tool_call_id,
+                    "display_name": display_name,
                 })
             else:
                 await self._send({
@@ -344,6 +355,7 @@ class WebSocketCallback:
                     "name": name,
                     "preview": preview,
                     "tool_call_id": tool_call_id,
+                    "display_name": display_name,
                 })
 
         elif kind == "team_delegate":

@@ -16,6 +16,7 @@ from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
+from lazyclaw.runtime.turn_markers import BACKGROUND_TURN_PREFIXES
 from lazyclaw.runtime.events import (
     FAST_DISPATCH, INSTANT_COMMAND,
     HELP_NEEDED, HELP_RESPONSE,
@@ -113,7 +114,9 @@ def _is_meta_question(text: str | None) -> bool:
 # Message prefixes the daemon stamps on heartbeat-lane turns. Such turns drive
 # the BACKGROUND browser lane (their own tab) instead of the user's visible
 # tab, so a watcher/cron browser action can't steal/block the foreground.
-_BACKGROUND_TURN_PREFIXES = ("[WATCHER:", "[JOB:", "[REMINDER")
+# Single source of truth lives in runtime/turn_markers.py — the gateway
+# history endpoint uses the same tuple to tag cron rows (kind: "cron").
+_BACKGROUND_TURN_PREFIXES = BACKGROUND_TURN_PREFIXES
 
 # Non-idempotent generators / actions that must NEVER be served from the
 # per-turn duplicate-call cache. Each call must re-read the live page or
@@ -5219,12 +5222,25 @@ class Agent:
                                     "Hallucination cap reached (%d retries on %r) — bailing",
                                     _halluc_retries, _first_bad,
                                 )
+                                # Recover the failed call's id so clients can
+                                # settle the matching tool_call bubble — the
+                                # dropped calls are still on response.tool_calls
+                                # (this branch never reassigned `response`).
+                                _first_bad_id = next(
+                                    (
+                                        _btc.id
+                                        for _btc in response.tool_calls
+                                        if _btc.name == _first_bad
+                                    ),
+                                    None,
+                                )
                                 await cb.on_event(AgentEvent(
                                     "tool_result",
                                     f"Bailed: tool {_first_bad!r} does not exist",
                                     {"reason": "hallucination_cap",
                                      "requested_tool": _first_bad,
-                                     "retries": _halluc_retries},
+                                     "retries": _halluc_retries,
+                                     "tool_call_id": _first_bad_id},
                                 ))
                                 await cb.on_event(AgentEvent("done", _bail_msg, {}))
                                 if self._team_lead and _fg_task_id:
@@ -6408,6 +6424,9 @@ class Agent:
                                     "tool": tc.name,
                                     "display_name": _display,
                                     "tool_call_id": tc.id,
+                                    # Short preview for live clients (see the
+                                    # normal-path emit below).
+                                    "result": _result_str[:200],
                                 },
                             ))
                         else:
@@ -6441,6 +6460,13 @@ class Agent:
                                 "tool": tc.name,
                                 "display_name": _display,
                                 "tool_call_id": tc.id,
+                                # Short preview so live clients can render
+                                # the outcome (chat_ws forwards it as
+                                # `preview`, capped again at 200 there).
+                                "result": (
+                                    result if isinstance(result, str)
+                                    else str(result)
+                                )[:200],
                             },
                         ))
 

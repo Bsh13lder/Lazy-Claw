@@ -19,12 +19,17 @@ from lazyclaw.runtime.session_resolver import (
     get_primary_session_id,
     invalidate_primary_session,
 )
+from lazyclaw.runtime.turn_markers import BACKGROUND_TURN_PREFIXES
+from lazyclaw.skills.tool_namespace import bare_tool_name
 
 logger = logging.getLogger(__name__)
 
 _config = load_config()
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# Cap for the tool-result preview joined onto history tool-call entries.
+_TOOL_RESULT_PREVIEW_CHARS = 500
 
 
 def _extract_tool_calls(metadata_raw: str | None) -> list | None:
@@ -49,6 +54,47 @@ def _extract_tool_calls(metadata_raw: str | None) -> list | None:
         tool_calls = meta.get("tool_calls")
         return tool_calls if isinstance(tool_calls, list) else None
     return None
+
+
+def _enrich_tool_calls(tool_calls: list, tool_results: dict) -> list:
+    """Read-time enrichment of stored tool-call entries (retroactive —
+    heals every existing row without rewriting anything on disk).
+
+    Each well-formed entry gains:
+
+    * ``display`` — ``bare_tool_name(name)`` (strips the unstable
+      ``mcp_<server-uuid>_`` prefix; plain names pass through);
+    * ``result`` — the matching ``role="tool"`` row's content capped at
+      ``_TOOL_RESULT_PREVIEW_CHARS``, only when a match exists;
+    * ``status`` — ``"done"`` when a matching tool row exists on the
+      loaded page, else ``"unknown"``.
+
+    Fail-soft per entry: malformed entries (non-dict, junk ids) pass
+    through untouched — one bad row must never 500 the whole history.
+    Returns NEW dicts; the parsed input entries are never mutated.
+    """
+    enriched: list = []
+    for entry in tool_calls:
+        if not isinstance(entry, dict):
+            enriched.append(entry)
+            continue
+        try:
+            name = entry.get("name")
+            display = bare_tool_name(name) if isinstance(name, str) else name
+            tc_id = entry.get("id")
+            result = tool_results.get(tc_id) if isinstance(tc_id, str) else None
+            new_entry = {
+                **entry,
+                "display": display,
+                "status": "done" if result is not None else "unknown",
+            }
+            if result is not None:
+                new_entry["result"] = result[:_TOOL_RESULT_PREVIEW_CHARS]
+            enriched.append(new_entry)
+        except Exception:
+            logger.debug("Tool-call enrichment failed for entry", exc_info=True)
+            enriched.append(entry)
+    return enriched
 
 
 class CreateSessionRequest(BaseModel):
@@ -289,12 +335,28 @@ async def get_session_messages(
                 (user.id, session_id, limit),
             )
 
+        fetched = [
+            (r, decrypt_field(r[2], key) or "")
+            for r in await rows.fetchall()
+        ]
+
+        # tool_call_id → result text, from the role="tool" rows on this
+        # page (their `tool_name` column holds the originating
+        # tool_call_id — see agent.py's persistence loop). A result row
+        # outside the loaded page leaves its call entry status="unknown".
+        tool_results = {
+            r[3]: content
+            for r, content in fetched
+            if r[1] == "tool" and r[3]
+        }
+
         messages = []
-        for r in reversed(list(await rows.fetchall())):
-            content = decrypt_field(r[2], key) or ""
+        for r, content in reversed(fetched):
             metadata_raw = decrypt_field(r[4], key) if r[4] else None
 
             tool_calls = _extract_tool_calls(metadata_raw)
+            if tool_calls is not None:
+                tool_calls = _enrich_tool_calls(tool_calls, tool_results)
 
             msg = {
                 "id": r[0],
@@ -309,6 +371,11 @@ async def get_session_messages(
             # Every other row keeps its payload shape unchanged.
             if is_notification_card_metadata(metadata_raw):
                 msg["kind"] = "notification"
+            # Heartbeat-stamped internal turns ([JOB:/[WATCHER:/[REMINDER —
+            # see heartbeat/daemon.py) — tag so clients can label/collapse
+            # them. Content itself stays unchanged.
+            if r[1] == "user" and content.startswith(BACKGROUND_TURN_PREFIXES):
+                msg["kind"] = "cron"
             messages.append(msg)
 
     logger.debug(

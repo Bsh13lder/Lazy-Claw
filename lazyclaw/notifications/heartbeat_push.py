@@ -30,9 +30,11 @@ import logging
 from datetime import timedelta
 from typing import Any, Awaitable, Callable
 
+from lazyclaw.notifications.app_fanout import fan_out_app_ping
 from lazyclaw.notifications.channel import (
     get_notification_channel,
     resolve_admin_user_id,
+    should_send_chat,
     should_send_telegram,
 )
 from lazyclaw.notifications.feed_store import record_notification
@@ -102,15 +104,30 @@ async def deliver_heartbeat_push(
     # Notification Center is the source of truth for "what happened"; the
     # toggle controls Telegram loudness only (Spine, 2026-07-16). Only the
     # no-admin fail-open path skips the record.
+    rec: dict | None = None
     if admin_uid:
         try:
-            await record_notification(
+            rec = await record_notification(
                 config, admin_uid, kind, _derive_push_title(text), text,
                 dedup_key=dedup_key or _dedup_key(kind, text),
                 dedup_window=dedup_window,
             )
         except Exception:
             logger.warning("heartbeat push feed record failed", exc_info=True)
+
+    # App legs — persisted chat card + realtime WS frame — for app/both
+    # channels. Best-effort (fan_out_app_ping never raises); falls back to a
+    # synthetic notif dict when the feed record itself failed so an app-only
+    # user still sees the ping in chat.
+    if admin_uid and should_send_chat(channel):
+        notif = rec or {
+            "id": "",
+            "kind": kind,
+            "title": _derive_push_title(text),
+            "body": text,
+            "created_at": "",
+        }
+        await fan_out_app_ping(config, admin_uid, notif)
 
     if should_send_telegram(channel):
         await telegram_send()

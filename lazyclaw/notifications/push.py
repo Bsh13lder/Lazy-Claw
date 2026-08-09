@@ -25,7 +25,7 @@ def _derive_push_title(text: str) -> str:
 
 
 async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
-    """Resolve the notification channel and (best-effort) record to the feed.
+    """Resolve the notification channel, record the feed row, fan out app legs.
 
     Returns ``(send_telegram, delivered_as_app)``:
       * ``send_telegram`` — proceed with the real Telegram send.
@@ -33,13 +33,20 @@ async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
         (return ``True`` from :func:`push_telegram`) even though Telegram was
         skipped. Lets app-only mode work with Telegram fully unconfigured.
 
+    The durable feed row is recorded ALWAYS, regardless of the channel
+    toggle — the Notification Center is the source of truth for "what
+    happened" (Spine contract, 2026-07-16; this funnel previously gated the
+    record on ``should_record_feed`` and dropped telegram-mode pushes from
+    the feed). The toggle routes loudness only: Telegram send vs the in-chat
+    card + realtime frame for ``app``/``both``.
+
     Any failure degrades to legacy Telegram-only behaviour.
     """
     try:
         from lazyclaw.notifications.channel import (
             get_notification_channel,
             resolve_admin_user_id,
-            should_record_feed,
+            should_send_chat,
             should_send_telegram,
         )
 
@@ -48,24 +55,42 @@ async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
             return True, False  # can't resolve owner → legacy Telegram path
         channel = await get_notification_channel(config, admin_uid)
 
-        if should_record_feed(channel):
-            try:
-                from lazyclaw.notifications.feed_store import (
-                    record_notification,
-                    strip_markdown,
-                )
+        # Skill pushes are Markdown-formatted for Telegram; the feed/chat
+        # render verbatim, so flatten it here (record_notification's choke
+        # point only strips HTML — Markdown stripping is opt-in because it
+        # can mangle non-Markdown content).
+        rec = None
+        plain = text
+        try:
+            from lazyclaw.notifications.feed_store import (
+                record_notification,
+                strip_markdown,
+            )
 
-                # Skill pushes are Markdown-formatted for Telegram; the feed
-                # renders verbatim, so flatten it here (record_notification's
-                # choke point only strips HTML — Markdown stripping is opt-in
-                # because it can mangle non-Markdown content).
-                plain = strip_markdown(text)
-                await record_notification(
-                    config, admin_uid, "push",
-                    _derive_push_title(plain), plain,
-                )
+            plain = strip_markdown(text)
+            rec = await record_notification(
+                config, admin_uid, "push",
+                _derive_push_title(plain), plain,
+            )
+        except Exception:
+            logger.warning("push_telegram feed record failed", exc_info=True)
+
+        if should_send_chat(channel):
+            try:
+                from lazyclaw.notifications.app_fanout import fan_out_app_ping
+
+                notif = rec or {
+                    "id": "",
+                    "kind": "push",
+                    "title": _derive_push_title(plain),
+                    "body": plain,
+                    "created_at": "",
+                }
+                await fan_out_app_ping(config, admin_uid, notif)
             except Exception:
-                logger.warning("push_telegram feed record failed", exc_info=True)
+                logger.debug(
+                    "push_telegram app fan-out failed", exc_info=True,
+                )
 
         send_tg = should_send_telegram(channel)
         return send_tg, (not send_tg)
@@ -170,9 +195,10 @@ async def push_telegram(
     the alert text. Pass ``None`` for plain-text pushes.
 
     Per-user channel routing (``telegram`` | ``app`` | ``both``) is applied
-    centrally here: ``app`` records the (full, untruncated) text to the in-app
-    notification feed and skips Telegram entirely (reporting delivered);
-    ``both`` records AND sends; ``telegram`` (default) is the legacy path.
+    centrally here. The (full, untruncated) text is recorded to the in-app
+    notification feed for EVERY channel; ``app`` additionally drops a chat
+    card + realtime frame and skips Telegram (reporting delivered); ``both``
+    does all of it; ``telegram`` (default) sends to Telegram only.
     """
     # Resolve the routing channel + record to the in-app feed BEFORE any
     # truncation so the feed keeps the full body. Best-effort: failures fall

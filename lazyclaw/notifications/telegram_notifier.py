@@ -135,6 +135,7 @@ class TelegramNotifier:
         # Center even for telegram-only users (Spine, 2026-07-16). Suppressed
         # events already returned above (text is falsy); no-config notifiers
         # never resolve an admin_uid → stay Telegram-only.
+        rec: dict | None = None
         if admin_uid is not None:
             try:
                 from lazyclaw.notifications.feed_store import (
@@ -149,7 +150,7 @@ class TelegramNotifier:
                 )
                 # admin_uid is only set inside the `self._config is not None`
                 # block above, so config is guaranteed present here.
-                await record_notification(
+                rec = await record_notification(
                     self._config, admin_uid, kind,  # type: ignore[arg-type]
                     _KIND_TITLES.get(kind, "Notification"),
                     _strip_html(text),
@@ -158,6 +159,18 @@ class TelegramNotifier:
             except Exception:
                 logger.warning(
                     "TelegramNotifier feed record failed", exc_info=True,
+                )
+
+        # App legs (persisted chat card + realtime WS frame). Must run
+        # BEFORE the Telegram gate below — `app` mode returns early there.
+        if admin_uid is not None:
+            try:
+                await self._fan_out_app_legs(
+                    event, rec, channel, admin_uid, text,
+                )
+            except Exception:
+                logger.debug(
+                    "TelegramNotifier app fan-out failed", exc_info=True,
                 )
 
         # Gate the Telegram send on the channel (app → skip).
@@ -185,6 +198,80 @@ class TelegramNotifier:
             )
         except Exception as exc:
             logger.debug("TelegramNotifier send failed: %s", exc)
+
+    # ── App-transport fan-out ────────────────────────────────────────
+
+    def _event_notif(self, event: Any, rec: dict | None, text: str) -> dict:
+        """Feed-row-shaped dict for the app legs (falls back off the event)."""
+        if rec:
+            return rec
+        kind = getattr(event, "kind", "info") or "info"
+        return {
+            "id": "",
+            "kind": kind,
+            "title": _KIND_TITLES.get(kind, "Notification"),
+            "body": _strip_html(text),
+            "created_at": "",
+        }
+
+    async def _fan_out_app_legs(
+        self,
+        event: Any,
+        rec: dict | None,
+        channel: str,
+        admin_uid: str,
+        text: str,
+    ) -> None:
+        """Chat card + realtime WS frame for app/both channels.
+
+        Routing per event kind:
+          * ``background_failed`` / ``help_needed`` → chat card + frame.
+            Their content never reaches chat history any other way (a failed
+            background turn persists no error reply; help requests are
+            transient).
+          * ``background_done`` → realtime frame ONLY. The background task
+            ran a full ``Agent.process_message`` turn (task_runner.py) which
+            already persisted its reply to the primary session — a chat card
+            would render the result twice.
+          * ``done`` → nothing. Interactive/cron turns persist their reply
+            via agent.py's post-loop writer and (for cron) the Prefixed
+            subclass publishes the Class-A live-hint frame instead.
+
+        Consolidation-duplicate suppression: events tagged
+        ``source == "brain"`` or carrying a ``fanout_group_id`` belong to a
+        TaskRunner brain fan-out whose consolidator turn writes ONE merged
+        reply into chat — those never get a chat card (defensive: brain-
+        source events are already dropped by ``_format`` upstream).
+        """
+        kind = getattr(event, "kind", "") or ""
+        if kind not in ("background_done", "background_failed", "help_needed"):
+            return
+
+        try:
+            from lazyclaw.notifications.channel import should_send_chat
+
+            if not should_send_chat(channel):
+                return
+        except Exception:
+            return
+
+        meta = getattr(event, "metadata", None)
+        meta = meta if isinstance(meta, dict) else {}
+        _is_fanout_member = (
+            meta.get("source") == "brain" or bool(meta.get("fanout_group_id"))
+        )
+
+        from lazyclaw.notifications.app_fanout import fan_out_app_ping
+
+        want_chat = (
+            kind in ("background_failed", "help_needed")
+            and not _is_fanout_member
+        )
+        await fan_out_app_ping(
+            self._config, admin_uid, self._event_notif(event, rec, text),
+            chat=want_chat,
+            realtime=True,
+        )
 
     async def on_approval_request(
         self, skill_name: str, arguments: dict,
@@ -397,6 +484,52 @@ class PrefixedTelegramNotifier(TelegramNotifier):
         )
         self._prefix = prefix
         self._icon = icon
+
+    async def _fan_out_app_legs(
+        self,
+        event: Any,
+        rec: dict | None,
+        channel: str,
+        admin_uid: str,
+        text: str,
+    ) -> None:
+        """Class-A live hint for heartbeat-fired completions.
+
+        Cron / reminder turns already persist their reply to
+        ``agent_messages`` (they run through Agent.process_message on the
+        lane queue), so a chat card would duplicate the reply. Instead,
+        publish ONE realtime frame — same schema as every notification
+        frame — so an open app knows to refresh its history. Title is the
+        job/reminder name (``self._prefix``); body is the short summary the
+        notifier already formatted. The frame id is the feed-row id when
+        the record succeeded (client history-merge may dedup on it).
+        """
+        kind = getattr(event, "kind", "") or ""
+        if kind in ("done", "background_done"):
+            meta = getattr(event, "metadata", None)
+            meta = meta if isinstance(meta, dict) else {}
+            title = (
+                self._prefix
+                or str(meta.get("name") or "")
+                or (rec or {}).get("title", "")
+            )
+            body = ((rec or {}).get("body") or _strip_html(text))[:500]
+            notif = {
+                "id": (rec or {}).get("id", ""),
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "created_at": (rec or {}).get("created_at", ""),
+            }
+            from lazyclaw.notifications.app_fanout import fan_out_app_ping
+
+            await fan_out_app_ping(
+                self._config, admin_uid, notif,
+                chat=False,
+                realtime=True,
+            )
+            return
+        await super()._fan_out_app_legs(event, rec, channel, admin_uid, text)
 
     def _format(self, event: Any) -> tuple[str | None, str | None]:
         text, parse_mode = super()._format(event)

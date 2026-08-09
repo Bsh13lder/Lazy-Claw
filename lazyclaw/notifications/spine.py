@@ -9,13 +9,16 @@ Replaces the historical scatter of four funnels (``dispatch.deliver``,
      source of truth for "what happened", independent of the Telegram toggle;
   2. sends to Telegram when the user's channel includes it and the notification
      isn't ``silent``;
-  3. fans out to the real-time / push / chat-card transports through optional
-     hooks that later pieces (ntfy push, WS notification frame, chat card) wire
-     in — absent hooks are silent no-ops, so this module ships standalone.
+  3. fans out to the real-time WS frame (:mod:`lazyclaw.notifications.realtime`)
+     and — for ``app``/``both`` channels or ``chat_card=True`` callers — to the
+     persisted chat card (:mod:`lazyclaw.notifications.chat_card`). Both legs
+     are imported lazily and degrade to silent no-ops if absent, so this
+     module still ships standalone.
 
-The ``telegram | app | both`` channel toggle now controls **loudness only**
-(Telegram + push). It NEVER gates the durable feed record — that is what makes
-the Notification Center trustworthy as the single place to see everything.
+The ``telegram | app | both`` channel toggle controls **loudness routing**
+(Telegram send vs in-chat card). It NEVER gates the durable feed record — that
+is what makes the Notification Center trustworthy as the single place to see
+everything.
 
 Fail-open: any transport error is swallowed and logged. A producer must never
 crash because a notification could not be delivered.
@@ -28,7 +31,9 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from lazyclaw.notifications.channel import (
+    DEFAULT_CHANNEL,
     get_notification_channel,
+    should_send_chat,
     should_send_telegram,
 )
 from lazyclaw.notifications.feed_store import record_notification
@@ -176,10 +181,20 @@ async def notify(
             "repeat_count": 1,
         }
 
+    # Resolve the channel ONCE — it gates Telegram loudness AND the
+    # chat-card leg below. Fail-open to the legacy Telegram-only default.
+    channel = DEFAULT_CHANNEL
+    try:
+        channel = await get_notification_channel(config, user_id)
+    except Exception:
+        logger.debug(
+            "notify: channel resolve failed; defaulting telegram",
+            exc_info=True,
+        )
+
     telegram_sent = False
     if not silent and telegram:
         try:
-            channel = await get_notification_channel(config, user_id)
             if should_send_telegram(channel):
                 text = telegram_text or (
                     f"{title}\n{body}".strip() if title else body
@@ -196,7 +211,9 @@ async def notify(
 
     if not silent:
         await _fan_out_realtime(config, user_id, rec)
-        if chat_card:
+        # Chat card: channel-driven (app / both), or forced by the caller's
+        # ``chat_card=True`` — the param can only turn the leg ON, never off.
+        if chat_card or should_send_chat(channel):
             await _fan_out_chat_card(config, user_id, rec)
 
     return Notification(

@@ -14,6 +14,7 @@ from lazyclaw.crypto.encryption import decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.gateway.auth import User, get_current_user
+from lazyclaw.memory.chat_message_store import is_notification_card_metadata
 from lazyclaw.runtime.session_resolver import (
     get_primary_session_id,
     invalidate_primary_session,
@@ -295,14 +296,20 @@ async def get_session_messages(
 
             tool_calls = _extract_tool_calls(metadata_raw)
 
-            messages.append({
+            msg = {
                 "id": r[0],
                 "role": r[1],
                 "content": content,
                 "tool_name": r[3],
                 "tool_calls": tool_calls,
                 "created_at": r[5],
-            })
+            }
+            # Notification chat cards (chat_card leg of the spine) carry a
+            # metadata marker — expose it so clients can style the row.
+            # Every other row keeps its payload shape unchanged.
+            if is_notification_card_metadata(metadata_raw):
+                msg["kind"] = "notification"
+            messages.append(msg)
 
     logger.debug(
         "[route:chat] GET session messages id=%s user=%s limit=%d paged=%s -> count=%d",

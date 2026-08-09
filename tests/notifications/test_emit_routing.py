@@ -4,8 +4,8 @@ Funnel 1: lazyclaw.notifications.push.push_telegram (direct skill/heartbeat path
 Funnel 2: lazyclaw.notifications.telegram_notifier.TelegramNotifier.on_event
           (AgentCallback path)
 
-Both must: record to the feed for app/both, skip the Telegram send for app,
-and leave the feed untouched for telegram. No Telegram token is configured in
+Both must: record the durable feed row for EVERY channel (spine contract),
+and skip the Telegram send for app. No Telegram token is configured in
 these tests, so the real send path is naturally inert — we assert on the feed
 side + the gating outcome.
 """
@@ -63,12 +63,14 @@ async def test_push_app_records_and_skips_telegram(cfg):
     assert feed["notifications"][0]["kind"] == "push"
 
 
-async def test_push_telegram_only_records_nothing(cfg):
-    # Default channel is telegram. No token configured → returns False,
-    # and crucially nothing lands in the feed.
+async def test_push_telegram_only_still_records_feed(cfg):
+    # Default channel is telegram. No token configured → returns False, but
+    # the durable feed row is recorded ALWAYS (Spine contract, 2026-07-16 —
+    # this funnel used to gate the record on the channel toggle; that gap is
+    # closed: the toggle routes loudness only).
     sent = await push_telegram(cfg, "telegram-only message")
     assert sent is False
-    assert await _feed_count(cfg) == 0
+    assert await _feed_count(cfg) == 1
 
 
 async def test_push_both_records_feed(cfg):

@@ -51,6 +51,16 @@ def should_record_feed(channel: str) -> bool:
     return normalize_channel(channel) in ("app", "both")
 
 
+def should_send_chat(channel: str) -> bool:
+    """Pure gating decision: does this channel drop pings into the chat?
+
+    ``app`` / ``both`` users get proactive pings as persisted chat-card
+    messages (+ realtime WS frames) in their primary session — see
+    :mod:`lazyclaw.notifications.chat_card`.
+    """
+    return normalize_channel(channel) in ("app", "both")
+
+
 async def resolve_admin_user_id(config: Config) -> str | None:
     """Resolve the admin user id for a server-originated notification.
 

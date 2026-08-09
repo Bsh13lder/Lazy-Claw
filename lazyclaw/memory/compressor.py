@@ -18,6 +18,7 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage
+from lazyclaw.memory.chat_message_store import is_notification_card_metadata
 from lazyclaw.memory.classifier import classify_message
 from lazyclaw.memory.metadata_codec import decode_tool_metadata
 from lazyclaw.memory.summarizer import summarize_chunk
@@ -163,12 +164,18 @@ async def compress_history(
     if len(raw_messages) <= WINDOW_SIZE:
         decrypted = []
         for msg_id, role, content, tool_name, metadata in raw_messages:
+            metadata = decode_tool_metadata(metadata, key)
+            # Notification cards are UI-only rows (chat_card leg of the
+            # notification spine). They must NEVER enter the LLM context —
+            # the brain would re-read the ping as something it previously
+            # said (documented history-pollution incident class).
+            if is_notification_card_metadata(metadata):
+                continue
             try:
                 text = decrypt(content, key) if content.startswith("enc:") else content
             except Exception:
                 logger.warning("Failed to decrypt message %s, skipping", msg_id)
                 text = "[decryption error]"
-            metadata = decode_tool_metadata(metadata, key)
             decrypted.append({
                 "id": msg_id, "role": role, "content": text,
                 "tool_name": tool_name, "metadata": metadata,
@@ -182,12 +189,16 @@ async def compress_history(
     # Full path: decrypt all messages for compression
     decrypted = []
     for msg_id, role, content, tool_name, metadata in raw_messages:
+        metadata = decode_tool_metadata(metadata, key)
+        # UI-only notification cards: excluded BEFORE the window split, so
+        # they can't be baked into the older-chunk summary either.
+        if is_notification_card_metadata(metadata):
+            continue
         try:
             text = decrypt(content, key) if content.startswith("enc:") else content
         except Exception:
             logger.warning("Failed to decrypt message %s, skipping", msg_id)
             text = "[decryption error]"
-        metadata = decode_tool_metadata(metadata, key)
         decrypted.append({
             "id": msg_id, "role": role, "content": text,
             "tool_name": tool_name, "metadata": metadata,

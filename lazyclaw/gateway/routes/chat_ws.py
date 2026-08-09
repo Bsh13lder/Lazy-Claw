@@ -864,6 +864,40 @@ async def chat_websocket(ws: WebSocket):
 
     task_bus_task = asyncio.create_task(_task_event_pump())
 
+    # Forward proactive-notification frames from the per-user notification
+    # bus (lazyclaw.notifications.realtime — the spine's realtime leg) so an
+    # open app sees pings live. Frame contract (mobile builds against it):
+    #   {"type": "notification", "id", "kind", "title", "body", "created_at"}
+    # Frames are UI-only — they never enter LLM context; the durable copies
+    # are the feed row + (app/both channels) the persisted chat card.
+    async def _notification_pump() -> None:
+        from lazyclaw.notifications import realtime as notification_bus
+
+        # Initial paint: replay recent frames (age-bounded) so a reconnect
+        # inside the window still surfaces pings that fired while the
+        # socket was down. The client dedupes against history/feed by id.
+        try:
+            for evt in notification_bus.recent_events(
+                user.id, limit=10, max_age_s=notification_bus.MAX_AGE_S,
+            ):
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(evt.to_frame())
+        except Exception:
+            logger.debug("Initial notification paint failed", exc_info=True)
+        try:
+            async for evt in notification_bus.subscribe(user.id):
+                if ws.client_state != WebSocketState.CONNECTED:
+                    return
+                try:
+                    await ws.send_json(evt.to_frame())
+                except Exception:
+                    logger.debug("notification frame send failed", exc_info=True)
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    notification_bus_task = asyncio.create_task(_notification_pump())
+
     async def _maybe_append_correction(
         user_id: str,
         source: str,
@@ -1200,3 +1234,4 @@ async def chat_websocket(ws: WebSocket):
             t.cancel()
         bus_task.cancel()
         task_bus_task.cancel()
+        notification_bus_task.cancel()

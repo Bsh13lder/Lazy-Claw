@@ -157,7 +157,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
     # Fetch day's messages
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT role, content, created_at FROM agent_messages "
+            "SELECT role, content, created_at, metadata FROM agent_messages "
             "WHERE user_id = ? AND date(created_at) = ? ORDER BY created_at",
             (user_id, date),
         )
@@ -167,11 +167,22 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         return "No conversations found for this date."
 
     # Decrypt and format messages
+    from lazyclaw.memory.chat_message_store import is_notification_card_metadata
+    from lazyclaw.memory.metadata_codec import decode_tool_metadata
+
     conversation_lines = []
     for r in results:
         role = r[0]
+        # Skip UI-only notification cards (chat_card leg of the spine) —
+        # proactive pings are not conversation and must not be summarized
+        # into the daily log the brain later reads as its own history.
+        if is_notification_card_metadata(decode_tool_metadata(r[3], key)):
+            continue
         content = decrypt_field(r[1], key)
         conversation_lines.append(f"[{role}]: {content}")
+
+    if not conversation_lines:
+        return "No conversations found for this date."
 
     conversation_text = "\n".join(conversation_lines[:100])  # Cap at 100 messages
 

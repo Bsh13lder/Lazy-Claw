@@ -89,6 +89,60 @@ void main() {
     expect(tr.toolCallId, isNull);
   });
 
+  // ── display_name on tool frames (2026-08 server contract) ─────────────────
+
+  test('tool_call carries display_name when present', () {
+    final f = parseServerFrame(
+            '{"type":"tool_call","name":"web_search","display_name":"Searching the web","args":{"q":"x"},"tool_call_id":"tc1"}')
+        as ToolCallFrame;
+    expect(f.displayName, 'Searching the web');
+    expect(f.name, 'web_search');
+  });
+
+  test('tool_call without display_name yields null (old server, no regression)',
+      () {
+    final f = parseServerFrame('{"type":"tool_call","name":"web_search"}')
+        as ToolCallFrame;
+    expect(f.displayName, isNull);
+  });
+
+  test('tool_call display_name tolerates odd types and blanks, never throws',
+      () {
+    // Wrong type must not blow up the whole frame into UnknownFrame.
+    final odd =
+        parseServerFrame('{"type":"tool_call","name":"x","display_name":7}');
+    expect(odd, isA<ToolCallFrame>());
+    expect((odd as ToolCallFrame).displayName, isNull);
+
+    final blank = parseServerFrame(
+        '{"type":"tool_call","name":"x","display_name":"   "}') as ToolCallFrame;
+    expect(blank.displayName, isNull, reason: 'blank degrades to null');
+
+    final padded = parseServerFrame(
+            '{"type":"tool_call","name":"x","display_name":"  Browsing  "}')
+        as ToolCallFrame;
+    expect(padded.displayName, 'Browsing');
+  });
+
+  test('tool_result carries display_name and a real preview', () {
+    final f = parseServerFrame(
+            '{"type":"tool_result","name":"web_search","display_name":"Searching the web","preview":"found 3 results","tool_call_id":"tc1"}')
+        as ToolResultFrame;
+    expect(f.displayName, 'Searching the web');
+    expect(f.preview, 'found 3 results');
+  });
+
+  test('tool_result display_name tolerates absence and odd types', () {
+    final absent = parseServerFrame(
+        '{"type":"tool_result","name":"x","preview":"ok"}') as ToolResultFrame;
+    expect(absent.displayName, isNull);
+
+    final odd = parseServerFrame(
+        '{"type":"tool_result","name":"x","display_name":[1]}');
+    expect(odd, isA<ToolResultFrame>());
+    expect((odd as ToolResultFrame).displayName, isNull);
+  });
+
   test('parses background_done frame', () {
     final f = parseServerFrame(
         '{"type":"background_done","name":"Send email","task_id":"t42","result":"Sent!","duration_ms":3200}');

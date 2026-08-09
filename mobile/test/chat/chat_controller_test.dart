@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/chat/chat_controller.dart';
+import 'package:lazyclaw_mobile/chat/chat_message.dart';
 import 'package:lazyclaw_mobile/chat/chat_socket.dart';
-import 'package:lazyclaw_mobile/chat/usage_info.dart';
 import 'package:lazyclaw_mobile/chat/ws_frames.dart';
 
 void main() {
@@ -596,6 +596,123 @@ void main() {
     final bubble = c.messages.lastWhere((m) => m.agentActivities.isNotEmpty);
     expect(bubble.agentActivities.single.done, isTrue);
     expect(bubble.agentActivities.single.currentTool, isNull);
+  });
+
+  // ── Tool chips: status lifecycle + off-last matching + terminal settling ──
+
+  test('tool_call starts a running chip; tool_result settles it done', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('web_search', {'q': 'x'}, 'tc1',
+        displayName: 'Searching the web'));
+    var chip = c.messages.last.toolActivities.single;
+    expect(chip.status, ToolStatus.running);
+    expect(chip.displayName, 'Searching the web');
+    expect(chip.args, {'q': 'x'});
+
+    c.onFrame(const ToolResultFrame('web_search', 'found 3', 'tc1'));
+    chip = c.messages.last.toolActivities.single;
+    expect(chip.status, ToolStatus.done);
+    expect(chip.resultPreview, 'found 3');
+  });
+
+  test('DoneFrame interrupts chips that never got a result', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('browser', {}, 'tc1'));
+    c.onFrame(const ToolCallFrame('web_search', {}, 'tc2'));
+    c.onFrame(const ToolResultFrame('web_search', 'ok', 'tc2'));
+    c.onFrame(const DoneFrame('reply', null));
+
+    final chips = c.messages.last.toolActivities;
+    expect(chips[0].status, ToolStatus.interrupted,
+        reason: 'no result before the terminal frame');
+    expect(chips[1].status, ToolStatus.done,
+        reason: 'a settled chip is never demoted');
+  });
+
+  test('ErrorFrame interrupts still-running chips', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('browser', {}, 'tc1'));
+    c.onFrame(const ErrorFrame('boom'));
+    expect(c.messages.last.toolActivities.single.status,
+        ToolStatus.interrupted);
+    expect(c.messages.last.streaming, isFalse);
+  });
+
+  test('CancelledFrame interrupts still-running chips', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('browser', {}, 'tc1'));
+    c.onFrame(const CancelledFrame());
+    expect(c.messages.last.toolActivities.single.status,
+        ToolStatus.interrupted);
+    expect(c.messages.last.streaming, isFalse);
+  });
+
+  test('tool_result lands on the right bubble when a plan row interleaves',
+      () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('web_search', {}, 'tc9'));
+    c.onFrame(const PlanPendingFrame('Do A', ['A'])); // messages.last = plan
+    c.onFrame(const ToolResultFrame('web_search', 'found', 'tc9'));
+
+    final bubble = c.messages.firstWhere((m) => m.toolActivities.isNotEmpty);
+    expect(bubble.toolActivities.single.status, ToolStatus.done);
+    expect(bubble.toolActivities.single.resultPreview, 'found');
+  });
+
+  test('tool_result skips a trailing bg_task card and settles the chip', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('browser', {}, 'tcA'));
+    c.onFrame(const BackgroundDoneFrame('cron job', 't3', 'ok', null));
+    c.onFrame(const ToolResultFrame('browser', 'page loaded', 'tcA'));
+
+    final bubble = c.messages.firstWhere((m) => m.toolActivities.isNotEmpty);
+    expect(bubble.toolActivities.single.status, ToolStatus.done);
+    expect(bubble.toolActivities.single.resultPreview, 'page loaded');
+  });
+
+  test('tool_result without id falls back to the newest running chip by name',
+      () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('browser', {}, null));
+    c.onFrame(const ToolResultFrame('browser', 'done!', null));
+    expect(c.messages.last.toolActivities.single.status, ToolStatus.done);
+    expect(c.messages.last.toolActivities.single.resultPreview, 'done!');
+  });
+
+  test('tool_result with an unknown id is a safe no-op', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    expect(() => c.onFrame(const ToolResultFrame('x', 'y', 'nope')),
+        returnsNormally);
+    expect(c.messages.last.toolActivities, isEmpty);
+  });
+
+  test('watcher turn with only tool chips stops spinning once all settle', () {
+    final c = ChatReducer();
+    // No user send — a watcher-driven turn opens with a bare tool call.
+    c.onFrame(const ToolCallFrame('watch_check', {}, 'w1'));
+    expect(c.messages.single.streaming, isTrue);
+
+    c.onFrame(const ToolResultFrame('watch_check', 'no change', 'w1'));
+    expect(c.messages.single.streaming, isFalse,
+        reason: 'all chips settled + no foreground turn ⇒ spinner clears');
+    expect(c.messages.single.toolActivities.single.status, ToolStatus.done);
+  });
+
+  test('foreground turn keeps streaming after a chip settles mid-turn', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const ToolCallFrame('web_search', {}, 'tc1'));
+    c.onFrame(const ToolResultFrame('web_search', 'ok', 'tc1'));
+    expect(c.messages.last.streaming, isTrue,
+        reason: 'the done frame owns foreground finalization');
   });
 
   // ── Cancel / streaming state ───────────────────────────────────────────────

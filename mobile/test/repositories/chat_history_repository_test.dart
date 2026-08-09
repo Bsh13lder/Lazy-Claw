@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lazyclaw_mobile/chat/chat_message.dart';
 import 'package:lazyclaw_mobile/repositories/chat_history_repository.dart';
 
 // ── Fake transport ─────────────────────────────────────────────────────────
@@ -43,10 +44,69 @@ void main() {
       expect(m.streaming, isFalse);
     });
 
-    test('turns tool_calls into done ToolActivity chips (result → preview)', () {
+    // Real server contract (2026-08): tool_calls entries are
+    // {id, name, display, arguments, result?, status} with
+    // status ∈ {"done","unknown"} and result ≤500 chars when present.
+    test('maps real-contract tool_calls entries onto settled chips', () {
       final m = mapApiMessage({
         'role': 'assistant',
         'content': 'searched',
+        'tool_calls': [
+          {
+            'id': 'tc-1',
+            'name': 'web_search',
+            'display': 'Searching the web',
+            'arguments': {'query': 'x'},
+            'result': 'found 3',
+            'status': 'done',
+          },
+          {
+            'id': 'tc-2',
+            'name': 'browser',
+            'display': 'Browsing',
+            'arguments': {'url': 'https://example.com'},
+            'status': 'unknown',
+          },
+        ],
+      });
+      expect(m!.toolActivities, hasLength(2));
+
+      final done = m.toolActivities[0];
+      expect(done.name, 'web_search');
+      expect(done.displayName, 'Searching the web');
+      expect(done.toolCallId, 'tc-1');
+      expect(done.args, {'query': 'x'});
+      expect(done.resultPreview, 'found 3');
+      expect(done.status, ToolStatus.done);
+
+      final unknown = m.toolActivities[1];
+      expect(unknown.status, ToolStatus.unknown);
+      expect(unknown.resultPreview, isNull);
+      expect(unknown.args, {'url': 'https://example.com'});
+    });
+
+    test('history chips NEVER spin — any non-done status maps to unknown', () {
+      final m = mapApiMessage({
+        'role': 'assistant',
+        'content': 'x',
+        'tool_calls': [
+          // Even a bogus/hostile "running" from the wire must not spin.
+          {'name': 'browser', 'arguments': {}, 'status': 'running'},
+          {'name': 'web_search', 'arguments': {}},
+          {'name': 'recall_memories', 'arguments': {}, 'status': 'weird'},
+        ],
+      });
+      for (final t in m!.toolActivities) {
+        expect(t.status, isNot(ToolStatus.running),
+            reason: 'history mapping must never produce a running chip');
+      }
+    });
+
+    test('legacy args key still maps; result-without-status counts as done',
+        () {
+      final m = mapApiMessage({
+        'role': 'assistant',
+        'content': 'x',
         'tool_calls': [
           {
             'name': 'web_search',
@@ -55,9 +115,25 @@ void main() {
           },
         ],
       });
-      expect(m!.toolActivities, hasLength(1));
-      expect(m.toolActivities.first.name, 'web_search');
-      expect(m.toolActivities.first.resultPreview, 'found 3');
+      final t = m!.toolActivities.single;
+      expect(t.args, {'q': 'x'}, reason: 'old servers send args, not arguments');
+      expect(t.resultPreview, 'found 3');
+      expect(t.status, ToolStatus.done,
+          reason: 'a carried result implies the call finished');
+    });
+
+    test('user rows carry kind == cron for scheduled-job rows', () {
+      final m = mapApiMessage({
+        'role': 'user',
+        'content': '[JOB:daily-briefing] Run the morning briefing',
+        'id': 'u1',
+        'kind': 'cron',
+      });
+      expect(m!.kind, 'cron');
+      expect(m.content, '[JOB:daily-briefing] Run the morning briefing');
+
+      final plain = mapApiMessage({'role': 'user', 'content': 'hi'});
+      expect(plain!.kind, isNull, reason: 'no regression pre-server-deploy');
     });
 
     test('drops empty assistant rows with no text and no tools', () {

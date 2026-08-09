@@ -58,7 +58,12 @@ class ToolCallFrame extends ServerFrame {
   final String name;
   final Map<String, dynamic> args;
   final String? toolCallId;
-  const ToolCallFrame(this.name, this.args, this.toolCallId);
+
+  /// Human-friendly label (`display_name`, 2026-08 contract). Null on old
+  /// servers — the UI falls back to [name].
+  final String? displayName;
+  const ToolCallFrame(this.name, this.args, this.toolCallId,
+      {this.displayName});
 }
 
 /// Tool returned a result (foreground).
@@ -66,7 +71,12 @@ class ToolResultFrame extends ServerFrame {
   final String name;
   final String preview;
   final String? toolCallId;
-  const ToolResultFrame(this.name, this.preview, this.toolCallId);
+
+  /// Human-friendly label (`display_name`, 2026-08 contract). Null on old
+  /// servers.
+  final String? displayName;
+  const ToolResultFrame(this.name, this.preview, this.toolCallId,
+      {this.displayName});
 }
 
 /// A background task completed successfully.
@@ -231,12 +241,14 @@ ServerFrame parseServerFrame(String raw) {
               ? Map<String, dynamic>.from(m['args'] as Map)
               : const {},
           m['tool_call_id'] as String?,
+          displayName: _optTrimmedString(m['display_name']),
         );
       case 'tool_result':
         return ToolResultFrame(
           (m['name'] as String?) ?? '',
           (m['preview'] as String?) ?? '',
           m['tool_call_id'] as String?,
+          displayName: _optTrimmedString(m['display_name']),
         );
       case 'background_done':
         return BackgroundDoneFrame(
@@ -399,6 +411,15 @@ String _taskSubject(Map m) =>
 /// Tolerant string coercion for a frame field: null → '', non-strings are
 /// stringified (server ids may arrive as ints), whitespace trimmed.
 String _stringField(Map m, String key) => m[key]?.toString().trim() ?? '';
+
+/// Tolerant OPTIONAL string: a non-string or blank value degrades to null
+/// (never throws — a bad cast here would swallow the whole frame into
+/// UnknownFrame via the outer catch).
+String? _optTrimmedString(dynamic v) {
+  if (v is! String) return null;
+  final t = v.trim();
+  return t.isEmpty ? null : t;
+}
 
 /// First non-empty string from [candidates], else null.
 String? _firstNonEmpty(List<dynamic> candidates) {

@@ -11,6 +11,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
 import 'activity_timeline.dart';
+import 'cron_row.dart';
 import 'tool_chip.dart';
 
 class ChatBubble extends StatelessWidget {
@@ -22,6 +23,13 @@ class ChatBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = m.role == 'user';
+    // Scheduled-job instruction rows (kind == 'cron') are system chatter,
+    // not something the user typed — render a compact centered pill instead
+    // of a genuine right-aligned user bubble. Rows without the kind field
+    // keep the normal bubble (old servers = no regression).
+    if (isUser && m.kind == 'cron') {
+      return CronSystemRow(content: m.content);
+    }
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Padding(

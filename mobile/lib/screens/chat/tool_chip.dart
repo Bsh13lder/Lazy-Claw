@@ -1,12 +1,20 @@
 /// Polished tool-activity chip for the Chat screen.
 ///
-/// Shows the tool name with a running/done icon. When done, tapping expands
-/// an inline result preview. All styling from design tokens.
+/// Shows the tool's display name (registry-id fallback) with a status glyph:
+/// spinner while running, check when done, error icon on failure, muted
+/// schedule icon for interrupted/unknown. A running chip that receives no
+/// update for 3 minutes swaps its spinner for the interrupted look (mirrors
+/// ActivityTimelineRow's stall guard) so a lost result can't spin forever.
+/// Tapping ANY chip opens the tool detail bottom sheet. All styling from
+/// design tokens.
 library;
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
+import 'tool_detail_sheet.dart';
 
 class ToolChip extends StatefulWidget {
   const ToolChip({super.key, required this.activity});
@@ -17,23 +25,75 @@ class ToolChip extends StatefulWidget {
 }
 
 class _ToolChipState extends State<ToolChip> {
-  bool _expanded = false;
+  /// A running chip with no update for [_stallAfter] is likely a dropped or
+  /// replayed frame — render it interrupted instead of live-forever.
+  bool _stalled = false;
+  Timer? _stallTimer;
+
+  static const Duration _stallAfter = Duration(minutes: 3);
+
+  bool get _running => widget.activity.status == ToolStatus.running;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_running) _armStallTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant ToolChip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final a = widget.activity;
+    final o = oldWidget.activity;
+    final contentChanged = a.status != o.status ||
+        a.resultPreview != o.resultPreview ||
+        a.name != o.name;
+    if (!contentChanged) return;
+    // Fresh content — the chip is alive again; restart the stall clock.
+    _stallTimer?.cancel();
+    _stalled = false;
+    if (_running) _armStallTimer();
+  }
+
+  void _armStallTimer() {
+    _stallTimer = Timer(_stallAfter, () {
+      if (mounted) setState(() => _stalled = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _stallTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Status used for rendering: a stalled running chip takes the interrupted
+  /// look without mutating the model (a late result can still settle it).
+  ToolStatus get _effectiveStatus =>
+      _running && _stalled ? ToolStatus.interrupted : widget.activity.status;
 
   @override
   Widget build(BuildContext context) {
     final t = widget.activity;
-    final isDone = t.resultPreview != null;
-
-    final bgColor = isDone
-        ? AppColors.success.withValues(alpha: 0.12)
+    final status = _effectiveStatus;
+    final fg = toolStatusColor(status);
+    final settledTint =
+        status == ToolStatus.done || status == ToolStatus.error;
+    final bgColor = settledTint
+        ? fg.withValues(alpha: 0.12)
         : AppColors.bgSurfaceElevated;
-    final fgColor = isDone ? AppColors.success : AppColors.textMuted;
-    final borderColor = isDone
-        ? AppColors.success.withValues(alpha: 0.30)
+    final borderColor = settledTint
+        ? fg.withValues(alpha: 0.30)
         : AppColors.borderSubtle;
 
     return GestureDetector(
-      onTap: isDone ? () => setState(() => _expanded = !_expanded) : null,
+      // Always tappable — running, settled and unknown chips all open the
+      // detail sheet (name, status, arguments, result).
+      onTap: () => showToolDetailSheet(
+        context,
+        widget.activity,
+        effectiveStatus: _effectiveStatus,
+      ),
       child: AnimatedContainer(
         duration: AppMotion.fast,
         curve: AppMotion.curve,
@@ -46,57 +106,22 @@ class _ToolChipState extends State<ToolChip> {
           borderRadius: AppRadii.rPill,
           border: Border.all(color: borderColor),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Running spinner vs done check
-                if (!isDone)
-                  SizedBox(
-                    width: 11,
-                    height: 11,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.5,
-                      color: fgColor,
-                    ),
-                  )
-                else
-                  Icon(Icons.check_circle_outline, size: 12, color: fgColor),
-                const SizedBox(width: 5),
-                Text(
-                  t.name,
-                  style: AppText.caption.copyWith(
-                    color: fgColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (isDone && t.resultPreview!.isNotEmpty) ...[
-                  const SizedBox(width: 3),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 12,
-                    color: fgColor,
-                  ),
-                ],
-              ],
-            ),
-            if (_expanded &&
-                t.resultPreview != null &&
-                t.resultPreview!.isNotEmpty) ...[
-              const SizedBox(height: AppSpacing.xs),
-              Text(
-                t.resultPreview!,
-                style: AppText.caption.copyWith(
-                  color: AppColors.textSecondary,
-                  fontWeight: FontWeight.w400,
-                ),
-                maxLines: 5,
+            ToolStatusGlyph(status: status, color: fg),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                t.displayName ?? t.name,
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                style: AppText.caption.copyWith(
+                  color: fg,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ],
+            ),
           ],
         ),
       ),

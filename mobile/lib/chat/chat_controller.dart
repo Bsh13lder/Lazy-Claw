@@ -189,7 +189,8 @@ class ChatReducer {
         _foregroundActive = false;
         if (messages.isEmpty) return;
         final finalText = content.isNotEmpty ? content : _buf.toString();
-        _replaceLast(messages.last.copyWith(
+        // Terminal frame: a chip whose result never arrived must not spin on.
+        _replaceLast(messages.last.withRunningToolsInterrupted().copyWith(
           content: finalText,
           streaming: false,
           usage: usage ?? _pendingUsage,
@@ -217,6 +218,7 @@ class ChatReducer {
           return;
         }
         _replaceLast(messages.last
+            .withRunningToolsInterrupted()
             .copyWith(content: '⚠️ $message', streaming: false));
 
       case SendFailedFrame(:final message):
@@ -232,26 +234,43 @@ class ChatReducer {
       case CancelledFrame():
         _foregroundActive = false;
         if (messages.isEmpty) return;
-        _replaceLast(messages.last.copyWith(streaming: false));
+        _replaceLast(messages.last
+            .withRunningToolsInterrupted()
+            .copyWith(streaming: false));
 
       case ApprovalRequestFrame(:final requestId, :final skill):
         if (messages.isEmpty) return;
         _replaceLast(messages.last.withApproval(requestId, skill));
 
-      case ToolCallFrame(:final name, :final args, :final toolCallId):
+      case ToolCallFrame(
+          :final name,
+          :final args,
+          :final toolCallId,
+          :final displayName
+        ):
         // Attach the tool activity to the current streaming assistant bubble.
         // If no bubble exists yet, create one.
         _ensureStreamingBubble();
         final activity = ToolActivity(
           name: name,
+          displayName: displayName,
           args: args,
           toolCallId: toolCallId,
+          status: ToolStatus.running,
         );
         _replaceLast(messages.last.withToolCall(activity));
 
       case ToolResultFrame(:final name, :final preview, :final toolCallId):
         if (messages.isEmpty) return;
-        _replaceLast(messages.last.withToolResult(toolCallId, name, preview));
+        // The chip may not live on messages.last — a plan card or bg_task
+        // row can interleave mid-turn. Bounded reverse scan by tool_call_id
+        // (name-with-running fallback); unmatched results are dropped.
+        final idx = _findToolCallMessage(toolCallId, name);
+        if (idx == -1) return;
+        messages[idx] = messages[idx].withToolResult(toolCallId, name, preview);
+        // A background/watcher bubble whose last chip just settled must not
+        // keep spinning (guarded: never fires during a live foreground turn).
+        _settleBubbleIfActivitiesDone(idx);
 
       case BackgroundDoneFrame(:final name, :final taskId, :final result, :final durationMs):
         _addBgResult(BackgroundTaskResult(
@@ -513,19 +532,52 @@ class ChatReducer {
     return null;
   }
 
-  /// Bug 2: after a background/specialist terminal settles a row, clear the
-  /// host bubble's streaming spinner IFF it is an assistant bubble that is
-  /// still `streaming`, carries ≥1 activity rows, ALL of which are done/failed,
-  /// AND no foreground token turn is live. Belt-and-suspenders for dropped or
-  /// reconnect-lost `done` frames — the server consolidation `done` covers the
-  /// happy path; this keeps a phantom bg/watcher bubble from spinning forever.
+  /// How many recent messages the tool-result reverse scan covers — a plan
+  /// card or bg_task row can interleave between the chip's bubble and the
+  /// list tail, but a genuinely old chip should never be resurrected.
+  static const int _toolResultScanWindow = 12;
+
+  /// Index of the newest message carrying the tool chip a result frame
+  /// belongs to: exact [toolCallId] match wins; without one (or when the id
+  /// is unknown), the newest still-running chip with a matching name.
+  /// -1 when nothing matches within the window (the result is dropped).
+  int _findToolCallMessage(String? toolCallId, String name) {
+    var byName = -1;
+    var scanned = 0;
+    for (var i = messages.length - 1;
+        i >= 0 && scanned < _toolResultScanWindow;
+        i--, scanned++) {
+      final m = messages[i];
+      if (m.toolActivities.isEmpty) continue;
+      if (toolCallId != null &&
+          m.toolActivities.any((t) => t.toolCallId == toolCallId)) {
+        return i;
+      }
+      if (byName == -1 &&
+          m.toolActivities.any(
+              (t) => t.name == name && t.status == ToolStatus.running)) {
+        byName = i;
+      }
+    }
+    return byName;
+  }
+
+  /// Bug 2: after a background/specialist terminal settles a row (or a tool
+  /// result settles a chip), clear the host bubble's streaming spinner IFF it
+  /// is an assistant bubble that is still `streaming`, carries ≥1 activity
+  /// rows or tool chips, ALL of which are settled (agent rows done/failed,
+  /// tool chips not running), AND no foreground token turn is live.
+  /// Belt-and-suspenders for dropped or reconnect-lost `done` frames — the
+  /// server consolidation `done` covers the happy path; this keeps a phantom
+  /// bg/watcher bubble from spinning forever.
   void _settleBubbleIfActivitiesDone(int msgIdx) {
     if (_foregroundActive) return;
     if (msgIdx < 0 || msgIdx >= messages.length) return;
     final m = messages[msgIdx];
     if (m.role != 'assistant' || !m.streaming) return;
-    if (m.agentActivities.isEmpty) return;
+    if (m.agentActivities.isEmpty && m.toolActivities.isEmpty) return;
     if (!m.agentActivities.every((a) => a.done || a.failed)) return;
+    if (m.hasRunningTools) return;
     messages[msgIdx] = m.copyWith(streaming: false);
   }
 

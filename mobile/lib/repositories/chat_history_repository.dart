@@ -36,20 +36,23 @@ class ChatSessionInfo {
 /// [ChatMessage], or `null` for rows that shouldn't render as a bubble
 /// (bare `tool` / `system` rows, or empty assistant rows with no tools).
 ///
-/// Assistant `tool_calls` become [ToolActivity] chips — a finished tool call
-/// carries its `result`, so [ToolActivity.resultPreview] is set (renders as a
-/// "done" chip) rather than left null (which would imply still-running).
+/// Assistant `tool_calls` entries follow the 2026-08 contract
+/// `{id, name, display, arguments, result?, status}` with
+/// status ∈ {"done","unknown"} — mapped chips are NEVER running (a history
+/// chip has no live result stream, so a running one would spin forever).
+/// Legacy rows (`args` key, result-with-no-status) still map gracefully.
 ChatMessage? mapApiMessage(Map<String, dynamic> json) {
   final role = json['role']?.toString() ?? '';
   final content = json['content']?.toString() ?? '';
-  // Server row identity: id drives delta-merge dedup; kind == 'notification'
-  // marks proactive-ping rows (rendered with the bell treatment). Both are
-  // optional — old rows without them still render as plain bubbles.
+  // Server row identity: id drives delta-merge dedup; kind marks special
+  // rows — 'notification' on assistant rows (bell treatment) and 'cron' on
+  // user rows ([JOB:...] instruction rows rendered as a system pill). Both
+  // are optional — old rows without them still render as plain bubbles.
   final id = json['id']?.toString();
   final kind = json['kind']?.toString();
 
   if (role == 'user') {
-    return ChatMessage(role: 'user', content: content, id: id);
+    return ChatMessage(role: 'user', content: content, id: id, kind: kind);
   }
 
   if (role == 'assistant') {
@@ -58,13 +61,17 @@ ChatMessage? mapApiMessage(Map<String, dynamic> json) {
     for (final t in rawCalls) {
       if (t is! Map) continue;
       final tm = Map<String, dynamic>.from(t);
+      final rawArgs = tm['arguments'] ?? tm['args'];
       final result = tm['result'];
       activities.add(ToolActivity(
         name: tm['name']?.toString() ?? 'tool',
-        args: tm['args'] is Map
-            ? Map<String, dynamic>.from(tm['args'] as Map)
+        displayName: _optString(tm['display']),
+        toolCallId: _optString(tm['id']),
+        args: rawArgs is Map
+            ? Map<String, dynamic>.from(rawArgs)
             : const {},
         resultPreview: result?.toString(),
+        status: _historyToolStatus(tm['status'], hasResult: result != null),
       ));
     }
     // A row with neither text nor tools is noise — skip it.
@@ -81,6 +88,23 @@ ChatMessage? mapApiMessage(Map<String, dynamic> json) {
 
   // tool / system rows don't render as standalone bubbles.
   return null;
+}
+
+/// Status for a history chip: 'done' → done; a legacy row that carries a
+/// result but no status also counts as done (the call clearly finished).
+/// EVERYTHING else — 'unknown', absent, or even a bogus 'running' — maps to
+/// unknown, because a history chip must never spin.
+ToolStatus _historyToolStatus(dynamic raw, {required bool hasResult}) {
+  final s = raw?.toString();
+  if (s == 'done') return ToolStatus.done;
+  if (s == null && hasResult) return ToolStatus.done;
+  return ToolStatus.unknown;
+}
+
+/// Optional string: null / blank degrade to null, non-strings stringify.
+String? _optString(dynamic v) {
+  final s = v?.toString().trim();
+  return (s == null || s.isEmpty) ? null : s;
 }
 
 // ── Transport seam ─────────────────────────────────────────────────────────

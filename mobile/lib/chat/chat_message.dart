@@ -2,24 +2,57 @@ import 'usage_info.dart';
 
 export 'usage_info.dart';
 
+/// Lifecycle state of a tool-activity chip.
+///
+/// [running] is ONLY ever produced by a live `tool_call` frame — history
+/// mapping must never mint it (a history chip has no result stream to settle
+/// it, so a running history chip would spin forever). [interrupted] marks a
+/// chip whose result never arrived before the turn's terminal frame (done /
+/// error / cancelled). [unknown] marks history rows where the server could
+/// not tell whether the call finished.
+enum ToolStatus { running, done, error, interrupted, unknown }
+
 /// Represents a single tool activity entry attached to a message.
 class ToolActivity {
   final String name;
+
+  /// Human-friendly label from the server (`display` on history rows,
+  /// `display_name` on WS frames). Null on old servers — the UI falls back
+  /// to [name].
+  final String? displayName;
   final Map<String, dynamic> args;
   final String? toolCallId;
-  final String? resultPreview; // null = still in progress
+  final String? resultPreview;
+  final ToolStatus status;
+
   const ToolActivity({
     required this.name,
     required this.args,
+    this.displayName,
     this.toolCallId,
     this.resultPreview,
+    this.status = ToolStatus.running,
   });
 
+  /// Returns a settled copy carrying the tool result. Immutable — the
+  /// original instance is untouched.
   ToolActivity withResult(String preview) => ToolActivity(
         name: name,
+        displayName: displayName,
         args: args,
         toolCallId: toolCallId,
         resultPreview: preview,
+        status: ToolStatus.done,
+      );
+
+  /// Returns a copy with only [status] replaced.
+  ToolActivity withStatus(ToolStatus next) => ToolActivity(
+        name: name,
+        displayName: displayName,
+        args: args,
+        toolCallId: toolCallId,
+        resultPreview: resultPreview,
+        status: next,
       );
 }
 
@@ -323,17 +356,43 @@ class ChatMessage {
   ChatMessage withToolCall(ToolActivity activity) =>
       _clone(toolActivities: [...toolActivities, activity]);
 
-  /// Updates the most recent matching ToolActivity with a result preview.
+  /// Updates the most recent matching ToolActivity with a result preview
+  /// (which also settles its status to done).
   ChatMessage withToolResult(String? toolCallId, String name, String preview) {
     final updated = List<ToolActivity>.from(toolActivities);
-    // Find by toolCallId first, then fall back to last entry with matching name.
+    // Find by toolCallId first, then prefer the newest still-running entry
+    // with a matching name, then any entry with a matching name.
     int idx = toolCallId != null
         ? updated.lastIndexWhere((t) => t.toolCallId == toolCallId)
         : -1;
+    if (idx == -1) {
+      idx = updated.lastIndexWhere(
+          (t) => t.name == name && t.status == ToolStatus.running);
+    }
     if (idx == -1) idx = updated.lastIndexWhere((t) => t.name == name);
     if (idx != -1) {
       updated[idx] = updated[idx].withResult(preview);
     }
     return _clone(toolActivities: updated);
+  }
+
+  /// True when any tool chip is still marked running.
+  bool get hasRunningTools =>
+      toolActivities.any((t) => t.status == ToolStatus.running);
+
+  /// Returns a copy with every still-running tool chip marked interrupted —
+  /// terminal frames (done / error / cancelled) apply this so a chip whose
+  /// result never arrived can't spin forever. Settled chips are untouched;
+  /// returns `this` unchanged when nothing is running.
+  ChatMessage withRunningToolsInterrupted() {
+    if (!hasRunningTools) return this;
+    return _clone(
+      toolActivities: [
+        for (final t in toolActivities)
+          t.status == ToolStatus.running
+              ? t.withStatus(ToolStatus.interrupted)
+              : t,
+      ],
+    );
   }
 }

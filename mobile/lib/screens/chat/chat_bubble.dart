@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
 import 'activity_timeline.dart';
@@ -161,7 +162,7 @@ class _BubbleContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (isUser) {
-      return Text(
+      return SelectableText(
         m.content,
         style: AppText.body.copyWith(color: AppColors.textPrimary),
       );
@@ -173,12 +174,32 @@ class _BubbleContent extends StatelessWidget {
       return _NotificationContent(content: m.content);
     }
     // Assistant: markdown render. Show ellipsis when content is empty +
-    // not yet streaming (edge case).
+    // not yet streaming (edge case). Selectable while settled — selection
+    // spans inside a still-streaming bubble reset on every token repaint,
+    // so streaming bubbles stay plain until the turn finishes.
     final data = m.content.isEmpty && !m.streaming ? '…' : m.content;
     return MarkdownBody(
       data: data,
+      selectable: !m.streaming,
+      onTapLink: openChatLink,
       styleSheet: _assistantMarkdownStyle(),
     );
+  }
+}
+
+/// Opens a markdown link from a chat bubble in the external browser.
+/// Best-effort: malformed or unlaunchable URLs are ignored silently
+/// (chat content is model-generated — a broken href must never crash).
+Future<void> openChatLink(String text, String? href, String title) async {
+  if (href == null || href.trim().isEmpty) return;
+  try {
+    final uri = Uri.parse(href.trim());
+    if (!uri.hasScheme || !(uri.scheme == 'http' || uri.scheme == 'https' || uri.scheme == 'mailto' || uri.scheme == 'tel')) {
+      return;
+    }
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } catch (_) {
+    // Ignore — see doc comment.
   }
 }
 
@@ -213,6 +234,11 @@ MarkdownStyleSheet _assistantMarkdownStyle() => MarkdownStyleSheet(
       h2: AppText.title.copyWith(color: AppColors.textPrimary),
       h3: AppText.label.copyWith(color: AppColors.textPrimary),
       listBullet: AppText.body.copyWith(color: AppColors.accent),
+      a: AppText.body.copyWith(
+        color: AppColors.accent,
+        decoration: TextDecoration.underline,
+        decorationColor: AppColors.accent,
+      ),
     );
 
 /// Subtle distinct treatment for `kind == 'notification'` rows inside an
@@ -258,6 +284,8 @@ class _NotificationContent extends StatelessWidget {
           const SizedBox(height: AppSpacing.xs),
           MarkdownBody(
             data: body,
+            selectable: true,
+            onTapLink: openChatLink,
             styleSheet: _assistantMarkdownStyle(),
           ),
         ],

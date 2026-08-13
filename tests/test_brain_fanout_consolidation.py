@@ -599,3 +599,47 @@ async def test_consolidate_multi_result_emits_chat_refresh_hint(tmp_path):
         assert events[0].kind == "chat_reply"
     finally:
         realtime.clear_user("u-hint2")
+
+
+@pytest.mark.asyncio
+async def test_consolidate_single_failure_persists_chat_card(
+    tmp_path, monkeypatch,
+):
+    """A failed single bg task must leave a durable chat record — the
+    ephemeral background_failed card dies with a closed socket and its
+    agent turn never persisted anything (2026-08-13 himap timeout)."""
+    from lazyclaw.notifications import chat_card as chat_card_mod
+    from lazyclaw.notifications import channel as channel_mod
+
+    emitted = []
+
+    async def _fake_emit(config, user_id, notif):
+        emitted.append((user_id, notif))
+        return "row-1"
+
+    async def _fake_channel(config, user_id):
+        return "both"
+
+    monkeypatch.setattr(chat_card_mod, "emit", _fake_emit)
+    monkeypatch.setattr(
+        channel_mod, "get_notification_channel", _fake_channel,
+    )
+
+    runner = _make_runner(tmp_path)
+    cb = MagicMock()
+    cb.on_event = AsyncMock()
+    _seed_group(runner, "gf1", "u-fail1", ["t1"], cb=cb)
+    runner._brain_groups["gf1"].results.append(_FanoutResult(
+        task_id="t1", name="browser check", success=False,
+        error="Timed out after 300s",
+    ))
+    runner._brain_groups["gf1"].pending.clear()
+
+    await runner._consolidate("gf1")
+
+    assert len(emitted) == 1
+    uid, notif = emitted[0]
+    assert uid == "u-fail1"
+    assert notif["kind"] == "background_failed"
+    assert "browser check" in notif["title"]
+    assert "Timed out" in notif["body"]

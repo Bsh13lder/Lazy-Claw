@@ -5,6 +5,7 @@ model: smart
 include_scraper: true
 tools:
   - browser
+  - use_host_browser
   - web_search
   - save_site_login
   - payment

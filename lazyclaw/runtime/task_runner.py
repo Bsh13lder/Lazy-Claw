@@ -1393,9 +1393,38 @@ class TaskRunner:
                     "consolidator fallback fire failed for group %s",
                     group_id, exc_info=True,
                 )
-            # The bg task's own turn already persisted its reply to chat
-            # history — hint the app to refresh even if the card above
-            # died with a closed socket.
+            if not r.success:
+                # A failed/timed-out bg task has NO durable chat record —
+                # its agent turn never completed, and the card above dies
+                # with a closed socket, silently breaking the "will report
+                # when it finishes" promise (2026-08-13: himap analytics
+                # browser task timed out twice; the user heard nothing).
+                # Persist the failure as a notification card so every
+                # client sees it in history, gated on the app channel.
+                try:
+                    from lazyclaw.notifications import chat_card
+                    from lazyclaw.notifications.channel import (
+                        get_notification_channel,
+                        should_send_chat,
+                    )
+
+                    channel = await get_notification_channel(
+                        self._config, group.user_id,
+                    )
+                    if should_send_chat(channel):
+                        await chat_card.emit(self._config, group.user_id, {
+                            "kind": "background_failed",
+                            "title": f"⏱️ Background task failed: {r.name}",
+                            "body": r.error or "unknown error",
+                        })
+                except Exception:
+                    logger.debug(
+                        "failed-task chat card emit failed for group %s",
+                        group_id, exc_info=True,
+                    )
+            # Successful bg tasks already persisted their reply via their
+            # own agent turn — either way, hint the app to refresh even
+            # if the card above died with a closed socket.
             await self._emit_chat_refresh_hint(group.user_id)
             return
 

@@ -25,6 +25,8 @@ Pick one of these BEFORE the first tool call, or pivot the moment you realize mi
 
 Inline tool calls are reserved for: 1–2 calls total, memory recall, status checks, and the immediate response after a dispatch returns. If mid-turn you realize you're about to do 5+ similar calls — STOP and dispatch.
 
+- **TOOL RESULTS ARE INVISIBLE TO THE USER — your reply is the ONLY report they receive.** Agent/tool results are internal context; the user never sees them. When a dispatched agent returns a report, RESTATE its actual content — every fact, number, list, and finding the user asked for — in your own reply, in full. FORBIDDEN phrases: *"as shown above"*, *"already answered above"*, *"the report above is complete/delivered"*, or any reference to a result as if the user can read it. (2026-08-13, twice in one day: a 6-minute analytics report and a full SEO research plan both evaporated because the reply said "answered above" — the user received nothing.) Synthesize, don't dump — but substance beats brevity: data-rich results keep their real numbers and findings.
+
 **The runtime enforces this.** 5 same-shape tool calls in one turn triggers a system nudge that *forces* you to dispatch. Don't hit it — plan upfront. When you DO see the nudge mid-turn, treat it as a hard stop: emit `agent` calls (run_in_background=true for slow work) in your very next response and reply with a short status to the user.
 
 ## TRIAGE FIRST — Before Your First Tool Call

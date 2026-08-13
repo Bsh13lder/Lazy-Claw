@@ -536,3 +536,62 @@ def test_telegram_notifier_keeps_user_source():
     assert text is not None
     assert "Cron Job" in text
     assert parse_mode == "HTML"
+
+
+# ── App refresh hint (2026-08-13) ─────────────────────────────────────
+# Socket-based delivery (send_terminal_done / background_done rescues)
+# requires the ORIGINAL WebSocket to still be open. A phone that locked
+# during a long background wait got nothing — the consolidated reply sat
+# invisible in history until an app restart. _consolidate must always
+# publish a realtime notification frame so clients re-read chat history.
+
+
+@pytest.mark.asyncio
+async def test_consolidate_single_result_emits_chat_refresh_hint(tmp_path):
+    from lazyclaw.notifications import realtime
+
+    realtime.clear_user("u-hint1")
+    try:
+        runner = _make_runner(tmp_path)
+        cb = MagicMock()
+        cb.on_event = AsyncMock()
+        _seed_group(runner, "gh1", "u-hint1", ["t1"], cb=cb)
+        runner._brain_groups["gh1"].results.append(_FanoutResult(
+            task_id="t1", name="Task 1", success=True, result="hello",
+            duration_ms=1_000,
+        ))
+        runner._brain_groups["gh1"].pending.clear()
+
+        await runner._consolidate("gh1")
+
+        events = realtime.recent_events("u-hint1", limit=5, max_age_s=60)
+        assert len(events) == 1
+        assert events[0].kind == "chat_reply"
+    finally:
+        realtime.clear_user("u-hint1")
+
+
+@pytest.mark.asyncio
+async def test_consolidate_multi_result_emits_chat_refresh_hint(tmp_path):
+    from lazyclaw.notifications import realtime
+
+    realtime.clear_user("u-hint2")
+    try:
+        lane_queue = MagicMock()
+        lane_queue.enqueue = AsyncMock(return_value="consolidated reply")
+        runner = _make_runner(tmp_path, lane_queue=lane_queue)
+        _seed_group(runner, "gh2", "u-hint2", [])
+        runner._brain_groups["gh2"].results.extend([
+            _FanoutResult(task_id="t1", name="A", success=True,
+                          result="ra", duration_ms=1_000),
+            _FanoutResult(task_id="t2", name="B", success=True,
+                          result="rb", duration_ms=1_000),
+        ])
+
+        await runner._consolidate("gh2")
+
+        events = realtime.recent_events("u-hint2", limit=5, max_age_s=60)
+        assert len(events) == 1
+        assert events[0].kind == "chat_reply"
+    finally:
+        realtime.clear_user("u-hint2")

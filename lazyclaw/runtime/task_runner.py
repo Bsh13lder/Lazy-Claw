@@ -1302,6 +1302,35 @@ class TaskRunner:
                 name=f"brain-consolidate-{target_group.group_id[:8]}",
             )
 
+    async def _emit_chat_refresh_hint(self, user_id: str) -> None:
+        """Publish a realtime ``notification`` frame after a late reply.
+
+        Every socket-based delivery in the consolidation path
+        (``send_terminal_done``, the ``background_done`` rescues) requires
+        the ORIGINAL WebSocket to still be open — a phone that locked
+        during a long background wait gets nothing, and the reply sits
+        invisible in history until a manual app restart (observed
+        2026-08-13: "Check last message on upwork" showed only the interim
+        auto-promote reply; the consolidated answer never displayed). The
+        notification bus is the durable channel: connected apps refresh
+        chat history on the frame, and its ring replay covers sockets that
+        reconnect within the replay window. Mobile paints nothing for
+        these frames (refresh-only), web ignores unknown frame types.
+        """
+        try:
+            from lazyclaw.notifications.realtime import emit as realtime_emit
+
+            await realtime_emit(self._config, user_id, {
+                "kind": "chat_reply",
+                "title": "Reply added to chat",
+                "body": "",
+            })
+        except Exception:
+            logger.debug(
+                "chat refresh hint emit failed for user %s",
+                user_id, exc_info=True,
+            )
+
     async def _consolidate(self, group_id: str) -> None:
         """Build the synthetic consolidation message and enqueue ONE
         brain turn whose reply lands on the original channel."""
@@ -1364,6 +1393,10 @@ class TaskRunner:
                     "consolidator fallback fire failed for group %s",
                     group_id, exc_info=True,
                 )
+            # The bg task's own turn already persisted its reply to chat
+            # history — hint the app to refresh even if the card above
+            # died with a closed socket.
+            await self._emit_chat_refresh_hint(group.user_id)
             return
 
         # Real fan-out: build a synthetic instruction the brain can fold
@@ -1565,6 +1598,13 @@ class TaskRunner:
                     "web consolidation rescue delivery failed for %s",
                     group_id, exc_info=True,
                 )
+
+        # ── App refresh hint (2026-08-13) ────────────────────────────────
+        # The consolidated reply IS persisted in history by the synthetic
+        # turn, but both rescues above need the original socket alive.
+        # Always hint the app so a reconnecting/open client re-reads chat.
+        if result_text:
+            await self._emit_chat_refresh_hint(group.user_id)
 
     def list_running(self, user_id: str | None = None) -> list[dict]:
         """List running background tasks."""

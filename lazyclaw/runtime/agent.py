@@ -4135,10 +4135,16 @@ class Agent:
         # ONE inline domain (non-meta) tool call per turn, then tools narrow to
         # meta-only so it MUST delegate. Default off → zero behavior change.
         import os as _os
+        # Background task turns ARE the delegated worker — forcing them into
+        # router-only mode makes each worker re-delegate to another identical
+        # background worker in an infinite chain (2026-08-13: himap publish
+        # spawned 9104c160 → 43465237 → 5da50ada, each a "router-only" brain
+        # that couldn't touch vault/browser, until the last timed out — 0/8
+        # published). The cap is for the interactive foreground brain only.
         _thin_router = (
             _os.environ.get("LAZYCLAW_THIN_ROUTER", "").strip().lower()
             in ("1", "true", "yes", "on")
-        )
+        ) and not getattr(self, "is_background", False)
         # Specialist-first brain (ADR-0005 Phase 5a): the brain only ever
         # sees meta tools + read-only inspections (every iteration, incl.
         # iteration 0) — mutating/domain tools must be reached through
@@ -4154,7 +4160,13 @@ class Agent:
         # "delegate everything" made the brain re-delegate/thrash and dump raw
         # ugly text to Telegram instead of a clean summary (2026-06-23).
         _is_consolidation = is_consolidation_turn(message)
-        if _specialist_first and needs_tools and tools and not _is_consolidation:
+        # Same worker exemption as the thin-router cap above: a background
+        # turn must be able to execute domain tools itself.
+        if (
+            _specialist_first and needs_tools and tools
+            and not _is_consolidation
+            and not getattr(self, "is_background", False)
+        ):
             # One short router note at turn start — same plain-system-
             # message mechanism the cap/AUTO-PROMOTE guidance uses.
             # Injected here (before the loop) so it fires exactly ONCE

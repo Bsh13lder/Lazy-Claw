@@ -1460,9 +1460,21 @@ class TaskRunner:
                     lines.append(report[:_CONSOLIDATION_RESULT_PREVIEW])
             lines.append("")
         lines.extend([
-            "Write ONE consolidated summary for the user. Don't repeat "
-            "raw blobs — synthesize. Call out any failures explicitly. "
-            "Keep it tight (~6-12 lines for Telegram).",
+            "Write ONE consolidated summary for the user.",
+            "CRITICAL: the user has NOT seen ANY of the results above — "
+            "they are invisible internal tool output. Your reply is the "
+            "ONLY report the user will ever receive. Restate every fact, "
+            "number, and finding the user needs IN FULL in your reply. "
+            "NEVER write 'as shown above' or 'already delivered', and "
+            "never refer to the results as if the user can see them "
+            "(2026-08-13: a 6-minute admin-analytics report was lost "
+            "because the reply said 'the report above is already "
+            "delivered').",
+            "Synthesize — don't dump raw blobs — but substance beats "
+            "brevity: for data-rich results (analytics, listings, "
+            "research) keep the actual numbers and findings. Call out "
+            "any failures explicitly. Simple confirmations stay short "
+            "(~6-12 lines).",
         ])
 
         if _failure_present:

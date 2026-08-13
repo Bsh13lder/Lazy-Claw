@@ -155,6 +155,10 @@ async def test_consolidate_multi_task_enqueues_one_synthetic_turn(tmp_path):
     assert "Salon C" in synthetic
     assert "email_a@x.com" in synthetic
     assert "ONE consolidated summary" in synthetic
+    # The user cannot see tool output — the reply must restate results
+    # in full, never point at "the report above" (2026-08-13 incident).
+    assert "user has NOT seen ANY of the results" in synthetic
+    assert "NEVER write 'as shown above'" in synthetic
     assert kwargs.get("chat_session_id") == "sess-1"
     # Group cleaned up.
     assert "g2" not in runner._brain_groups

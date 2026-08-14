@@ -1,4 +1,4 @@
-.PHONY: claude-login claude-status up down rebuild logs \
+.PHONY: claude-login claude-status up down rebuild logs build-info build-status \
         host-bridge host-bridge-uninstall host-bridge-status host-bridge-restart \
         host-stt host-stt-uninstall host-stt-status host-stt-restart \
         awake-bridge awake-bridge-uninstall awake-bridge-status awake-bridge-restart \
@@ -10,11 +10,40 @@ up:
 down:
 	docker compose down
 
+# Stamp the tree BEFORE building so the image carries its own provenance.
+# write-build-info.sh warns loudly (but does not block) on a dirty tree and
+# prints the stamp being baked; the Dockerfile bakes BUILD_INFO.json in and
+# the gateway serves it at GET /api/health as `build`.
 rebuild:
+	@bash scripts/write-build-info.sh
 	docker compose build lazyclaw && docker compose up -d lazyclaw
 
 logs:
 	docker compose logs -f lazyclaw
+
+# Regenerate BUILD_INFO.json without building (dry-run of the dirty-tree check).
+build-info:
+	@bash scripts/write-build-info.sh
+
+# What is the RUNNING container actually built from? Compares the baked stamp
+# against the working tree's HEAD — the whole point of the exercise.
+build-status:
+	@echo "── running container ──────────────────────────────────────────"
+	@curl -fsS --max-time 3 http://localhost:18789/api/health 2>/dev/null \
+	    | python3 -c 'import json,sys; b=json.load(sys.stdin).get("build") or {}; \
+	        print("  sha:      ", b.get("sha", "MISSING — image predates the stamp; run make rebuild")); \
+	        print("  branch:   ", b.get("branch", "unknown")); \
+	        print("  dirty:    ", b.get("dirty", "unknown")); \
+	        print("  built_at: ", b.get("built_at", "unknown"))' \
+	  || echo "  (gateway not reachable on :18789 — is it up?)"
+	@echo "── working tree ───────────────────────────────────────────────"
+	@echo "  HEAD:      $$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+	@echo "  branch:    $$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+	@if [ -n "$$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then \
+	    echo "  dirty:     True  (uncommitted tracked changes)"; \
+	else \
+	    echo "  dirty:     False"; \
+	fi
 
 # Open Claude Code's OAuth login flow inside the running container.
 # Credential lands in the persistent `claude_creds` volume and survives

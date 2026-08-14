@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # - lsof: ram_monitor.py port checks
 # - patch: workspace-mcp local patch step below
 # - VNC stack (xvfb / x11vnc / websockify / novnc): share_browser_control remote takeover
+# - tesseract-ocr (+eng): browser `ocr` action fallback — Apple Vision never
+#   exists inside the Linux container, so without the binary the whole OCR
+#   ladder is dead (2026-07-31 upwork task burned its budget partly on this)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         lsof \
         patch \
@@ -32,6 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11vnc \
         python3-websockify \
         novnc \
+        tesseract-ocr \
+        tesseract-ocr-eng \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -120,6 +125,24 @@ RUN pip install -e .
 # Entrypoint — runs as lazyclaw user, symlinks named-volume Claude creds.
 COPY --chown=lazyclaw:lazyclaw scripts/docker-entrypoint.sh /usr/local/bin/lazyclaw-entrypoint.sh
 RUN chmod +x /usr/local/bin/lazyclaw-entrypoint.sh
+
+# ---------------------------------------------------------------------------
+# Deploy stamp — answers "what code is this container running?".
+# `make rebuild` runs scripts/write-build-info.sh first, which writes
+# BUILD_INFO.json (git sha + dirty flag + timestamp) to the build context.
+# The gateway serves it at GET /api/health as the `build` object.
+#
+# The `[n]` in BUILD_INFO.jso[n] is the optional-COPY idiom: a bare
+# `COPY BUILD_INFO.json` hard-fails a plain `docker compose build` run without
+# the script, and a wildcard matching nothing is also an error — so pyproject
+# .toml rides along as the anchor that guarantees ≥1 match. Deliberately the
+# LAST layer: the stamp changes every build, so anything below it would never
+# hit cache.
+# ---------------------------------------------------------------------------
+COPY --chown=lazyclaw:lazyclaw pyproject.toml BUILD_INFO.jso[n] ./
+RUN [ -f /app/BUILD_INFO.json ] \
+    || echo '{"sha":"unknown","dirty":null,"built_at":"unknown"}' > /app/BUILD_INFO.json \
+    && chown lazyclaw:lazyclaw /app/BUILD_INFO.json
 
 USER lazyclaw
 

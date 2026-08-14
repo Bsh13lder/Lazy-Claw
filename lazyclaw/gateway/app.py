@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from lazyclaw.config import load_config
 from lazyclaw.db.connection import init_db
 from lazyclaw.gateway.auth import User, auth_router, get_current_user
+from lazyclaw.gateway.build_info import get_build_info
 from lazyclaw.gateway.routes.memory import router as memory_router
 from lazyclaw.gateway.routes.skills import router as skills_router
 from lazyclaw.gateway.routes.vault import router as vault_router
@@ -134,6 +135,21 @@ async def lifespan(application: FastAPI):
             "SERVER_SECRET has very low entropy (< 3.0 bits/char). "
             "Run 'lazyclaw setup' to generate a secure secret."
         )
+    # Log the deploy stamp FIRST, before anything can crash: when a boot goes
+    # wrong the first question is always "which build is this?". Also warms
+    # the cache so /api/health never pays a disk read.
+    _build = get_build_info()
+    logger.info(
+        "[build-info] running %s (branch=%s, dirty=%s, built_at=%s)",
+        _build["sha"], _build["branch"], _build["dirty"], _build["built_at"],
+    )
+    if _build["dirty"] is True:
+        logger.warning(
+            "[build-info] this image was built from an UNCOMMITTED tree — "
+            "`git checkout %s` will NOT reproduce it",
+            _build["short_sha"],
+        )
+
     await init_db(_config)
     await seed_default_models(_config)
     logger.info("Database initialized, models seeded")
@@ -281,7 +297,16 @@ class ChatResponse(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0", "started_at": _server_started_at}
+    # `build` answers "what code is this container actually running?" — the
+    # git sha baked in at image-build time plus whether the tree was dirty.
+    # Fail-soft: every field degrades to "unknown" rather than 500ing.
+    # See lazyclaw/gateway/build_info.py + scripts/write-build-info.sh.
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "started_at": _server_started_at,
+        "build": get_build_info(),
+    }
 
 
 @app.post("/api/agent/chat", response_model=ChatResponse)

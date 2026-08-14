@@ -366,8 +366,24 @@ async def get_session_messages(
             if r[1] == "tool" and r[3]
         }
 
+        # [SILENT]-prefixed replies are the suppress-everywhere contract
+        # (no Telegram push, no feed row, no ping) — but the agent turn
+        # still persists them, so chats showed a raw "[SILENT] No new
+        # messages…" pair every cron tick (2026-08-14). Hide the ENTIRE
+        # turn: rows of one turn are batch-persisted with a shared
+        # created_at, so dropping every row at a silent reply's timestamp
+        # erases the no-news run (its [JOB:] pill and tool rows included)
+        # while real, non-silent alerts keep their full turn.
+        _silent_turn_ts = {
+            r[5]
+            for r, content in fetched
+            if r[1] == "assistant" and content.startswith("[SILENT]")
+        }
+
         messages = []
         for r, content in reversed(fetched):
+            if r[5] in _silent_turn_ts:
+                continue
             metadata_raw = decrypt_field(r[4], key) if r[4] else None
 
             tool_calls = _extract_tool_calls(metadata_raw)

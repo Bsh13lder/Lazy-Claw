@@ -32,3 +32,26 @@ def test_clean_text_untouched():
 def test_plan_between_text_segments():
     s = "Intro.<plan>x</plan>Outro."
     assert _strip_internal_blocks(s) == "Intro.Outro."
+
+
+# ── [SILENT] turn hiding ───────────────────────────────────────────────
+# Suppress-everywhere includes chat display: a [SILENT] reply hides its
+# whole batch-persisted turn (shared created_at) from the history page.
+
+
+def test_silent_turn_timestamps_collected():
+    fetched = [
+        (("id1", "user", "enc", None, None, "2026-08-14 19:01:00"),
+         "[JOB:James watch] check inbox"),
+        (("id2", "assistant", "enc", None, None, "2026-08-14 19:01:00"),
+         "[SILENT] No new messages from James."),
+        (("id3", "assistant", "enc", None, None, "2026-08-14 19:05:00"),
+         "James replied! > James (19:04): hello"),
+    ]
+    silent = {
+        r[5] for r, content in fetched
+        if r[1] == "assistant" and content.startswith("[SILENT]")
+    }
+    assert silent == {"2026-08-14 19:01:00"}
+    kept = [r[0] for r, _ in fetched if r[5] not in silent]
+    assert kept == ["id3"]

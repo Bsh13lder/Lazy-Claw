@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 from uuid import uuid4
 
@@ -30,6 +31,21 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # Cap for the tool-result preview joined onto history tool-call entries.
 _TOOL_RESULT_PREVIEW_CHARS = 500
+
+# Internal reasoning blocks the agent writes before its user-facing text.
+# Closed blocks are removed whole; a dangling opening tag (stream cut mid-
+# plan) drops through to the bare-tag scrub so no raw XML ever ships.
+_INTERNAL_BLOCK_RE = re.compile(
+    r"<(plan|taor_plan|think)>.*?</\1>\s*", re.DOTALL,
+)
+_INTERNAL_BARE_TAG_RE = re.compile(r"</?(plan|taor_plan|think)>\s*")
+
+
+def _strip_internal_blocks(content: str) -> str:
+    """Remove <plan>/<taor_plan>/<think> reasoning blocks for display."""
+    out = _INTERNAL_BLOCK_RE.sub("", content)
+    out = _INTERNAL_BARE_TAG_RE.sub("", out)
+    return out.lstrip()
 
 
 def _extract_tool_calls(metadata_raw: str | None) -> list | None:
@@ -357,6 +373,15 @@ async def get_session_messages(
             tool_calls = _extract_tool_calls(metadata_raw)
             if tool_calls is not None:
                 tool_calls = _enrich_tool_calls(tool_calls, tool_results)
+
+            # Assistant rows are persisted with their internal <plan>/
+            # <taor_plan>/<think> blocks intact (the TAOR reasoning
+            # preamble). No client renders XML — users saw a wall of raw
+            # plan markup above every reply ("chat is a mess",
+            # 2026-08-14). Strip at read time so ALL history heals for
+            # every client; the stored row keeps the full text.
+            if r[1] == "assistant" and content:
+                content = _strip_internal_blocks(content)
 
             msg = {
                 "id": r[0],

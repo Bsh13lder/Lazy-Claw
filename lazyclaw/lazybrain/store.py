@@ -23,7 +23,7 @@ import unicodedata
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from lazyclaw.config import Config
+from lazyclaw.config import Config, _env_bool
 from lazyclaw.crypto.encryption import (
     decrypt_field,
     encrypt_field,
@@ -56,11 +56,27 @@ logger = logging.getLogger(__name__)
 # decisions, ideas surface first. Both `recall_memories` (the skill)
 # and `context_builder` (the system-prompt assembler) share this set
 # so they never disagree on what counts as "memory".
+
+# ``#memory`` is the tag ``memory/personal.py:save_memory`` stamps on every
+# user fact it mirrors into LazyBrain. It is excluded ONLY while the legacy
+# ``personal_memory`` row is still written (dual-write mode) — there the
+# mirror is a duplicate of a row already in the pool. Under
+# ``MEMORY_UNIFIED=1`` the legacy INSERT is skipped, so the mirror IS the
+# fact: excluding it would make every user-saved memory unretrievable in
+# both recall and the cached system prompt. See
+# :func:`memory_mirrors_are_authoritative`.
+MEMORY_MIRROR_TAG: str = "memory"
+
 MEMORY_RECALL_EXCLUDE_TAGS: frozenset[str] = frozenset({
-    "memory",        # mirror of personal_memory rows (already in pool)
-    "daily-log",     # daily auto-summary
-    "session-end",   # session cap
+    MEMORY_MIRROR_TAG,  # mirror of personal_memory rows (already in pool)
+    "daily-log",        # daily auto-summary
+    "session-end",      # session cap
 })
+
+# Unified-mode variant: identical minus the personal_memory mirror tag.
+_MEMORY_RECALL_EXCLUDE_TAGS_UNIFIED: frozenset[str] = (
+    MEMORY_RECALL_EXCLUDE_TAGS - {MEMORY_MIRROR_TAG}
+)
 
 # ``kind/*`` shapes are agent-owned replayable artifacts (skill recipes,
 # legacy mirrors). They feed the dedicated few-shot exemplar pool via
@@ -72,15 +88,50 @@ MEMORY_RECALL_EXCLUDE_KIND_TAGS: frozenset[str] = frozenset({
 })
 
 
-def is_user_facing_memory_note(note: dict) -> bool:
+def memory_mirrors_are_authoritative(config: Config | None = None) -> bool:
+    """True when a ``#memory`` note is the ONLY copy of a user-saved fact.
+
+    That is the case exactly when ``MEMORY_UNIFIED`` is on: ``save_memory``
+    then skips the legacy ``personal_memory`` INSERT and LazyBrain becomes
+    the sole store (see ``lazyclaw/memory/personal.py``).
+
+    ``config`` is authoritative when supplied. The env fallback exists for
+    the handful of call sites that filter notes without a ``Config`` in
+    hand (e.g. ``runtime/self_recall.py``) — ``load_config`` reads the same
+    ``MEMORY_UNIFIED`` var (after ``load_dotenv``), so both paths agree.
+    """
+    if config is not None:
+        return bool(getattr(config, "memory_unified", False))
+    return _env_bool("MEMORY_UNIFIED", default=False)
+
+
+def is_user_facing_memory_note(
+    note: dict,
+    *,
+    config: Config | None = None,
+    include_memory_mirrors: bool | None = None,
+) -> bool:
     """True when a LazyBrain note belongs in user-facing memory recall.
 
     Drops tag mirrors of other stores AND auto-generated journal /
     summary titles. Used by both the recall skill and context_builder
     so the two never disagree on what's "memory".
+
+    ``include_memory_mirrors`` decides whether ``#memory`` notes (the
+    ``save_memory`` mirrors) count as user-facing. Leave it ``None`` to
+    resolve from ``config``/env via :func:`memory_mirrors_are_authoritative`:
+    dual-write mode keeps excluding them (the legacy row already covers the
+    fact); ``MEMORY_UNIFIED=1`` lets them through because nothing else does.
     """
+    if include_memory_mirrors is None:
+        include_memory_mirrors = memory_mirrors_are_authoritative(config)
+    exclude_tags = (
+        _MEMORY_RECALL_EXCLUDE_TAGS_UNIFIED
+        if include_memory_mirrors
+        else MEMORY_RECALL_EXCLUDE_TAGS
+    )
     tags = note.get("tags") or []
-    if any(t in MEMORY_RECALL_EXCLUDE_TAGS for t in tags):
+    if any(t in exclude_tags for t in tags):
         return False
     if any(t in MEMORY_RECALL_EXCLUDE_KIND_TAGS for t in tags):
         return False
@@ -927,6 +978,113 @@ async def delete_note(config: Config, user_id: str, note_id: str) -> bool:
         return result.rowcount > 0
 
 
+# Column order shared by :func:`list_notes` and :func:`list_memory_notes`.
+# Kept in one place so the two readers can never drift out of sync with
+# :func:`_row_to_note`.
+_LIST_NOTE_COLUMNS: str = (
+    "id, title, content, tags, importance, pinned, "
+    "trace_session_id, title_key, memory_type, created_at, updated_at"
+)
+
+
+def _row_to_note(row, dek: bytes, user_id: str) -> dict:
+    """Decrypt one ``_LIST_NOTE_COLUMNS`` row into the public note dict."""
+    return {
+        "id": row[0],
+        "title": decrypt_field(row[1], dek, _title_aad(user_id), fallback=""),
+        "content": decrypt_field(row[2], dek, _content_aad(user_id), fallback=""),
+        "tags": _load_tags(row[3]),
+        "importance": row[4],
+        "pinned": bool(row[5]),
+        "trace_session_id": row[6],
+        "title_key": row[7],
+        # Typed-memory scope (see lazyclaw/lazybrain/memory_types.py).
+        # NULL for pre-migration rows until backfill_memory_types
+        # runs; the auto-inject filter fails closed on None so
+        # they don't leak into the cached system prompt.
+        "memory_type": row[8],
+        "created_at": row[9],
+        "updated_at": row[10],
+    }
+
+
+async def list_memory_notes(
+    config: Config,
+    user_id: str,
+    *,
+    limit: int = 40,
+    include_memory_mirrors: bool | None = None,
+) -> list[dict]:
+    """Auto-inject CANDIDATE notes for the cached system prompt.
+
+    ``list_notes`` orders by ``created_at DESC``, so the context pool only
+    ever saw the 40 NEWEST notes. The store is overwhelmingly auto-captured
+    noise (per-message captures, per-tool lesson cards, per-URL visit
+    notes), so that window churned within hours and durable user/project
+    facts became permanently invisible to the prompt.
+
+    This query selects candidates directly instead:
+
+    * ``memory_type IN (AUTO_INJECT_TYPES)`` — a plaintext, indexed column
+      (``idx_notes_user_memory_type``), so the typed filter runs in SQL.
+      ``session-log`` and NULL (pre-backfill) rows never enter the pool.
+    * the ``MEMORY_RECALL_EXCLUDE_TAGS`` / ``MEMORY_RECALL_EXCLUDE_KIND_TAGS``
+      families are dropped in SQL too — otherwise ``kind/shape`` lesson
+      cards (which classify as ``fact``) would keep eating candidate slots
+      only to be dropped by the caller's post-filter.
+    * ordered by ``importance DESC, created_at DESC`` so a durable fact
+      outranks today's auto-capture instead of aging out of the window.
+
+    ``include_memory_mirrors`` follows :func:`is_user_facing_memory_note`:
+    ``None`` resolves from ``config`` (``MEMORY_UNIFIED``), dual-write mode
+    keeps ``#memory`` mirrors out, unified mode lets them in.
+
+    Callers keep their own post-filters — this narrows the candidate set,
+    it does not replace the belt-and-suspenders checks.
+    """
+    from lazyclaw.lazybrain.memory_types import AUTO_INJECT_TYPES
+
+    if include_memory_mirrors is None:
+        include_memory_mirrors = memory_mirrors_are_authoritative(config)
+
+    dek = await get_user_dek(config, user_id)
+
+    types = sorted(AUTO_INJECT_TYPES)
+    placeholders = ", ".join("?" for _ in types)
+    clauses = [
+        "user_id = ?",
+        "deleted_at IS NULL",
+        f"memory_type IN ({placeholders})",
+        "(archived IS NULL OR archived = 0)",
+    ]
+    params: list = [user_id, *types]
+
+    # Tag exclusions — same substring-over-JSON shape (and the same
+    # ``tags IS NULL`` guard) as list_notes: in SQLite
+    # ``NULL NOT LIKE 'x'`` is NULL, which WHERE treats as false and would
+    # silently drop every tag-less note.
+    exclude_tags = set(MEMORY_RECALL_EXCLUDE_KIND_TAGS) | {"rolled-up"}
+    exclude_tags |= (
+        _MEMORY_RECALL_EXCLUDE_TAGS_UNIFIED
+        if include_memory_mirrors
+        else MEMORY_RECALL_EXCLUDE_TAGS
+    )
+    for tag in sorted(exclude_tags):
+        clauses.append("(tags IS NULL OR tags NOT LIKE ?)")
+        params.append(f'%"{tag}"%')
+
+    where = " AND ".join(clauses)
+    async with db_session(config) as db:
+        rows = await db.execute(
+            f"SELECT {_LIST_NOTE_COLUMNS} FROM notes WHERE {where} "
+            f"ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (*params, max(1, min(500, limit))),
+        )
+        result = await rows.fetchall()
+
+    return [_row_to_note(row, dek, user_id) for row in result]
+
+
 async def list_notes(
     config: Config,
     user_id: str,
@@ -975,37 +1133,13 @@ async def list_notes(
 
     async with db_session(config) as db:
         rows = await db.execute(
-            f"SELECT id, title, content, tags, importance, pinned, "
-            f"trace_session_id, title_key, memory_type, "
-            f"created_at, updated_at "
-            f"FROM notes WHERE {where} "
+            f"SELECT {_LIST_NOTE_COLUMNS} FROM notes WHERE {where} "
             f"ORDER BY pinned DESC, created_at DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(500, limit)), max(0, offset)),
         )
         result = await rows.fetchall()
 
-    out = []
-    for row in result:
-        out.append(
-            {
-                "id": row[0],
-                "title": decrypt_field(row[1], dek, _title_aad(user_id), fallback=""),
-                "content": decrypt_field(row[2], dek, _content_aad(user_id), fallback=""),
-                "tags": _load_tags(row[3]),
-                "importance": row[4],
-                "pinned": bool(row[5]),
-                "trace_session_id": row[6],
-                "title_key": row[7],
-                # Typed-memory scope (see lazyclaw/lazybrain/memory_types.py).
-                # NULL for pre-migration rows until backfill_memory_types
-                # runs; the auto-inject filter fails closed on None so
-                # they don't leak into the cached system prompt.
-                "memory_type": row[8],
-                "created_at": row[9],
-                "updated_at": row[10],
-            }
-        )
-    return out
+    return [_row_to_note(row, dek, user_id) for row in result]
 
 
 async def search_notes(

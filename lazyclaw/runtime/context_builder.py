@@ -557,7 +557,14 @@ async def build_context(
         from lazyclaw.lazybrain.memory_types import is_auto_inject_type
         from lazyclaw.lazybrain.store import is_user_facing_memory_note
 
-        lb_notes = await _lb_store.list_notes(config, user_id, limit=40)
+        # Auto-inject CANDIDATES, not "the 40 newest notes". The generic
+        # newest-first listing churned within hours (the store is ~93%
+        # auto-capture / lesson-card / visit-note noise), so durable user
+        # and project facts fell out of the window and became permanently
+        # invisible to the cached prompt. ``list_memory_notes`` filters on
+        # the indexed plaintext ``memory_type`` column and orders by
+        # importance. The post-filters below stay as belt-and-suspenders.
+        lb_notes = await _lb_store.list_memory_notes(config, user_id, limit=40)
         # Typed-memory auto-inject filter: only `user | feedback | project |
         # reference` notes are safe to pre-inject into the cached system
         # prompt. ``session-log`` paraphrases (and unclassified rows where
@@ -568,7 +575,11 @@ async def build_context(
         _lb_total = len(lb_notes)
         _lb_kept = 0
         for n in lb_notes:
-            if not is_user_facing_memory_note(n):
+            # ``config`` is what decides whether ``#memory`` mirrors count as
+            # user-facing: under MEMORY_UNIFIED the legacy personal_memory
+            # row no longer exists, so the mirror IS the fact and must reach
+            # the pool. Dual-write mode keeps excluding it (no double-hit).
+            if not is_user_facing_memory_note(n, config=config):
                 continue
             if not is_auto_inject_type(n.get("memory_type")):
                 continue

@@ -195,7 +195,11 @@ async def _safe_lazybrain_combined_search(
 
     notes: list[dict] = []
     for n in general_raw:
-        if not is_user_facing_memory_note(n):
+        # Pass ``config`` so the ``#memory`` mirror exclusion tracks
+        # MEMORY_UNIFIED: in dual-write mode the legacy personal_memory row
+        # covers the fact (and `_merge_and_dedupe` would collapse them
+        # anyway); in unified mode the mirror is the ONLY copy.
+        if not is_user_facing_memory_note(n, config=config):
             continue
         notes.append({
             "source": SRC_NOTE,
@@ -283,7 +287,9 @@ async def _safe_recent_lb_notes(config, user_id: str, limit: int) -> list[dict]:
         notes = await lb_store.list_notes(config, user_id, limit=limit * 3)
     except Exception:
         return []
-    filtered = [n for n in notes if is_user_facing_memory_note(n)]
+    filtered = [
+        n for n in notes if is_user_facing_memory_note(n, config=config)
+    ]
     return filtered[:limit]
 
 

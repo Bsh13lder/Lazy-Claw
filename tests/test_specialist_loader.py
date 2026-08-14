@@ -201,6 +201,7 @@ def test_browser_specialist_fields():
     assert s.is_builtin is True
     assert s.allowed_skills == (
         "browser",
+        "use_host_browser",
         "web_search",
         "save_site_login",
         "payment",

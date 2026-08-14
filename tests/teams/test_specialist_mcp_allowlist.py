@@ -122,3 +122,23 @@ def test_freelance_specialist_lists_upwork_submit_proposal():
     )
     text = md.read_text(encoding="utf-8")
     assert "upwork_submit_proposal" in text
+
+
+def test_freelance_specialist_lists_upwork_send_message():
+    """The Upwork send tool must be on the allowlist.
+
+    2026-07-31: a "text James on Upwork" background task burned its whole
+    300s budget re-reading the thread and poking the browser because
+    `upwork_send_message` was missing from the allowlist — the specialist
+    had every READ tool but no way to SEND (same class as the 2026-06-10
+    email-specialist incident).
+    """
+    md = (
+        Path(__file__).resolve().parents[2]
+        / "lazyclaw"
+        / "teams"
+        / "specialists"
+        / "freelance_specialist.md"
+    )
+    text = md.read_text(encoding="utf-8")
+    assert "upwork_send_message" in text

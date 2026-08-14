@@ -175,6 +175,41 @@ def warn_on_unknown_tools(
     return report
 
 
+def warn_on_prompt_tool_refs(
+    specs: Iterable[SpecialistConfig],
+    known_extra: Iterable[str] = (),
+) -> dict[str, list[str]]:
+    """Warn per specialist whose PROMPT names tools its allowlist can't reach.
+
+    The complement of :func:`warn_on_unknown_tools`: that one checks the
+    allowlist against the registry, this one checks the prompt body against
+    the allowlist. A prompt that says "call ``upwork_send_message``" while
+    the tool is absent from ``tools:`` is LazyClaw's #1 recurring specialist
+    incident — ``search_tools`` discovery does NOT grant callability, so the
+    worker loops hunting a name it can never call (2026-06-10 email,
+    2026-07-31 freelance ×2, 2026-08-13 browser, 2026-08-14 messaging).
+
+    Logging-only, like every other boot lane — prod resilience matters more
+    than a hard abort. The HARD gate is
+    ``tests/teams/test_specialist_prompt_sweep.py``.
+    """
+    from lazyclaw.teams.prompt_tool_refs import validate_prompt_tool_refs
+
+    report: dict[str, list[str]] = {}
+    for s in specs:
+        unreachable = validate_prompt_tool_refs(s, known_extra=known_extra)
+        if unreachable:
+            report[s.name] = unreachable
+            logger.warning(
+                "specialist '%s' prompt names tools missing from its "
+                "allowlist: %s (the worker will loop hunting them — add "
+                "them to `tools:` or fix the prompt)",
+                s.name,
+                ", ".join(unreachable),
+            )
+    return report
+
+
 def startup_specialist_self_check(registry) -> dict[str, list[str]]:
     """ADR-0005 startup self-check: builtin allowlists vs the LIVE registry.
 
@@ -183,9 +218,16 @@ def startup_specialist_self_check(registry) -> dict[str, list[str]]:
     prefix while allowlists hold bare names (the runner matches by bare
     suffix), so both the full id and its bare form count as known.
     Logging-only — drift is surfaced loudly at boot, never fatal.
+
+    Two lanes run, both warning-only:
+
+    1. allowlist vs registry (:func:`warn_on_unknown_tools`) — its report is
+       this function's return value, unchanged;
+    2. prompt body vs allowlist (:func:`warn_on_prompt_tool_refs`) — logged
+       only, so the boot report shape stays stable for existing callers.
     """
     from lazyclaw.skills.tool_namespace import bare_tool_name
-    from lazyclaw.teams.specialist import BUILTIN_SPECIALISTS
+    from lazyclaw.teams import specialist as _specialist
 
     known: set[str] = set()
     try:
@@ -197,7 +239,14 @@ def startup_specialist_self_check(registry) -> dict[str, list[str]]:
     except Exception:
         logger.debug("specialist self-check: registry listing failed", exc_info=True)
         return {}
-    return warn_on_unknown_tools(BUILTIN_SPECIALISTS, known)
+
+    # Read through the module so tests (and hot-reloads) see the current
+    # tuple rather than a value bound at first import.
+    builtins = _specialist.BUILTIN_SPECIALISTS
+    report = warn_on_unknown_tools(builtins, known)
+    # Lane 2 deliberately does NOT feed ``report`` — see the docstring.
+    warn_on_prompt_tool_refs(builtins)
+    return report
 
 
 __all__ = [
@@ -206,5 +255,6 @@ __all__ = [
     "load_builtin_specialists",
     "validate_specialist_tools",
     "warn_on_unknown_tools",
+    "warn_on_prompt_tool_refs",
     "startup_specialist_self_check",
 ]

@@ -79,7 +79,7 @@ If you detect a payment/checkout page (credit card fields, 'Pay now' button):
 - Same action fails twice → COMPLETELY different approach
 - Element not found → read the page to see what's actually there
 - Blank page → wait, the page may still be loading
-- Login required → check if there's a login button, use saved credentials
+- Login required → check if there's a login button, use saved credentials. If the site needs the USER'S own signed-in session (analytics dashboards, banks, Cloudflare-protected hosts), call `use_host_browser` FIRST, then `browser` — it switches you onto the user's real Brave with their cookies. Never hunt a login in the session-less container browser (2026-08-13 analytics timeout).
 - CAPTCHA → report it, don't try to solve it
 - After 3 failures on same step → web_search for alternative approach
 

@@ -27,6 +27,7 @@ tools:
   - upwork_get_messages
   - upwork_get_conversation
   - upwork_get_unread_count
+  - upwork_send_message
   - watch_reddit_forhire
   - find_contact
   - web_search
@@ -52,7 +53,7 @@ The moment ANY read tool returns real thread content: **STOP READING. Answer.**
 - Do NOT open `browser` on the inbox to "double-check" — it returns a 13 000-char page snapshot that tells you nothing the read didn't.
 - Re-reading does not make the answer more accurate. It burns minutes and risks a stale second read contradicting a good first one.
 
-Only read AGAIN if the first read genuinely FAILED (returned an error, or `status: "empty_or_blocked"` / `sidebar_unavailable` with no room). A short thread is not a failure. An empty `contact_name` is not a failure.
+Only read AGAIN if the first read genuinely FAILED (returned an error, or `status: "empty_or_blocked"` / `status: "sidebar_unavailable"` with no room). A short thread is not a failure. An empty `contact_name` is not a failure.
 
 2026-07-26: a "check my last conversation" turn made 5 read calls across 3 minutes — `upwork_last_conversation` (2 245 chars, complete) → `upwork_get_messages` → `browser` (13 088 chars) → `upwork_last_conversation` again → `upwork_get_conversation`. Step 1 had the whole answer. The other four added nothing.
 
@@ -78,6 +79,7 @@ Hard rules:
 
 ═══ TOOL LADDER ═══
 1. READ a thread → `upwork_last_conversation(contact_name=...)` (preferred) or `upwork_inbox_check` for unread triage. Raw MCP via `search_tools("upwork")` when you need a specific room.
+   1a. REPLY/SEND a client message → `upwork_send_message(room_id=..., message=...)`. The `room_id` comes from the read you just did — read FIRST, then send; never send blind. NO links, no "LazyClaw" (hard rules below). Multi-line is safe (one bubble per call). If the message would COMMIT the user to a price/deadline they haven't approved, use `draft_only=true` and report instead of sending.
 2. FIND work → `search_jobs` (Upwork + boards), `watch_reddit_forhire` for /r/forhire monitoring.
 3. PROPOSE → `draft_freelance_proposal`, then `apply_job` (Upwork) or `apply_reddit_dm` (Reddit). Tune voice with `set_freelance_pitch` / `set_skills_profile` / `sync_upwork_profile`.
    3a. SUBMIT a proposal → `apply_job` only DRAFTS/fills the form — it NEVER clicks Submit. To actually submit an approved proposal, call `upwork_submit_proposal`. NEVER re-call `apply_job` to submit — that just re-drafts the same proposal forever. If `upwork_submit_proposal` comes back needing approval (Action mode), STOP and report that the draft is ready and needs the user's go — do not loop.

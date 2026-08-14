@@ -58,6 +58,18 @@ _DEFAULT_TIMEOUT_S = 120
 _MAX_TIMEOUT_S = 600
 _MIN_TIMEOUT_S = 10
 
+# Browser flows through the host Brave (login walls + Cloudflare + heavy
+# admin SPAs) reliably need 300-400s — the LLM kept choosing 240-300s and
+# every himap.co/admin inspection died mid-navigation, spawning an
+# endless retry-in-background chain (2026-08-14 18:31-18:40, three
+# generations, zero results). Floor sync browser dispatches at 480s.
+_BROWSER_SYNC_TIMEOUT_FLOOR_S = 480
+
+# Background dispatch exists FOR slow work, yet it inherited the
+# TaskRunner 300s default — shorter than many sync budgets. Give bg
+# agents a full 600s.
+_BG_TIMEOUT_S = 600
+
 
 def _agent_concurrency() -> int:
     raw = os.environ.get("LAZYCLAW_DISPATCH_CONCURRENCY")
@@ -203,6 +215,8 @@ class AgentDispatchSkill(BaseSkill):
         except (TypeError, ValueError):
             timeout_s = _DEFAULT_TIMEOUT_S
         timeout_s = max(_MIN_TIMEOUT_S, min(timeout_s, _MAX_TIMEOUT_S))
+        if agent_type == "browser":
+            timeout_s = max(timeout_s, _BROWSER_SYNC_TIMEOUT_FLOOR_S)
 
         if not task:
             return "Error: task is required"
@@ -353,6 +367,7 @@ class AgentDispatchSkill(BaseSkill):
                 user_id=user_id,
                 instruction=task,
                 name=f"agent:{agent_type}",
+                timeout=_BG_TIMEOUT_S,
                 callback=self._callback,
                 source="brain",
                 fanout_group_id=self._fanout_group_id,

@@ -40,3 +40,18 @@ def test_specialist_first_gate_exempts_background() -> None:
     assert 'not getattr(self, "is_background", False)' in window, (
         "specialist-first gate lost the background-worker exemption"
     )
+
+
+def test_browser_sync_timeout_floor_and_bg_budget() -> None:
+    """Timeout loop killer (2026-08-14): sync browser dispatches are
+    floored at 480s (himap admin flows need 300-400s; the LLM kept
+    choosing 240-300s) and background dispatches get 600s instead of
+    inheriting TaskRunner's 300s default — shorter than sync budgets was
+    self-defeating for the 'slow work' path."""
+    from lazyclaw.skills.builtin import agent_tool as at
+
+    assert at._BROWSER_SYNC_TIMEOUT_FLOOR_S >= 480
+    assert at._BG_TIMEOUT_S >= 600
+    src = inspect.getsource(at)
+    assert 'if agent_type == "browser":' in src
+    assert "timeout=_BG_TIMEOUT_S" in src

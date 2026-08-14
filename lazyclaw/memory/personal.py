@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import re
 from uuid import uuid4
 from lazyclaw.config import Config
 from lazyclaw.crypto.encryption import decrypt_field, encrypt
@@ -121,8 +122,34 @@ async def delete_memory(config: Config, user_id: str, memory_id: str) -> bool:
 async def search_memories(
     config: Config, user_id: str, query: str, limit: int = 10
 ) -> list[dict]:
-    """Search memories by substring match on decrypted content."""
+    """Search memories by token overlap on decrypted content.
+
+    Whole-phrase substring matching made natural-language queries miss
+    everything ("what's my Google Workspace email" never appears verbatim
+    inside a stored fact) — and since ``save_memory`` notes carry the
+    recall-excluded ``memory`` tag, this lane is the ONLY path to
+    user-saved facts (2026-08-14 "doesn't know anything" audit). Score by
+    overlapping words (len >= 3), keep the exact-substring fast path,
+    rank matches-first then importance.
+    """
     all_memories = await get_memories(config, user_id, limit=100)
-    query_lower = query.lower()
-    matches = [m for m in all_memories if query_lower in m["content"].lower()]
-    return matches[:limit]
+    query_lower = query.lower().strip()
+    if not query_lower:
+        return []
+    q_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", query_lower)}
+    scored: list[tuple[int, dict]] = []
+    for m in all_memories:
+        content_lower = m["content"].lower()
+        if query_lower in content_lower:
+            scored.append((len(q_tokens) + 1, m))  # exact phrase = top
+            continue
+        if not q_tokens:
+            continue
+        m_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", content_lower)}
+        overlap = len(q_tokens & m_tokens)
+        if overlap >= max(1, min(2, len(q_tokens) - 1)):
+            scored.append((overlap, m))
+    scored.sort(
+        key=lambda x: (x[0], int(x[1].get("importance") or 0)), reverse=True,
+    )
+    return [m for _, m in scored[:limit]]

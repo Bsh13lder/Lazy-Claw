@@ -3905,7 +3905,13 @@ class Agent:
                 (m for m in reversed(history) if m.role == "assistant"),
                 None,
             )
-            if prev_assistant and is_correction(message):
+            # Never on background/cron turns: a [JOB:] brief is not the
+            # user correcting anyone, yet the correction regex matched
+            # the literal "No new messages from James." inside the James
+            # watch brief and minted a near-identical junk lesson every
+            # 30 minutes (70 notes in 48h, 2026-08-14 recall audit).
+            _is_bg_turn = message.startswith(_BACKGROUND_TURN_PREFIXES)
+            if prev_assistant and not _is_bg_turn and is_correction(message):
                 _aio.create_task(
                     _extract_and_store_lesson(
                         self.eco_router, self.config, user_id,
@@ -4162,8 +4168,8 @@ class Agent:
         _is_consolidation = is_consolidation_turn(message)
         # Same worker exemption as the thin-router cap above: a background
         # turn must be able to execute domain tools itself.
-        if (
-            _specialist_first and needs_tools and tools
+        if _specialist_first and (
+            needs_tools and tools
             and not _is_consolidation
             and not getattr(self, "is_background", False)
         ):

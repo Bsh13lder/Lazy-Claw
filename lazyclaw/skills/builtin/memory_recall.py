@@ -343,7 +343,23 @@ def _merge_and_dedupe(
             + float(r.get("_score") or 0.0) * 2.0
         )
     )
-    return merged[:20]
+    # Lesson cards (verified shapes, stored at importance 7) structurally
+    # outrank user facts (default 5) AND arrive k=16 vs k=8 — unchecked,
+    # a query returned 17/19 agent skill recipes and buried the user's
+    # actual memories (2026-08-14 "doesn't know anything" audit). Cap
+    # lessons at 4 of the final 20; facts/notes fill the rest.
+    _MAX_LESSON_ROWS = 4
+    capped: list[dict] = []
+    lesson_rows = 0
+    for row in merged:
+        if row.get("source") == "lesson":
+            if lesson_rows >= _MAX_LESSON_ROWS:
+                continue
+            lesson_rows += 1
+        capped.append(row)
+        if len(capped) >= 20:
+            break
+    return capped
 
 
 # ── Formatting ─────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ def test_thin_router_activation_exempts_background() -> None:
 
 def test_specialist_first_gate_exempts_background() -> None:
     src = _source()
-    idx = src.find("_specialist_first and needs_tools and tools")
+    idx = src.find("if _specialist_first and (")
     assert idx != -1, "specialist-first gate not found"
     window = src[idx : idx + 300]
     assert 'not getattr(self, "is_background", False)' in window, (

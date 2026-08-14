@@ -382,9 +382,16 @@ def _pick_hybrid_memories(
             from lazyclaw.lazybrain.paraphrase_sanitizer import (
                 sanitize_recall_content,
             )
+            # Legacy personal_memory rows carry the type under "type",
+            # not "memory_type" — passing None here made the sanitizer
+            # wrap EVERY legacy fact in the 214-char [CACHED PARAPHRASE]
+            # banner, which _truncate_memory then cut at 240 chars: the
+            # entire "What I know about you" section became banners with
+            # ~25 chars of fact (2026-08-14 "doesn't know anything"
+            # incident — the half of a1ab99c that never landed).
             raw_content = sanitize_recall_content(
                 m.get("content"),
-                m.get("memory_type"),
+                m.get("memory_type") or m.get("type"),
                 title=m.get("title"),
             )
             content = _truncate_memory(raw_content)
@@ -573,7 +580,12 @@ async def build_context(
             imp = min(int(n.get("importance") or 5), 6)
             pool.append({
                 "id": f"lb:{n['id']}",
-                "memory_type": "lazybrain",
+                # The row just passed is_auto_inject_type, so its REAL
+                # memory_type is one of the authoritative types — carry
+                # it through. The old hardcoded pseudo-type "lazybrain"
+                # made the paraphrase sanitizer distrust-wrap every
+                # lazybrain note (the other half of the a1ab99c gap).
+                "memory_type": n.get("memory_type") or "fact",
                 # Per-item truncation happens in _pick_hybrid_memories so
                 # the budget loop sees the cap; storing 500 chars here
                 # keeps the merge cheap and lets the picker decide.
@@ -721,8 +733,11 @@ _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "whatsapp":  ("whatsapp", "wa msg", "whats app"),
     "browser":   ("browser", "open ", "click ", "navigate ", "screenshot",
                   "scroll", " url ", "tab "),
+    # NOTE: no bare question-words here — "what is " / "who is " matched
+    # generic English ("what is my email?") and injected unrelated web
+    # skill-shapes into ordinary questions (2026-08-14 recall audit).
     "web":       ("search ", "google ", "duckduckgo", "lookup ", "find info",
-                  "what is ", "who is ", "latest news"),
+                  "latest news"),
     "telegram":  ("telegram", " tg "),
     "lazybrain": ("note", "wikilink", "graph", "lazybrain"),
     "tasks":     ("task", "remind", "todo", "background job"),

@@ -148,14 +148,22 @@ async def build_recall_block(
 
     parts: list[str] = []
 
-    # Lane 1: LazyBrain semantic search (k=5)
+    # Lane 1: LazyBrain semantic search (k=5). Uses the module's default
+    # similarity floor and the user-facing note filter — the old
+    # min_similarity=0.0 with NO tag filter returned the 5
+    # nearest-whatever notes (skill-shape cards, session logs, stale
+    # vault/n8n notes) however unrelated, and the re-prompted brain then
+    # narrated that junk to the user ("Knowledge gap recall notes ...
+    # from unrelated past threads", 2026-08-13 ×2).
     try:
         from lazyclaw.lazybrain.embeddings import semantic_search
+        from lazyclaw.lazybrain.store import is_user_facing_memory_note
 
-        sem = await semantic_search(
-            config, user_id, gap_query, k=5, min_similarity=0.0,
-        )
-        results = sem.get("results") or []
+        sem = await semantic_search(config, user_id, gap_query, k=8)
+        results = [
+            n for n in (sem.get("results") or [])
+            if is_user_facing_memory_note(n)
+        ]
         logger.debug("[recall] semantic_search hits=%d", len(results))
         if results:
             parts.append("### From your second brain (LazyBrain)")
@@ -180,7 +188,9 @@ async def build_recall_block(
                     continue
                 m_tokens = set(_tokenize(m_text))
                 overlap = len(q_tokens & m_tokens)
-                if overlap >= 1:
+                # >= 2: a single shared token ("email", "test", "sheet")
+                # admitted unrelated facts into the gap block.
+                if overlap >= 2:
                     scored.append((overlap, m))
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[:5]

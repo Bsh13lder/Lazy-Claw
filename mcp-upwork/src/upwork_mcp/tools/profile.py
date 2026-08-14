@@ -74,6 +74,22 @@ async def get_my_profile() -> dict:
     # Now get stats from a different page
     page = await browser.safe_goto("https://www.upwork.com/nx/find-work/best-matches")
 
+    # Name fallback. The 2026 settings/profile page renders NO name at
+    # all (live DOM probe 2026-08-01: pure settings nav, every selector
+    # above misses), but the find-work sidebar profile card — the page
+    # we're already on for JSS — shows it exactly as clients see it in
+    # chat ("Vato T."): <section data-test="freelancer-sidebar-profile">
+    # → <a class="... profile-title ...">.
+    if not profile.get("name"):
+        sidebar_name_el = await page.query_selector(
+            '[data-test="freelancer-sidebar-profile"] .profile-title, '
+            '#fwh-sidebar-profile .profile-title'
+        )
+        if sidebar_name_el:
+            candidate = (await sidebar_name_el.text_content() or "").strip()
+            if candidate and not _is_nav_noise(candidate):
+                profile["name"] = candidate
+
     # Try to get JSS from sidebar or header
     jss_el = await page.query_selector('[data-test="jss"], .jss-score, [data-cy="jss"]')
     if jss_el:

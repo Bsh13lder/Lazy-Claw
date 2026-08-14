@@ -185,6 +185,11 @@ class ChatMessage {
 
   final String role; // 'user' | 'assistant' | 'bg_task' | 'plan'
   final String content;
+
+  /// When the message was created — parsed from the server row's
+  /// `created_at` for history messages, stamped locally for live bubbles.
+  /// Null only for legacy rows with unparseable timestamps.
+  final DateTime? createdAt;
   final bool streaming;
   // Outbound delivery state (meaningful for role == 'user' only).
   final SendState sendState;
@@ -217,6 +222,7 @@ class ChatMessage {
     required this.content,
     this.id,
     this.kind,
+    this.createdAt,
     this.streaming = false,
     this.sendState = SendState.sent,
     this.pendingApprovalId,
@@ -236,9 +242,28 @@ class ChatMessage {
 
   /// Single cloning seam — every public copy helper delegates here so a new
   /// field only has to be threaded through once.
+  /// User-facing text: internal reasoning blocks stripped. The server
+  /// strips these from history at read time, but LIVE streamed tokens
+  /// arrive raw — without this, a wall of `<plan>` XML leads every
+  /// streaming reply (2026-08-14 "chat is a mess").
+  String get displayContent {
+    if (role != 'assistant' || !content.contains('<')) return content;
+    var out = content.replaceAll(_internalBlockRe, '');
+    out = out.replaceAll(_internalBareTagRe, '');
+    return out.trimLeft();
+  }
+
+  static final RegExp _internalBlockRe = RegExp(
+    r'<(plan|taor_plan|think)>.*?</\1>\s*',
+    dotAll: true,
+  );
+  static final RegExp _internalBareTagRe =
+      RegExp(r'</?(plan|taor_plan|think)>\s*');
+
   ChatMessage _clone({
     String? id,
     String? kind,
+    DateTime? createdAt,
     String? content,
     bool? streaming,
     SendState? sendState,
@@ -258,6 +283,7 @@ class ChatMessage {
         content: content ?? this.content,
         id: id ?? this.id,
         kind: kind ?? this.kind,
+        createdAt: createdAt ?? this.createdAt,
         streaming: streaming ?? this.streaming,
         sendState: sendState ?? this.sendState,
         pendingApprovalId: clearApprovalFields
@@ -309,8 +335,12 @@ class ChatMessage {
   /// Adopts the server-side identity of a history row onto a live bubble
   /// minted from WS frames (delta-merge dedup: once the id is attached,
   /// later re-fetches recognize this message instead of duplicating it).
-  ChatMessage withServerIdentity({String? id, String? kind}) =>
-      _clone(id: id, kind: kind);
+  ChatMessage withServerIdentity({
+    String? id,
+    String? kind,
+    DateTime? createdAt,
+  }) =>
+      _clone(id: id, kind: kind, createdAt: createdAt);
 
   /// Returns a copy with approval fields cleared (prevents double-tap).
   ChatMessage clearApproval() => _clone(clearApprovalFields: true);

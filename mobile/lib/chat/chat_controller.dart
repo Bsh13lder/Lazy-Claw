@@ -54,6 +54,7 @@ class ChatReducer {
     messages.add(ChatMessage(
       role: 'user',
       content: text,
+      createdAt: DateTime.now().toUtc(),
       sendState: delivered ? SendState.sent : SendState.sending,
     ));
     if (delivered) _startAssistantTurn();
@@ -81,7 +82,7 @@ class ChatReducer {
     _pendingUsage = null;
     _foregroundActive = true;
     messages.add(
-        const ChatMessage(role: 'assistant', content: '', streaming: true));
+        ChatMessage(role: 'assistant', content: '', streaming: true, createdAt: DateTime.now().toUtc()));
   }
 
   /// Seeds prior conversation loaded from the backend. Historical messages are
@@ -120,7 +121,11 @@ class ChatReducer {
         if (messages[localIdx].streaming) continue;
         if (id.isEmpty) continue;
         messages[localIdx] =
-            messages[localIdx].withServerIdentity(id: id, kind: incoming.kind);
+            messages[localIdx].withServerIdentity(
+          id: id,
+          kind: incoming.kind,
+          createdAt: incoming.createdAt,
+        );
         knownIds.add(id);
         changed = true;
         continue;
@@ -141,7 +146,11 @@ class ChatReducer {
   /// role + whitespace-normalized content, scanning at most
   /// [_mergeAdoptScanWindow] messages back. Null when nothing matches.
   int? _findMergeMatchByContent(ChatMessage incoming) {
-    final content = _normalizeWs(incoming.content);
+    // Compare DISPLAY content on both sides: the server strips <plan>/
+    // <think> blocks from history rows at read time, while a live-streamed
+    // local bubble still holds them raw — raw-vs-stripped would never
+    // match and the fetched row would insert as a visible duplicate.
+    final content = _normalizeWs(incoming.displayContent);
     if (content.isEmpty) return null;
     var scanned = 0;
     for (var i = messages.length - 1;
@@ -150,7 +159,7 @@ class ChatReducer {
       final m = messages[i];
       if (m.role != incoming.role) continue;
       if (m.id != null && m.id!.isNotEmpty) continue;
-      if (_normalizeWs(m.content) == content) return i;
+      if (_normalizeWs(m.displayContent) == content) return i;
     }
     return null;
   }
@@ -161,7 +170,7 @@ class ChatReducer {
     if (messages.isEmpty ||
         (messages.last.role != 'assistant' && messages.last.role != 'plan')) {
       messages.add(
-          const ChatMessage(role: 'assistant', content: '', streaming: true));
+          ChatMessage(role: 'assistant', content: '', streaming: true, createdAt: DateTime.now().toUtc()));
     }
   }
 

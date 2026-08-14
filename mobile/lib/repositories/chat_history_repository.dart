@@ -41,6 +41,20 @@ class ChatSessionInfo {
 /// status ∈ {"done","unknown"} — mapped chips are NEVER running (a history
 /// chip has no live result stream, so a running one would spin forever).
 /// Legacy rows (`args` key, result-with-no-status) still map gracefully.
+/// Parses the server's `created_at` into a UTC [DateTime]. SQLite emits
+/// `"2026-08-13 15:31:09"` (UTC, no suffix); some rows carry full ISO
+/// with offsets. Tolerant: unparseable → null (legacy rows render
+/// without a timestamp rather than a wrong one).
+DateTime? parseServerTime(String? raw) {
+  final s = (raw ?? '').trim();
+  if (s.isEmpty) return null;
+  var normalized = s.replaceFirst(' ', 'T');
+  final hasZone = normalized.endsWith('Z') ||
+      RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(normalized);
+  if (!hasZone) normalized = '${normalized}Z';
+  return DateTime.tryParse(normalized)?.toUtc();
+}
+
 ChatMessage? mapApiMessage(Map<String, dynamic> json) {
   final role = json['role']?.toString() ?? '';
   final content = json['content']?.toString() ?? '';
@@ -50,9 +64,16 @@ ChatMessage? mapApiMessage(Map<String, dynamic> json) {
   // are optional — old rows without them still render as plain bubbles.
   final id = json['id']?.toString();
   final kind = json['kind']?.toString();
+  final createdAt = parseServerTime(json['created_at']?.toString());
 
   if (role == 'user') {
-    return ChatMessage(role: 'user', content: content, id: id, kind: kind);
+    return ChatMessage(
+      role: 'user',
+      content: content,
+      id: id,
+      kind: kind,
+      createdAt: createdAt,
+    );
   }
 
   if (role == 'assistant') {
@@ -81,6 +102,7 @@ ChatMessage? mapApiMessage(Map<String, dynamic> json) {
       content: content,
       id: id,
       kind: kind,
+      createdAt: createdAt,
       streaming: false,
       toolActivities: activities,
     );

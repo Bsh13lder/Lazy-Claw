@@ -146,10 +146,41 @@ class _BubbleContainer extends StatelessWidget {
               style: AppText.caption.copyWith(color: AppColors.textMuted),
             ),
           ],
+          if (!m.streaming && m.createdAt != null) ...[
+            const SizedBox(height: 2),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                formatBubbleTime(m.createdAt!),
+                style: AppText.caption.copyWith(
+                  color: AppColors.textMuted,
+                  fontSize: 10,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
+}
+
+const List<String> _monthAbbr = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// "14:32" for today, "13 Aug · 14:32" otherwise — always local time.
+String formatBubbleTime(DateTime utc) {
+  final local = utc.toLocal();
+  final now = DateTime.now();
+  final hm = '${local.hour.toString().padLeft(2, '0')}:'
+      '${local.minute.toString().padLeft(2, '0')}';
+  final sameDay = local.year == now.year &&
+      local.month == now.month &&
+      local.day == now.day;
+  if (sameDay) return hm;
+  return '${local.day} ${_monthAbbr[local.month - 1]} · $hm';
 }
 
 // ── Bubble content ─────────────────────────────────────────────────────────
@@ -177,7 +208,8 @@ class _BubbleContent extends StatelessWidget {
     // not yet streaming (edge case). Selectable while settled — selection
     // spans inside a still-streaming bubble reset on every token repaint,
     // so streaming bubbles stay plain until the turn finishes.
-    final data = m.content.isEmpty && !m.streaming ? '…' : m.content;
+    final text = m.displayContent;
+    final data = text.isEmpty && !m.streaming ? '…' : text;
     return MarkdownBody(
       data: data,
       selectable: !m.streaming,

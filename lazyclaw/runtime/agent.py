@@ -130,6 +130,24 @@ _NEVER_CACHE_TOOLS = frozenset({
 })
 
 
+def auto_session_title(text: str | None, limit: int = 50) -> str | None:
+    """Title candidate for an untitled chat session, or ``None`` to skip.
+
+    Sessions are auto-titled from their first user message. Heartbeat turns
+    are stored as user rows too, so a cron/watcher/reminder brief
+    (``[JOB:survival_contract_intake] ...``) could become the visible title
+    of the user's PRIMARY session — the shared cross-channel bucket every
+    channel turn lands in. Skip anything carrying a background-turn stamp
+    and leave the session untitled; the next real user message titles it.
+    """
+    if not text:
+        return None
+    if text.startswith(BACKGROUND_TURN_PREFIXES):
+        return None
+    candidate = text[:limit].strip()
+    return candidate or None
+
+
 def _infer_browser_role(message: str) -> str:
     """Infer the browser lane for a turn from its message prefix.
 
@@ -7860,15 +7878,19 @@ class Agent:
                         "WHERE id = ?",
                         (chat_session_id, chat_session_id),
                     )
-                    # Set title from first user message if still untitled
+                    # Set title from first user message if still untitled.
+                    # auto_session_title returns None for cron/watcher/
+                    # reminder briefs so an internal turn can't name the
+                    # user's primary session.
                     user_msgs = [m for m in all_new_messages if m.role == "user"]
                     if user_msgs:
-                        first_text = user_msgs[0].content[:50]
-                        await db.execute(
-                            "UPDATE agent_chat_sessions SET title = ? "
-                            "WHERE id = ? AND (title IS NULL OR title = '')",
-                            (first_text, chat_session_id),
-                        )
+                        first_text = auto_session_title(user_msgs[0].content)
+                        if first_text:
+                            await db.execute(
+                                "UPDATE agent_chat_sessions SET title = ? "
+                                "WHERE id = ? AND (title IS NULL OR title = '')",
+                                (first_text, chat_session_id),
+                            )
                 await db.commit()
 
             # Record and return the final assistant message content

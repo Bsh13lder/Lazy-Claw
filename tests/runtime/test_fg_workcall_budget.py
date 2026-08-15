@@ -26,14 +26,28 @@ def test_budget_is_three():
 
 def test_dispatch_only_is_strict_handoff_subset():
     """The budget cap narrows to ONLY the hand-off tools — no search_tools /
-    web_search / recall, so the brain can't thrash tool-discovery."""
+    web_search / recall, so the brain can't thrash tool-discovery.
+
+    Re-pinned 2026-08-15: ``agent`` joined the set in 22ef08a (unified
+    dispatch, 2026-07-07). That is CORRECT and load-bearing, not drift —
+    ``agent`` is the canonical hand-off tool that demoted
+    delegate/dispatch_subagents/run_background to legacy. Omitting it would
+    narrow a capped brain to three deprecated tools while removing the one
+    it is actually supposed to call, i.e. the cap would strand the turn.
+    The invariant this test protects is unchanged: the set contains ONLY
+    hand-off tools and no discovery tools.
+    """
     assert _DISPATCH_ONLY_TOOLS == {
-        "delegate", "dispatch_subagents", "run_background",
+        "agent", "delegate", "dispatch_subagents", "run_background",
     }
     assert _DISPATCH_ONLY_TOOLS < _META_TOOLS  # strict subset
     assert "search_tools" not in _DISPATCH_ONLY_TOOLS
     assert "web_search" not in _DISPATCH_ONLY_TOOLS
     assert "recall_memories" not in _DISPATCH_ONLY_TOOLS
+    assert "agent" in _DISPATCH_ONLY_TOOLS, (
+        "the unified dispatch tool must survive the budget cap — it is the "
+        "hand-off path the capped brain is being forced onto"
+    )
 
 
 def test_no_cap_when_thin_router_off():

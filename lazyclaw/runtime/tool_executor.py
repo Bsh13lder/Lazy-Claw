@@ -30,6 +30,43 @@ APPROVAL_PREFIX = "APPROVAL_REQUIRED:"
 # Default timeout for tool execution (seconds)
 DEFAULT_TOOL_TIMEOUT = 60
 
+# ── Per-tool timeout overrides (2026-08-15 timeout-hierarchy audit) ──────
+# The flat 60s default is right for a memory lookup and badly wrong for a
+# browser action: ONE Cloudflare-challenged navigation through the host
+# Brave routinely exceeds 60s, so the action died mid-navigation
+# ("[toolexec] Tool browser timed out after 60s") and the brain retried in
+# background — three generations, zero results (2026-08-14 18:31-18:40).
+#
+# NESTING RULE — a child budget must always be strictly smaller than its
+# parent's, or the parent expires first, orphans the child and reports a
+# timeout the child never saw. This cap (180s) is the innermost budget in
+# the dispatch chain and sits well under the sync browser specialist floor
+# (_BROWSER_SYNC_TIMEOUT_FLOOR_S = 480s in skills/builtin/agent_tool.py),
+# which itself sits under the sync/background ceiling of 600s.
+# tests/runtime/test_timeout_hierarchy.py pins the whole chain.
+#
+# Keep this table SMALL: it is an escape hatch for tools whose real-world
+# tail latency does not fit the default, not a per-skill config surface.
+PER_TOOL_TIMEOUTS: dict[str, int] = {
+    "browser": 180,
+}
+
+
+def resolve_tool_timeout(skill: object, name: str, default: int) -> int:
+    """Effective per-call timeout for *skill*, most specific source wins.
+
+    1. ``skill.timeout`` — an explicit declaration on the skill class
+       (e.g. ``AgentDispatchSkill.timeout``, which must exceed its own
+       inner ``wait_for`` budget so the executor never kills a dispatch
+       that is still inside its declared budget).
+    2. ``PER_TOOL_TIMEOUTS[name]`` — the runtime override table above.
+    3. *default* — the executor default (``DEFAULT_TOOL_TIMEOUT``).
+    """
+    declared = getattr(skill, "timeout", None)
+    if declared:
+        return int(declared)
+    return PER_TOOL_TIMEOUTS.get(name, default)
+
 
 class ToolExecutor:
     def __init__(
@@ -111,8 +148,10 @@ class ToolExecutor:
             user_id[:8] if user_id else user_id,
         )
         try:
-            # Per-tool timeout: skill.timeout overrides executor default
-            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            # Per-call timeout: skill.timeout > PER_TOOL_TIMEOUTS > default
+            effective_timeout = resolve_tool_timeout(
+                skill, tool_call.name, self._timeout,
+            )
             result = await asyncio.wait_for(
                 skill.execute(user_id, tool_call.arguments),
                 timeout=effective_timeout,
@@ -144,7 +183,9 @@ class ToolExecutor:
             await self._audit(user_id, "tool_executed", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
-            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            effective_timeout = resolve_tool_timeout(
+                skill, tool_call.name, self._timeout,
+            )
             logger.error(
                 "[toolexec] Tool %s timed out after %ds (user=%s)",
                 tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,
@@ -187,7 +228,9 @@ class ToolExecutor:
             user_id[:8] if user_id else user_id,
         )
         try:
-            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            effective_timeout = resolve_tool_timeout(
+                skill, tool_call.name, self._timeout,
+            )
             result = await asyncio.wait_for(
                 skill.execute(user_id, tool_call.arguments),
                 timeout=effective_timeout,
@@ -204,7 +247,9 @@ class ToolExecutor:
             await self._audit(user_id, "tool_approved", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
-            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            effective_timeout = resolve_tool_timeout(
+                skill, tool_call.name, self._timeout,
+            )
             logger.error(
                 "[toolexec] Tool %s (approved) timed out after %ds (user=%s)",
                 tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,

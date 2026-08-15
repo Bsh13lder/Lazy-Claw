@@ -86,4 +86,38 @@ void main() {
     expect(factoryCalls, 1,
         reason: 'no reconnect attempts should fire after dispose');
   });
+
+  test('force reconnect re-dials a stale-connected socket', () async {
+    // Root cause of "messages not delivering after a server restart while
+    // backgrounded": the drop fires no onDone (isolate suspended), so
+    // _isConnected stays stale-true. A plain connect() to the same
+    // url/cookie early-returns (the per-turn guard) and never re-dials, so
+    // send() writes to a dead sink silently. On resume we must FORCE a
+    // fresh channel.
+    var factoryCalls = 0;
+    final sinks = <List<String>>[];
+    final socket = ChatSocket(
+      channelFactory: (url, headers) {
+        factoryCalls++;
+        final sent = <String>[];
+        sinks.add(sent);
+        return FakeSink(const Stream.empty(), sent);
+      },
+    );
+
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    expect(factoryCalls, 1);
+
+    // Same target, not forced → guarded, no re-dial (the bug path).
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    expect(factoryCalls, 1, reason: 'guard should skip a redundant reconnect');
+
+    // Forced (resume path) → tears down and re-dials even though the flag
+    // still says connected.
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc',
+        force: true);
+    expect(factoryCalls, 2, reason: 'force must re-establish the channel');
+
+    await socket.dispose();
+  });
 }

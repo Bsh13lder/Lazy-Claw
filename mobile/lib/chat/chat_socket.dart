@@ -106,13 +106,23 @@ class ChatSocket {
   /// True while a live channel is open.
   bool get isConnected => _isConnected;
 
-  Future<void> connect(String wsUrl, {required String cookie}) async {
+  Future<void> connect(
+    String wsUrl, {
+    required String cookie,
+    bool force = false,
+  }) async {
     // Reconnecting to the SAME endpoint while already connected tore down a
     // working channel and re-dialled it — 150-800ms of TCP+TLS+upgrade on every
     // call, with in-flight frames at risk. The assistant calls this once per
     // turn, so that cost was paid on every question. A genuine change of URL or
     // cookie still reconnects.
-    if (_isConnected && _wsUrl == wsUrl && _cookie == cookie) return;
+    //
+    // [force] bypasses the guard for the app-resume path: a drop that happens
+    // while the isolate is suspended (server restart while backgrounded) fires
+    // no onDone, so `_isConnected` stays stale-true and this guard would skip
+    // the reconnect forever — leaving send() writing to a dead sink silently.
+    // On resume we can't cheaply prove the socket is alive, so we re-dial.
+    if (!force && _isConnected && _wsUrl == wsUrl && _cookie == cookie) return;
     _wsUrl = wsUrl;
     _cookie = cookie;
     _attempt = 0;

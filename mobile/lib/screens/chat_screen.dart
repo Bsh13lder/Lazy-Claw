@@ -116,6 +116,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Re-establish the chat WebSocket FIRST: if the app was backgrounded
+      // when the server dropped the connection (e.g. a server restart), the
+      // suspended isolate never saw the drop, so the socket still believes
+      // it is connected and would silently swallow the next message. Force a
+      // fresh channel, then catch up on history missed while away.
+      unawaited(_connect(force: true));
       unawaited(ref.read(chatControllerProvider.notifier).refreshHistory());
     }
   }
@@ -130,7 +136,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   // ── Connection (logic preserved exactly) ──────────────────────────────────
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool force = false}) async {
     setState(() {
       _connectError = null;
       _connected = false;
@@ -149,6 +155,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       await ref.read(chatSocketProvider).connect(
             ServerConfig.wsUrlFor(base),
             cookie: 'session_id=$cookie',
+            force: force,
           );
       if (mounted) setState(() => _connected = true);
       // Catch up on any server notifications missed while the app was away.

@@ -10,7 +10,8 @@ vendored browser-use adoption (2026-08-15)".
 - [x] License gate `tests/test_license_gate.py` + camoufox removed from mcp-upwork + `ANONYMIZED_TELEMETRY=False` in Dockerfile
 - [ ] Rollout gate: 10/10 cold Upwork attaches over ≥2h, then opt-in admin user via `browser_settings["backend"]="browser_use"` (default stays `"cdp"`)
 - [ ] **DECISION NEEDED: aioimaplib is GPL-3.0** (mcp-email dep, found by the license gate) — replace with permissive async IMAP or make a licensing call
-- [ ] Follow-ups: unify the 3 click/type paths (ref-path bypasses cadence today); DomService serializer as alternative snapshot source (token A/B); steal agent-browser session-pinning for tab_manager
+- [x] DomService serializer A/B (2026-08-15): **don't adopt** — 41x tokens + 9x latency on content-heavy pages, no real coverage gain (structural tr/td noise), no compact mode; our SnapshotManager validated. Evidence: `scripts/browser-use-snapshot-ab.py`
+- [ ] Follow-ups: unify the 3 click/type paths (ref-path bypasses cadence today — agent in flight 08-15); steal agent-browser session-pinning for tab_manager
 
 ## Shipped since 2026-06-13 (catch-up, recorded 2026-07-21)
 Work that landed while this file was stale — details in DOCS.md / MEMORY:

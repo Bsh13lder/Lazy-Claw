@@ -182,15 +182,42 @@ class ApiClient {
     return response.data as List<int>;
   }
 
-  /// Get the session cookie value for use in WebSocket connections etc.
-  Future<String?> getSessionCookie() async {
-    await _ensureInitialized();
-    final uri = Uri.parse(baseUrl);
-    final cookies = await _cookieJar.loadForRequest(uri);
-    for (final cookie in cookies) {
-      if (cookie.name == 'session_id') return cookie.value;
+  /// Pure resolution order for the WebSocket session token: the host-agnostic
+  /// [sessionStore] wins (it's what the HTTP interceptor authenticates every
+  /// request with), else the first non-empty `session_id` found in the
+  /// per-host cookie jar(s). Extracted so it's unit-testable without platform
+  /// channels.
+  static String? resolveSessionToken(String? stored, List<Cookie> jarCookies) {
+    if (stored != null && stored.isNotEmpty) return stored;
+    for (final c in jarCookies) {
+      if (c.name == SessionCookieInterceptor.cookieName && c.value.isNotEmpty) {
+        return c.value;
+      }
     }
     return null;
+  }
+
+  /// Get the session cookie value for use in WebSocket connections etc.
+  ///
+  /// Reads the host-agnostic [sessionStore] FIRST — the same source the HTTP
+  /// interceptor uses — so the chat WebSocket keeps working after a base-URL
+  /// host change (LAN re-discovery / Funnel / cellular). Previously this only
+  /// scanned the jar for the current `baseUrl` host, so a host switch left the
+  /// WS with no cookie → the chat screen wrongly bounced to /login while HTTP
+  /// stayed authenticated. Falls back to scanning the jar across every known
+  /// alias.
+  Future<String?> getSessionCookie() async {
+    await _ensureInitialized();
+    final stored = await ApiClient.sessionStore.load();
+    final jarCookies = <Cookie>[];
+    for (final url in <String>{baseUrl, ...kServerAliases}) {
+      try {
+        jarCookies.addAll(await _cookieJar.loadForRequest(Uri.parse(url)));
+      } catch (_) {
+        // Skip an unparseable/unreachable alias; try the rest.
+      }
+    }
+    return resolveSessionToken(stored, jarCookies);
   }
 
   Future<void> clearSession() async {

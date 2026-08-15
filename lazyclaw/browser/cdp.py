@@ -55,6 +55,67 @@ async def find_chrome_cdp(port: int = DEFAULT_CDP_PORT) -> str | None:
     return None
 
 
+def rewrite_ws_host(ws_url: str, host: str, port: int) -> str:
+    """Substitute host:port in a CDP WebSocket URL, keeping the UUID path.
+
+    Brave/Chrome always report ``webSocketDebuggerUrl`` as
+    ``ws://localhost:<port>/devtools/browser/<uuid>`` regardless of how the
+    client reached them. Inside Docker, "localhost" is the container — a
+    client that trusts the reported URL verbatim connects to the wrong host.
+    """
+    if not ws_url or not ws_url.startswith("ws://"):
+        raise ValueError(f"Not a ws:// CDP URL: {ws_url!r}")
+    from urllib.parse import urlparse
+
+    path = urlparse(ws_url).path
+    return f"ws://{host}:{port}{path}"
+
+
+async def resolve_browser_ws_url(
+    port: int = DEFAULT_CDP_PORT,
+    host: str = "localhost",
+) -> str | None:
+    """Resolve the browser-level CDP ws:// URL with an honest host.
+
+    Queries ``/json/version`` (DNS-resolving non-localhost hosts first —
+    Chromium's debug port validates the ``Host:`` header and only accepts
+    an IP or literal "localhost"), then rewrites the reported
+    ``webSocketDebuggerUrl`` onto the host/port we actually reached.
+    Returns None if the browser is unreachable or the field is missing.
+    """
+    target_host = host
+    if host not in ("localhost", "127.0.0.1"):
+        import socket as _socket
+
+        try:
+            target_host = _socket.gethostbyname(host)
+        except OSError as exc:
+            logger.debug(
+                "resolve_browser_ws_url DNS-resolve failed (%s): %s", host, exc
+            )
+            return None
+
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"http://{target_host}:{port}/json/version")
+            if resp.status_code != 200:
+                logger.debug(
+                    "CDP /json/version returned %d on %s:%d",
+                    resp.status_code, target_host, port,
+                )
+                return None
+            ws_url = resp.json().get("webSocketDebuggerUrl")
+            if not ws_url:
+                logger.debug("No webSocketDebuggerUrl on %s:%d", target_host, port)
+                return None
+            return rewrite_ws_host(ws_url, host=target_host, port=port)
+    except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
+        logger.debug(
+            "resolve_browser_ws_url failed on %s:%d: %s", target_host, port, exc
+        )
+        return None
+
+
 async def list_chrome_tabs(
     port: int = DEFAULT_CDP_PORT,
     host: str = "localhost",

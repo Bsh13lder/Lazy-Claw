@@ -56,6 +56,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 1 GB Chromium download is cached above the volatile MCP COPYs. crawl4ai
 # (mcp-scraper) imports playwright; pip sees it already installed and skips.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Belt-and-suspenders: the vendored browser-use subset excludes telemetry
+# entirely, but if the full package is ever installed this keeps PostHog off.
+ENV ANONYMIZED_TELEMETRY=False
 RUN pip install --no-cache-dir playwright \
     && playwright install --with-deps chromium \
     && chmod -R a+rx /ms-playwright

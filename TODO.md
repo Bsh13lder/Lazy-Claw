@@ -1,5 +1,17 @@
 # TODO
 
+## Browser action layer — vendored browser-use (2026-08-15)
+Architecture-review §5 outcome. Details in DOCS.md → "Browser action layer —
+vendored browser-use adoption (2026-08-15)".
+- [x] Research + license verdicts (browser-use MIT ✓; Camoufox/Agent-Reach/pinchtab no-fit; nodriver/zendriver/lightpanda/Skyvern AGPL, Notte SSPL — rejected)
+- [x] Vendor slim actor/dom subset → `lazyclaw/_vendor/browser_use/` (no Agent/bubus/watchdogs/telemetry); deps `cdp-use`+`uuid7`+`psutil`
+- [x] `browser_use_backend.py` rewritten on 0.13 actor API — attach-only, human_input cadence preserved, our event bus, ws-URL rewrite for Docker
+- [x] Unit suite (59 green) + live battery: V1 20/20, V2 50/50 (p50 2.69s), V3 Upwork-behind-Cloudflare 3/3
+- [x] License gate `tests/test_license_gate.py` + camoufox removed from mcp-upwork + `ANONYMIZED_TELEMETRY=False` in Dockerfile
+- [ ] Rollout gate: 10/10 cold Upwork attaches over ≥2h, then opt-in admin user via `browser_settings["backend"]="browser_use"` (default stays `"cdp"`)
+- [ ] **DECISION NEEDED: aioimaplib is GPL-3.0** (mcp-email dep, found by the license gate) — replace with permissive async IMAP or make a licensing call
+- [ ] Follow-ups: unify the 3 click/type paths (ref-path bypasses cadence today); DomService serializer as alternative snapshot source (token A/B); steal agent-browser session-pinning for tab_manager
+
 ## Shipped since 2026-06-13 (catch-up, recorded 2026-07-21)
 Work that landed while this file was stale — details in DOCS.md / MEMORY:
 - [x] Telegram chat visual upgrade (2026-06-22)

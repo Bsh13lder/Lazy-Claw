@@ -95,11 +95,22 @@ async def get_cdp_backend(user_id: str = "default"):
         from lazyclaw.browser.browser_use_backend import is_available
         if is_available():
             from lazyclaw.browser.browser_use_backend import BrowserUseBackend
-            if _cdp_backend is None or getattr(_cdp_backend, "backend_type", "") != "browser_use":
-                _cdp_backend = BrowserUseBackend(headless=True, profile_dir=profile_dir)
+            port = getattr(config, "cdp_port", 9222)
+            if (
+                _cdp_backend is None
+                or getattr(_cdp_backend, "backend_type", "") != "browser_use"
+                or getattr(_cdp_backend, "_profile_dir", None) != profile_dir
+            ):
+                _cdp_backend = BrowserUseBackend(
+                    port=port, profile_dir=profile_dir, user_id=user_id
+                )
+            else:
+                _cdp_backend.set_user_id(user_id)
             return _cdp_backend
         else:
-            logger.warning("browser-use not installed, falling back to CDP backend")
+            logger.warning(
+                "vendored browser-use unavailable, falling back to CDP backend"
+            )
 
     # Default: raw CDP backend
     from lazyclaw.browser.cdp_backend import CDPBackend

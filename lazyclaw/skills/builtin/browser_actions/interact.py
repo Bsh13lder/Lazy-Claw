@@ -23,6 +23,7 @@ from lazyclaw.browser.action_verifier import (
 )
 
 from .backends import get_backend
+from .human_actions import human_click_ref, human_type_text
 from .read_open import element_not_found_hint
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def action_click(
         except Exception as exc:
             logger.debug("Failed to capture pre-click state: %s", exc)
         meta = await snapshot_mgr.get_ref_meta(backend, ref)
-        clicked = await snapshot_mgr.perform_click(backend, ref)
+        clicked = await human_click_ref(backend, snapshot_mgr, ref)
         if clicked:
             await asyncio.sleep(random.uniform(0.2, 0.8))
             name = meta.get("name", ref) if meta else ref
@@ -138,15 +139,7 @@ async def action_type(
             logger.debug("Failed to capture pre-type state: %s", exc)
         focused = await snapshot_mgr.focus_ref(backend, ref)
         if focused:
-            conn = await backend._ensure_connected()
-            for char in text:
-                await conn.send("Input.dispatchKeyEvent", {
-                    "type": "keyDown", "text": char, "key": char,
-                })
-                await conn.send("Input.dispatchKeyEvent", {
-                    "type": "keyUp", "key": char,
-                })
-                await asyncio.sleep(random.uniform(0.03, 0.12))
+            await human_type_text(backend, text)
             meta = await snapshot_mgr.get_ref_meta(backend, ref)
             name = meta.get("name", ref) if meta else ref
             confirm = f"Typed '{text[:30]}' into [{ref}] \"{name}\""
@@ -192,20 +185,10 @@ async def action_type(
             retry_strategy=RETRY_RE_READ,
         ))
 
-    conn = await backend._ensure_connected()
-    await conn.send("Input.dispatchMouseEvent", {
-        "type": "mousePressed", "x": match["x"], "y": match["y"],
-        "button": "left", "clickCount": 1,
-    })
-    await conn.send("Input.dispatchMouseEvent", {
-        "type": "mouseReleased", "x": match["x"], "y": match["y"],
-        "button": "left", "clickCount": 1,
-    })
-    await asyncio.sleep(0.2)
-    for char in text:
-        await conn.send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
-        await conn.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
-        await asyncio.sleep(0.05)
+    # human_type clicks the field first (bezier approach), then types.
+    await human_type_text(
+        backend, text, field_x=match["x"], field_y=match["y"],
+    )
     confirm = f"Typed '{text[:30]}...' into {match['role']} \"{match['name']}\""
     if await snapshot_mgr.is_stale(backend):
         snapshot = await snapshot_mgr.take_snapshot(backend)

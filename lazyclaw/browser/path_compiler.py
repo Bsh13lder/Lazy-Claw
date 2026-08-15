@@ -453,15 +453,12 @@ async def _replay_type(backend, step: CompiledStep, text: str) -> bool:
                 await backend.click(f"[aria-label='{target}']")
                 import asyncio
                 await asyncio.sleep(0.2)
-                # Type character by character
+                # Keystrokes go through the anti-detect layer (per-domain
+                # cadence) — never a bare dispatchKeyEvent loop, which types
+                # with zero inter-key delay.
+                from lazyclaw.browser.human_input import cadence_for, human_type
                 conn = await backend._ensure_connected()
-                for char in text:
-                    await conn.send("Input.dispatchKeyEvent", {
-                        "type": "keyDown", "text": char, "key": char,
-                    })
-                    await conn.send("Input.dispatchKeyEvent", {
-                        "type": "keyUp", "key": char,
-                    })
+                await human_type(conn, text, cadence=cadence_for(backend))
                 return True
         except Exception:
             logger.debug("Role-based type failed: %s", target)

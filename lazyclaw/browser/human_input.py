@@ -32,6 +32,27 @@ def _resolve_cadence(cadence: CadenceProfile | None) -> CadenceProfile:
     """
     return cadence if cadence is not None else DEFAULT_CADENCE
 
+
+def cadence_for(backend) -> CadenceProfile | None:
+    """Per-domain cadence for *backend*, or ``None`` when it has none.
+
+    Single home for the "does this backend do cadence?" rule so every
+    caller of :func:`human_click` / :func:`human_type` resolves it the
+    same way. ``None`` is a valid answer — the input functions fall back
+    to :data:`DEFAULT_CADENCE`, which is the pre-cadence behavior — so
+    duck-typed stand-ins (``TabContext``) and any future backend work
+    without a special case.
+    """
+    getter = getattr(backend, "_active_cadence", None)
+    if getter is None:
+        return None
+    try:
+        return getter()
+    except Exception:
+        logger.debug("cadence lookup failed; using default profile", exc_info=True)
+        return None
+
+
 # ── Constants ────────────────────────────────────────────────────────
 
 # Simulated browser window offset from screen edge (realistic range)

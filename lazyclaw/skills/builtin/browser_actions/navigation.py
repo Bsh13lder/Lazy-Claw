@@ -24,6 +24,7 @@ from .backends import (
     get_visible_cdp_backend,
     raise_browser_window,
 )
+from .human_actions import human_click_ref, human_type_text
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,7 @@ async def action_chain(
 
                 if is_ref:
                     meta = await snapshot_mgr.get_ref_meta(backend, arg1)
-                    clicked = await snapshot_mgr.perform_click(backend, arg1)
+                    clicked = await human_click_ref(backend, snapshot_mgr, arg1)
                     if not clicked:
                         results.append(f"{i}. click {arg1} -> FAILED (element gone)")
                         break
@@ -316,15 +317,7 @@ async def action_chain(
                 if not focused:
                     results.append(f"{i}. type {arg1} -> FAILED (can't focus)")
                     break
-                conn = await backend._ensure_connected()
-                for char in arg2:
-                    await conn.send("Input.dispatchKeyEvent", {
-                        "type": "keyDown", "text": char, "key": char,
-                    })
-                    await conn.send("Input.dispatchKeyEvent", {
-                        "type": "keyUp", "key": char,
-                    })
-                    await asyncio.sleep(random.uniform(0.03, 0.1))
+                await human_type_text(backend, arg2)
                 results.append(f"{i}. type {arg1} \"{arg2[:30]}\"")
                 await asyncio.sleep(random.uniform(0.2, 0.5))
 

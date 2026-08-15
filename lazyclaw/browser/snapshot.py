@@ -39,6 +39,47 @@ class ElementRef:
 
 
 @dataclass(frozen=True)
+class RefBox:
+    """Viewport geometry for a resolved ref — center point plus box size.
+
+    ``x``/``y`` are the element's post-scroll center in TOP-LEVEL viewport
+    coordinates, i.e. exactly what ``Input.dispatchMouseEvent`` expects.
+    ``visible`` mirrors the engine's own visibility test so callers can
+    decline a synthetic mouse click on an element a real cursor could
+    never reach.
+    """
+
+    x: float
+    y: float
+    width: float
+    height: float
+    visible: bool
+    viewport_width: float = 0.0
+    viewport_height: float = 0.0
+
+    @property
+    def target_size(self) -> float:
+        """Fitts's-Law target width — the smaller of the two box dimensions."""
+        dims = [d for d in (self.width, self.height) if d > 0]
+        return min(dims) if dims else 20.0
+
+    def in_viewport(self) -> bool:
+        """True when the center point lies inside the visible viewport.
+
+        Sticky headers / overlay banners can leave an element scrolled
+        "into view" but still clipped; a bezier click on those coords
+        would land on the overlay instead of the target.
+        """
+        if self.x < 0 or self.y < 0:
+            return False
+        if self.viewport_width > 0 and self.x > self.viewport_width:
+            return False
+        if self.viewport_height > 0 and self.y > self.viewport_height:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
 class Landmark:
     """Page section (ARIA landmark) with its element refs."""
 
@@ -409,6 +450,46 @@ class SnapshotManager:
         if x is None or y is None:
             return None
         return (float(x), float(y))
+
+    async def resolve_ref_box(self, backend, ref_id: str) -> RefBox | None:
+        """Resolve a ref to viewport center coords + size, scrolling it in.
+
+        Composes the two engine primitives in ONE round-trip: ``click(id)``
+        scrolls the element into view and returns its post-scroll center,
+        ``resolve(id)`` supplies the box size used for Fitts's-Law timing
+        and the visibility flag. Both exist in the Chrome extension AND the
+        injected JS fallback, so no engine version bump is needed.
+
+        Returns ``None`` when the element is gone or has no layout box —
+        callers fall back to :meth:`perform_click` (DOM-level click).
+        """
+        await self._ensure_engine(backend)
+        safe = _safe_ref(ref_id)
+        raw = await backend.evaluate(
+            "(() => {"
+            f" const c = window.__lazyclaw.click('{safe}');"
+            " if (!c) return null;"
+            f" const r = window.__lazyclaw.resolve('{safe}');"
+            " return {x: c.x, y: c.y,"
+            "  width: r ? r.width : 0, height: r ? r.height : 0,"
+            "  visible: r ? !!r.visible : true,"
+            "  vw: window.innerWidth || 0, vh: window.innerHeight || 0};"
+            "})()"
+        )
+        if not raw or not isinstance(raw, dict):
+            return None
+        x, y = raw.get("x"), raw.get("y")
+        if x is None or y is None:
+            return None
+        return RefBox(
+            x=float(x),
+            y=float(y),
+            width=float(raw.get("width") or 0.0),
+            height=float(raw.get("height") or 0.0),
+            visible=bool(raw.get("visible", True)),
+            viewport_width=float(raw.get("vw") or 0.0),
+            viewport_height=float(raw.get("vh") or 0.0),
+        )
 
     async def perform_click(self, backend, ref_id: str) -> bool:
         """Click an element by ref ID using DOM click().

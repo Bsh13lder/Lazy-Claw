@@ -35,6 +35,7 @@ import 'chat/chat_backend.dart';
 import 'chat/chat_backend_switcher.dart';
 import 'chat/chat_bubble.dart';
 import 'chat/connect_error.dart';
+import 'chat/day_separator.dart';
 import 'chat/mode_switcher.dart';
 import 'chat/plan_card.dart';
 import 'inbox/inbox_screen.dart';
@@ -422,6 +423,10 @@ class _MessageList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Messages + day separators, oldest-first. The list renders `reverse:
+    // true` (newest at the bottom), so items are walked back-to-front — a
+    // separator therefore paints ABOVE the first message of its day.
+    final items = buildChatListItems(messages);
     return ListView.builder(
       controller: scrollController,
       reverse: true,
@@ -429,10 +434,13 @@ class _MessageList extends StatelessWidget {
         horizontal: AppSpacing.lg,
         vertical: AppSpacing.md,
       ),
-      itemCount: messages.length,
+      itemCount: items.length,
       itemBuilder: (ctx, i) {
-        final m = messages[messages.length - 1 - i];
-        return _buildMessageWidget(m);
+        final item = items[items.length - 1 - i];
+        return switch (item) {
+          ChatDayItem(:final label) => ChatDaySeparator(label: label),
+          ChatMessageItem(:final message) => _buildMessageWidget(message),
+        };
       },
     );
   }

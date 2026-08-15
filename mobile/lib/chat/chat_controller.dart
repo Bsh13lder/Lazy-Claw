@@ -103,13 +103,19 @@ class ChatReducer {
   /// land on `messages.last` and must keep doing so. Rows without an id that
   /// match nothing are dropped (id is the merge contract; inserting them
   /// would duplicate on every re-fetch). Returns true when anything changed.
+  ///
+  /// The known-id set covers `absorbedIds` too: a turn-merged bubble
+  /// (`chat/turn_merge.dart`) stands for several server rows, and every one of
+  /// those ids must count as already-present or the collapsed interim rows
+  /// would be re-inserted as duplicates on the next re-fetch.
   bool mergeHistoryTail(List<ChatMessage> tail) {
     if (tail.isEmpty) return false;
-    final knownIds = <String>{
-      for (final m in messages)
-        if (m.id != null && m.id!.isNotEmpty) m.id!,
-    };
-    var changed = false;
+    var changed = _dropRowsAbsorbedBy(tail);
+    final knownIds = <String>{};
+    for (final m in messages) {
+      if (m.id != null && m.id!.isNotEmpty) knownIds.add(m.id!);
+      knownIds.addAll(m.absorbedIds);
+    }
     for (final incoming in tail) {
       final id = incoming.id ?? '';
       if (id.isNotEmpty && knownIds.contains(id)) continue;
@@ -125,8 +131,10 @@ class ChatReducer {
           id: id,
           kind: incoming.kind,
           createdAt: incoming.createdAt,
+          absorbedIds: incoming.absorbedIds,
         );
         knownIds.add(id);
+        knownIds.addAll(incoming.absorbedIds);
         changed = true;
         continue;
       }
@@ -137,9 +145,26 @@ class ChatReducer {
       }
       messages.insert(insertAt, incoming);
       knownIds.add(id);
+      knownIds.addAll(incoming.absorbedIds);
       changed = true;
     }
     return changed;
+  }
+
+  /// Retroactive absorption: a refresh that lands MID-TURN can insert the
+  /// interim status row as its own bubble (the turn's final row doesn't exist
+  /// server-side yet). Once the turn completes, the tail carries the collapsed
+  /// bubble whose `absorbedIds` claim that row — so the standalone copy is
+  /// dropped here instead of lingering beside the merged one. Streaming
+  /// bubbles are never touched (they carry no server id anyway). Returns true
+  /// when anything was removed.
+  bool _dropRowsAbsorbedBy(List<ChatMessage> tail) {
+    final absorbed = <String>{for (final m in tail) ...m.absorbedIds};
+    if (absorbed.isEmpty) return false;
+    final before = messages.length;
+    messages.removeWhere((m) =>
+        !m.streaming && m.id != null && absorbed.contains(m.id));
+    return messages.length != before;
   }
 
   /// Index of the most recent id-less local message matching [incoming] by

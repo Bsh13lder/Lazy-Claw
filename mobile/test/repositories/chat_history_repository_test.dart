@@ -240,6 +240,57 @@ void main() {
       expect(history, hasLength(2)); // tool row dropped
       expect(history.map((m) => m.role), ['user', 'assistant']);
     });
+
+    test('collapses a batch-persisted turn into ONE bubble (both the seed and '
+        'the delta-merge tail come through here)', () async {
+      final t = _FakeChatTransport(
+        sessionsResponse: {
+          'sessions': [
+            {'id': 's1', 'is_primary': true},
+          ],
+        },
+        messagesResponse: {
+          'messages': [
+            {
+              'role': 'user',
+              'content': 'what does James want?',
+              'id': 'u1',
+              'created_at': '2026-08-13 15:31:05',
+            },
+            // Interim status row — carries the turn's tool_calls metadata.
+            {
+              'role': 'assistant',
+              'content': 'Checking the Upwork thread now…',
+              'id': 'a1',
+              'created_at': '2026-08-13 15:31:09',
+              'tool_calls': [
+                {
+                  'id': 'c1',
+                  'name': 'upwork_last_conversation',
+                  'status': 'done',
+                  'result': 'ok',
+                },
+              ],
+            },
+            // Final reply of the SAME turn (same created_at).
+            {
+              'role': 'assistant',
+              'content': 'He narrowed the scope to 6 cities.',
+              'id': 'a2',
+              'created_at': '2026-08-13 15:31:09',
+            },
+          ],
+        },
+      );
+      final history = await ChatHistoryRepository(t).loadPrimaryHistory();
+
+      expect(history, hasLength(2), reason: 'one user row + one merged turn');
+      final turn = history.last;
+      expect(turn.content, 'He narrowed the scope to 6 cities.');
+      expect(turn.id, 'a2');
+      expect(turn.absorbedIds, ['a1']);
+      expect(turn.toolActivities.single.name, 'upwork_last_conversation');
+    });
   });
 
   group('ChatSessionInfo.fromJson', () {

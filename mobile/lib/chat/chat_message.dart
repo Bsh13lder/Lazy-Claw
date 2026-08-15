@@ -183,6 +183,13 @@ class ChatMessage {
   /// renders with the bell treatment. Null / anything else = normal bubble.
   final String? kind;
 
+  /// Server ids of the rows this bubble ABSORBED when a batch-persisted agent
+  /// turn was collapsed into one bubble (see `chat/turn_merge.dart`). These
+  /// ids never render on their own again, so the history delta-merge MUST
+  /// treat them as already-known — otherwise every re-fetch would re-insert
+  /// the absorbed interim rows as duplicates.
+  final List<String> absorbedIds;
+
   final String role; // 'user' | 'assistant' | 'bg_task' | 'plan'
   final String content;
 
@@ -222,6 +229,7 @@ class ChatMessage {
     required this.content,
     this.id,
     this.kind,
+    this.absorbedIds = const [],
     this.createdAt,
     this.streaming = false,
     this.sendState = SendState.sent,
@@ -263,6 +271,7 @@ class ChatMessage {
   ChatMessage _clone({
     String? id,
     String? kind,
+    List<String>? absorbedIds,
     DateTime? createdAt,
     String? content,
     bool? streaming,
@@ -283,6 +292,7 @@ class ChatMessage {
         content: content ?? this.content,
         id: id ?? this.id,
         kind: kind ?? this.kind,
+        absorbedIds: absorbedIds ?? this.absorbedIds,
         createdAt: createdAt ?? this.createdAt,
         streaming: streaming ?? this.streaming,
         sendState: sendState ?? this.sendState,
@@ -335,12 +345,38 @@ class ChatMessage {
   /// Adopts the server-side identity of a history row onto a live bubble
   /// minted from WS frames (delta-merge dedup: once the id is attached,
   /// later re-fetches recognize this message instead of duplicating it).
+  /// [absorbedIds] UNIONS with whatever this message already absorbed — an
+  /// empty/absent list never clears the existing set.
   ChatMessage withServerIdentity({
     String? id,
     String? kind,
     DateTime? createdAt,
+    List<String>? absorbedIds,
   }) =>
-      _clone(id: id, kind: kind, createdAt: createdAt);
+      _clone(
+        id: id,
+        kind: kind,
+        createdAt: createdAt,
+        absorbedIds: (absorbedIds == null || absorbedIds.isEmpty)
+            ? null
+            : <String>{...this.absorbedIds, ...absorbedIds}
+                .toList(growable: false),
+      );
+
+  /// Returns the collapsed form of a batch-persisted agent turn: this row (the
+  /// LAST of the turn) keeps its identity while carrying the turn's final
+  /// [content], the union of its tool chips and the ids of the rows it
+  /// absorbed. Built by `mergeTurnRows` — see `chat/turn_merge.dart`.
+  ChatMessage withAbsorbedRows({
+    required String content,
+    required List<ToolActivity> toolActivities,
+    required List<String> absorbedIds,
+  }) =>
+      _clone(
+        content: content,
+        toolActivities: toolActivities,
+        absorbedIds: absorbedIds,
+      );
 
   /// Returns a copy with approval fields cleared (prevents double-tap).
   ChatMessage clearApproval() => _clone(clearApprovalFields: true);

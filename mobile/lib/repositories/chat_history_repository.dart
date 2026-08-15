@@ -1,4 +1,5 @@
 import '../chat/chat_message.dart';
+import '../chat/turn_merge.dart';
 import '../core/api/api_client.dart';
 
 // ── Model ──────────────────────────────────────────────────────────────────
@@ -175,6 +176,12 @@ class ChatHistoryRepository {
   /// Returns the primary session's most-recent messages mapped to
   /// [ChatMessage]s, **oldest-first** (ready to seed the chat reducer).
   /// Empty when the user has no history yet.
+  ///
+  /// Rows of one batch-persisted agent turn are collapsed into a single
+  /// bubble by [mergeTurnRows] BEFORE they leave the repository — this is the
+  /// only history source, so the seed path and every delta-merge tail fetch
+  /// are merged identically (the reducer must never see the raw interim rows,
+  /// or a re-fetch would insert them as duplicates).
   Future<List<ChatMessage>> loadPrimaryHistory({int limit = 50}) async {
     final sessions = await listSessions();
     if (sessions.isEmpty) return const [];
@@ -195,6 +202,6 @@ class ChatHistoryRepository {
       final m = mapApiMessage(Map<String, dynamic>.from(e as Map));
       if (m != null) out.add(m);
     }
-    return out;
+    return mergeTurnRows(out);
   }
 }

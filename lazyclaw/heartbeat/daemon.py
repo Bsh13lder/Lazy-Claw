@@ -266,6 +266,9 @@ class HeartbeatDaemon:
         # Last day we ran the LazyBrain topic-rollup sweep per user. Cooldown
         # check inside the job is the real gate; this just bounds tick cost.
         self._last_topic_rollup_iso: dict[str, str] = {}
+        # Last day we ran the LazyBrain note-archive retention sweep per user.
+        # Same once-per-day marker pattern as the two above.
+        self._last_note_archive_iso: dict[str, str] = {}
         # Tick counter so the dirty-embedding reindex pass + plan ingest run
         # at sensible cadences (every tick / once an hour) without blocking
         # the cron + watcher passes that need to fire promptly.
@@ -464,6 +467,10 @@ class HeartbeatDaemon:
 
         # Run LazyBrain topic-rollup sweep once per day per user.
         await self._sweep_topic_rollups()
+
+        # Archive stale auto-captured LazyBrain noise once per day per user
+        # so default recall stays signal-dense. Pure SQL, no LLM, no decrypt.
+        await self._sweep_note_archive()
 
         # Second-Brain Substrate (Phase 2): drain dirty embeddings.
         # Removed 2026-05-21: hourly mirror of ~/.claude/plans/*.md into
@@ -2742,6 +2749,58 @@ class HeartbeatDaemon:
             except Exception:
                 logger.warning(
                     "topic rollup sweep failed for user %s",
+                    user_id, exc_info=True,
+                )
+
+    async def _sweep_note_archive(self) -> None:
+        """Archive stale auto-captured LazyBrain notes, once per user per day.
+
+        The store is ~93.5% auto-captured notes (2026-08-14 audit), so
+        default recall drowns in per-message captures, per-URL visit
+        breadcrumbs and per-status task mirrors. ``archive_stale_auto_notes``
+        flips ``notes.archived = 1`` on the aged-out, low-importance,
+        non-typed subset — reversible, and already honoured by every default
+        reader (``list_notes`` / ``search_notes`` / ``list_memory_notes`` /
+        ``graph``).
+
+        Cheap by construction: two SQL ``UPDATE``s per user against plaintext
+        columns — no DEK derivation, no per-note decrypt, no LLM. Scoped to
+        users who actually own notes (``SELECT DISTINCT user_id FROM notes``)
+        so empty/dead accounts cost nothing.
+
+        Never raises. Failures degrade to a logged warning; the marker is
+        only stamped on success so a transient error retries next tick.
+        """
+        from lazyclaw.lazybrain import maintenance as _lb_maint
+        from lazyclaw.lazybrain import timezone_util as _tzu
+
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute(
+                    "SELECT DISTINCT user_id FROM notes WHERE deleted_at IS NULL"
+                )
+                users = [r[0] for r in await cursor.fetchall() if r[0]]
+        except Exception:
+            logger.debug("note archive sweep: list users failed", exc_info=True)
+            return
+
+        for user_id in users:
+            today = _tzu.today_iso(user_id)
+            if self._last_note_archive_iso.get(user_id) == today:
+                continue
+            try:
+                archived = await _lb_maint.archive_stale_auto_notes(
+                    self._config, user_id,
+                )
+                self._last_note_archive_iso[user_id] = today
+                if archived:
+                    logger.info(
+                        "note archive sweep: user=%s archived=%d note(s)",
+                        user_id, archived,
+                    )
+            except Exception:
+                logger.warning(
+                    "note archive sweep failed for user %s",
                     user_id, exc_info=True,
                 )
 

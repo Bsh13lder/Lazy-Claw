@@ -20,7 +20,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable
 
@@ -334,8 +336,130 @@ def capture_canonical_title(kind: str, content: str, base_title: str | None) -> 
 
 
 # ---------------------------------------------------------------------------
+# Flood control — per-user hourly cap
+# ---------------------------------------------------------------------------
+#
+# Auto-capture fires on EVERY user message (``runtime/agent.py:~7986``,
+# fire-and-forget). A chatty hour therefore mints a note per turn, and the
+# 2026-08-14 audit measured the result: 93.5% of the store (2,676 of 2,863
+# notes) is auto-captured. Retrieval quality is a signal-to-noise problem,
+# so the write side gets a ceiling.
+#
+# Deliberately in-memory: no DB round trip on the hot fire-and-forget path,
+# and a restart simply reopens the window (fail-open — losing the counter
+# can only under-throttle, never drop a user's real note permanently since
+# the same message is never re-processed anyway).
+
+#: Captures allowed per user per rolling hour. Override with
+#: ``LAZYCLAW_AUTOCAPTURE_HOURLY_CAP`` (``0`` or negative disables the cap).
+DEFAULT_AUTOCAPTURE_HOURLY_CAP = 12
+
+_CAPTURE_WINDOW_SECONDS = 3600.0
+
+#: Bound the dict so a multi-user deployment can't grow it forever
+#: (mirrors ``heartbeat/daemon.py:_MAX_WATCHER_CONTEXT_USERS``).
+_MAX_THROTTLE_USERS = 500
+
+# user_id -> (window_start_monotonic, count_in_window). Values are replaced
+# wholesale, never mutated in place.
+_capture_windows: dict[str, tuple[float, int]] = {}
+
+
+def autocapture_hourly_cap() -> int:
+    """Resolve the per-user hourly cap from the environment.
+
+    Read per call (not cached at import) so a deployment can flip the knob
+    without a rebuild, and so tests can monkeypatch the env var.
+    Unparseable values fall back to the default rather than raising.
+    """
+    raw = os.environ.get("LAZYCLAW_AUTOCAPTURE_HOURLY_CAP", "").strip()
+    if not raw:
+        return DEFAULT_AUTOCAPTURE_HOURLY_CAP
+    try:
+        return int(raw)
+    except ValueError:
+        logger.debug(
+            "invalid LAZYCLAW_AUTOCAPTURE_HOURLY_CAP=%r; using default %d",
+            raw, DEFAULT_AUTOCAPTURE_HOURLY_CAP,
+        )
+        return DEFAULT_AUTOCAPTURE_HOURLY_CAP
+
+
+def reset_capture_throttle(user_id: str | None = None) -> None:
+    """Clear throttle state (all users, or just ``user_id``). Test seam."""
+    if user_id is None:
+        _capture_windows.clear()
+    else:
+        _capture_windows.pop(user_id, None)
+
+
+def _prune_expired_windows(now: float) -> None:
+    """Drop windows that have already rolled over, then hard-cap the dict."""
+    expired = [
+        uid for uid, (start, _) in _capture_windows.items()
+        if now - start >= _CAPTURE_WINDOW_SECONDS
+    ]
+    for uid in expired:
+        _capture_windows.pop(uid, None)
+    if len(_capture_windows) >= _MAX_THROTTLE_USERS:
+        oldest = min(_capture_windows, key=lambda u: _capture_windows[u][0])
+        _capture_windows.pop(oldest, None)
+
+
+def _consume_capture_budget(user_id: str) -> bool:
+    """Claim one capture slot for ``user_id``. False when the cap is hit.
+
+    Monotonic rolling window: the first capture of a window stamps its
+    start; once ``_CAPTURE_WINDOW_SECONDS`` elapse the window resets and the
+    budget refills. ``time.monotonic`` (not wall clock) so an NTP step or a
+    laptop suspend can't retroactively widen or shrink the window.
+    """
+    cap = autocapture_hourly_cap()
+    if cap <= 0:
+        return True  # cap disabled
+
+    now = time.monotonic()
+    window = _capture_windows.get(user_id)
+    if window is None or now - window[0] >= _CAPTURE_WINDOW_SECONDS:
+        if window is None:
+            _prune_expired_windows(now)
+        _capture_windows[user_id] = (now, 1)
+        return True
+
+    start, count = window
+    if count >= cap:
+        return False
+    _capture_windows[user_id] = (start, count + 1)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
+
+async def _capture_text_unthrottled(
+    config: Config,
+    user_id: str,
+    text: str,
+    *,
+    min_confidence: float,
+    trace_session_id: str | None,
+    source: str,
+) -> list[str]:
+    """Regex tier body, with the hourly cap already claimed by the caller.
+
+    Split out so :func:`capture_text_with_llm` consumes exactly ONE slot per
+    message instead of double-counting through its inner regex pass.
+    """
+    try:
+        captures = [c for c in extract(text) if c.confidence >= min_confidence]
+        return await _persist(config, user_id, captures, trace_session_id, source)
+    except Exception:
+        logger.warning(
+            "auto_capture regex tier failed for user %s", user_id, exc_info=True,
+        )
+        return []
+
 
 async def capture_text(
     config: Config,
@@ -351,15 +475,22 @@ async def capture_text(
     Returns the list of newly-created note IDs. Silent on failure.
     Pure regex — no LLM. Call :func:`capture_text_with_llm` for the
     worker-routed fallback.
+
+    Rate-limited per user (see :func:`_consume_capture_budget`) — over the
+    hourly cap this returns ``[]`` without touching the DB.
     """
-    try:
-        captures = [c for c in extract(text) if c.confidence >= min_confidence]
-        return await _persist(config, user_id, captures, trace_session_id, source)
-    except Exception:
-        logger.warning(
-            "auto_capture regex tier failed for user %s", user_id, exc_info=True,
+    if not _consume_capture_budget(user_id):
+        logger.debug(
+            "auto_capture skipped for user %s — hourly cap (%d) reached",
+            user_id, autocapture_hourly_cap(),
         )
         return []
+    return await _capture_text_unthrottled(
+        config, user_id, text,
+        min_confidence=min_confidence,
+        trace_session_id=trace_session_id,
+        source=source,
+    )
 
 
 _LLM_PROMPT = """Extract the single most important thing worth remembering from this message.
@@ -407,8 +538,20 @@ async def capture_text_with_llm(
     extraction runs on whichever worker the user's ECO mode has configured
     (local Gemma in HYBRID, Haiku in FULL, Claude CLI in CLAUDE, etc.).
     Never hardcodes a model. Fire-and-forget on failure.
+
+    The hourly cap is claimed ONCE here and the inner regex pass runs
+    unthrottled — gating at this entry point (rather than only inside
+    ``capture_text``) is what keeps a throttled message from still paying
+    for the 1–3s worker-LLM round trip.
     """
-    regex_ids = await capture_text(
+    if not _consume_capture_budget(user_id):
+        logger.debug(
+            "auto_capture (llm tier) skipped for user %s — hourly cap (%d) reached",
+            user_id, autocapture_hourly_cap(),
+        )
+        return []
+
+    regex_ids = await _capture_text_unthrottled(
         config,
         user_id,
         text,

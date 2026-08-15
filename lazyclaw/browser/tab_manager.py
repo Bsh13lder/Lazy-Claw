@@ -199,6 +199,48 @@ class TabManager:
         self._waiters: dict[str, list[asyncio.Future[TabContext]]] = {}
         self._lock = asyncio.Lock()
 
+    # ── Ownership registration (cross-lane hijack defense) ─────────────
+    #
+    # Every specialist tab is registered in ``owned_tabs`` under a
+    # ``specialist:<domain>`` lane so the foreground agent's
+    # ``_pick_preferred_tab`` EXCLUDES it (never drives a specialist's tab)
+    # and the tab reaper ANCHORS it (never closes one mid-task). Ported
+    # from vercel-labs/agent-browser's session-pinning (2026-08-15) — but
+    # via the shared ownership registry, not browser-context isolation,
+    # because LazyClaw deliberately shares one signed-in profile.
+
+    def _owner_uid(self) -> str | None:
+        return getattr(self._backend, "_user_id", None)
+
+    @staticmethod
+    def _owner_key(domain: str) -> str:
+        return f"specialist:{domain}"
+
+    def _register_owned(self, domain: str, target_id: str) -> None:
+        from lazyclaw.browser import owned_tabs
+
+        owned_tabs.set_owned(self._owner_uid(), self._owner_key(domain), target_id)
+
+    def _clear_owned(self, domain: str) -> None:
+        from lazyclaw.browser import owned_tabs
+
+        owned_tabs.clear_owned(self._owner_uid(), self._owner_key(domain))
+
+    async def _target_alive(self, target_id: str) -> bool:
+        """True if *target_id* is still an open tab in the browser.
+
+        On any listing error we assume alive — a transient CDP hiccup must
+        never make us discard a perfectly good, cookie-warm tab.
+        """
+        try:
+            return any(
+                getattr(t, "id", None) == target_id
+                for t in await self._backend.tabs()
+            )
+        except Exception:
+            logger.debug("tab liveness check failed; assuming alive", exc_info=True)
+            return True
+
     async def acquire(self, url: str, specialist_id: str) -> TabContext:
         """Get an exclusive tab for a URL's domain.
 
@@ -209,11 +251,18 @@ class TabManager:
         waiter_fut: asyncio.Future[TabContext] | None = None
 
         async with self._lock:
-            # 1. Idle tab for same domain -> reuse
+            # 1. Idle tab for same domain -> reuse, but only if it's STILL
+            # open. A pinned tab can be closed underneath us (user, reaper,
+            # crash); reusing its stale target_id would fail every command.
+            # Dead pin -> drop it and fall through to create a fresh one.
             lease = self._leases.get(domain)
             if lease and not lease.in_use:
-                lease.acquire(specialist_id)
-                return lease.context
+                if await self._target_alive(lease.context.target_id):
+                    lease.acquire(specialist_id)
+                    return lease.context
+                self._leases.pop(domain, None)
+                self._clear_owned(domain)
+                lease = None
 
             # 2. Tab occupied -> create waiter, will wait outside lock
             if lease and lease.in_use:
@@ -253,6 +302,7 @@ class TabManager:
             if idle:
                 oldest_domain = min(idle, key=lambda x: x[1].last_used)[0]
                 old_lease = self._leases.pop(oldest_domain)
+                self._clear_owned(oldest_domain)
                 try:
                     await old_lease.context.close()
                 except Exception:
@@ -276,6 +326,7 @@ class TabManager:
                 except Exception:
                     logger.warning("Failed to close tab context for domain %s during release", domain, exc_info=True)
                 self._leases.pop(domain, None)
+                self._clear_owned(domain)
                 for fut in self._waiters.pop(domain, []):
                     if not fut.done():
                         fut.set_exception(RuntimeError(f"Tab closed: {domain}"))
@@ -317,7 +368,8 @@ class TabManager:
     async def cleanup(self) -> None:
         """Close all tabs. Called on shutdown."""
         async with self._lock:
-            for lease in self._leases.values():
+            for domain, lease in self._leases.items():
+                self._clear_owned(domain)
                 try:
                     await lease.context.close()
                 except Exception:
@@ -332,9 +384,15 @@ class TabManager:
     async def _create_and_lease(
         self, url: str, domain: str, specialist_id: str,
     ) -> TabContext:
-        """Create a new tab and lease it. Must be called with _lock held."""
-        target_id = await self._backend.new_tab(url)
+        """Create a new tab and lease it. Must be called with _lock held.
+
+        The tab is opened in the BACKGROUND (never brought to front) so a
+        parallel specialist can't yank the user's visible screen around,
+        and registered as owned so the foreground pick + reaper respect it.
+        """
+        target_id = await self._backend.new_tab(url, background=True)
         session_id = await self._backend.attach_to_target(target_id)
+        self._register_owned(domain, target_id)
         context = TabContext(
             backend=self._backend,
             target_id=target_id,

@@ -566,13 +566,17 @@ class BrowserUseBackend:
                 logger.debug("activateTarget failed", exc_info=True)
         self._emit("action", action="switch_tab", target=tab_id)
 
-    async def new_tab(self, url: str = "about:blank") -> str:
+    async def new_tab(
+        self, url: str = "about:blank", *, background: bool = False
+    ) -> str:
         async with self._connect_lock:
             if self._client is None or self._client.ws is None:
                 await self._connect()
-        created = await self._client.send_raw(
-            "Target.createTarget", {"url": url}
-        )
+        params: dict = {"url": url}
+        if background:
+            # Open without stealing the foreground (parity with CDPBackend).
+            params["background"] = True
+        created = await self._client.send_raw("Target.createTarget", params)
         return created["targetId"]
 
     async def close_tab(self, target_id: str) -> None:

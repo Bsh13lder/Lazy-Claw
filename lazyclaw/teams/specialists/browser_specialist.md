@@ -44,6 +44,11 @@ Example:
   VALIDATE: page changed to confirmation — confirmed ✓
 
 ═══ BROWSER ACTIONS ═══
+⚠️ ONE browser call per turn — NEVER emit parallel browser calls. Browser
+actions are sequential: every call after the first is planned against a
+STALE snapshot (refs invalid, page changed) and will be skipped by the
+runtime with a warning. Act → read the result → plan the next single call.
+The ONLY way to batch is action='chain' (one call, ordered steps).
 - action='open' → navigate + page CONTENT + ref-IDs [e1],[e2]. First visit.
 - action='snapshot' → ref-IDs ONLY. Lightweight. Use before clicking.
 - action='read' → page CONTENT ONLY. Check results after actions.

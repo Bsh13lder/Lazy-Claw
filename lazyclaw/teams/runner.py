@@ -187,6 +187,38 @@ def wildcard_allows(
     return True
 
 
+_BROWSER_SKIP_MESSAGE = (
+    "[skipped] Browser actions are SEQUENTIAL — only the FIRST browser call "
+    "in this turn was executed; this one was planned against a snapshot that "
+    "the previous action may have invalidated (stale refs, changed page). "
+    "Read the result of the executed action, then plan your next single "
+    "browser call from the fresh state. To batch known-safe steps in one "
+    "call, use browser(action='chain', steps=[...])."
+)
+
+
+def browser_calls_to_skip(tool_calls) -> frozenset[str]:
+    """IDs of `browser` tool calls after the FIRST one in an assistant turn.
+
+    Browser actions mutate shared page state: parallel browser calls in one
+    turn are all planned against the SAME pre-action snapshot, so every call
+    after the first executes blind (stale ref ids, wrong page — 2026-08-16
+    incident: 6-15 parallel calls per turn on himap admin). The first browser
+    call executes normally; the rest get ``_BROWSER_SKIP_MESSAGE`` as their
+    tool result so the conversation stays well-formed and the model re-plans
+    from fresh state. Non-browser tools are never skipped.
+    """
+    skip: set[str] = set()
+    seen_browser = False
+    for tc in tool_calls:
+        if tc.name != "browser":
+            continue
+        if seen_browser:
+            skip.add(tc.id)
+        seen_browser = True
+    return frozenset(skip)
+
+
 def _filter_tools(
     registry: SkillRegistry,
     allowed: tuple[str, ...],
@@ -703,6 +735,17 @@ async def run_specialist(
             )
             messages.append(assistant_msg)
 
+            # Browser calls are sequential — everything after the first in
+            # this turn gets a skip result instead of executing blind against
+            # a stale snapshot (see browser_calls_to_skip).
+            _browser_skips = browser_calls_to_skip(response.tool_calls)
+            if _browser_skips:
+                logger.warning(
+                    "Specialist %s: skipping %d parallel browser call(s) in "
+                    "one turn (sequential-only guard)",
+                    specialist.name, len(_browser_skips),
+                )
+
             for tc in response.tool_calls:
                 # Log what the specialist is calling (critical for debugging)
                 _args_summary = {k: (str(v)[:80] if isinstance(v, str) else v)
@@ -712,6 +755,14 @@ async def run_specialist(
                     "Specialist %s step %d: %s(%s)",
                     specialist.name, _iteration + 1, tc.name, _args_summary,
                 )
+
+                if tc.id in _browser_skips:
+                    messages.append(LLMMessage(
+                        role="tool",
+                        content=_BROWSER_SKIP_MESSAGE,
+                        tool_call_id=tc.id,
+                    ))
+                    continue
 
                 # Only execute if skill is in allowed list. Scraper-opted
                 # specialists also accept any mcp-scraper tool — these are

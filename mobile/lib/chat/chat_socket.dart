@@ -185,11 +185,13 @@ class ChatSocket {
     final old = _sink;
     _sink = null;
     if (old != null) {
-      try {
-        await old.close();
-      } catch (_) {
-        // Already-dead sink — nothing to close.
-      }
+      // FIRE-AND-FORGET: close() can HANG forever on a half-open channel (a
+      // dirty network drop with no close handshake). Awaiting it blocked the
+      // reconnect dial entirely — the socket never came back and a queued
+      // message sat in "Sending…" for 20+ minutes while HTTP still worked
+      // (2026-08-16 21:21). Closing is cleanup, never a prerequisite for
+      // dialling the new channel.
+      unawaited(old.close().catchError((_) {}));
     }
 
     // IMPORTANT: send the session cookie, and DO NOT send an Origin header

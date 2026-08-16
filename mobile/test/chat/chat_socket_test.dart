@@ -16,6 +16,18 @@ class _ClosingSink implements WsSink {
   Future<void> close() async => onClose();
 }
 
+/// A [WsSink] whose [close] NEVER completes — models a half-open channel
+/// (dirty network drop) where the close handshake never arrives.
+class _HangingCloseSink implements WsSink {
+  @override
+  final Stream<dynamic> stream;
+  _HangingCloseSink(this.stream);
+  @override
+  void add(String data) {}
+  @override
+  Future<void> close() => Completer<void>().future; // hangs forever
+}
+
 void main() {
   test('emits parsed frames from the underlying socket', () async {
     final incoming = StreamController<dynamic>();
@@ -164,6 +176,35 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(factoryCalls, 1, reason: 'a live socket must not be re-dialled');
     await incoming.close();
+    await socket.dispose();
+  });
+
+  test('reconnect dials even when the old sink close() never completes',
+      () async {
+    // Regression 2026-08-16 21:21: _open() awaited old.close(); on a
+    // half-open channel (dirty drop, no close handshake) that await hangs
+    // forever — ZERO re-dials for 20+ minutes while HTTP worked fine, and
+    // the queued message never left. Closing the old sink must never block
+    // the new dial.
+    var factoryCalls = 0;
+    final socket = ChatSocket(
+      channelFactory: (url, headers) {
+        factoryCalls++;
+        return factoryCalls == 1
+            ? _HangingCloseSink(const Stream.empty())
+            : FakeSink(const Stream.empty(), <String>[]);
+      },
+    );
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    expect(factoryCalls, 1);
+
+    // Force-reconnect must complete promptly and dial a fresh channel even
+    // though the first sink's close() hangs forever.
+    await socket
+        .connect('ws://x/ws/chat', cookie: 'session_id=abc', force: true)
+        .timeout(const Duration(seconds: 2));
+    expect(factoryCalls, 2,
+        reason: 'a hanging close() must not block the reconnect dial');
     await socket.dispose();
   });
 

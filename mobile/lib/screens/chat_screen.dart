@@ -88,6 +88,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   final _scrollController = ScrollController();
   bool _connected = false;
   String? _connectError;
+  StreamSubscription<bool>? _connSub;
 
   /// Chat vs Inbox — the top segment. Rendered via an [IndexedStack] so the
   /// chat subtree (scroll position, in-flight streaming bubbles) stays alive
@@ -101,6 +102,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     // Initialise local notifications the first time the chat screen mounts.
     // Safe to call multiple times — the implementation is idempotent.
     LocalNotifications.init();
+    // Reflect the REAL socket state, not a one-shot flag. Without this the
+    // badge said "Connected" forever after the first connect even when the
+    // socket had dropped — so a queued message showed "Sending…" against a
+    // green dot and the user (and I) were misled (2026-08-16). The stream
+    // emits false on every drop, true on every (re)connect.
+    _connSub = ref.read(chatSocketProvider).connectionState.listen((up) {
+      if (mounted) setState(() => _connected = up);
+    });
     _connect();
     // Replay prior conversation so the screen isn't empty on open (first call
     // seeds; later calls delta-merge). Best-effort and independent of the
@@ -130,6 +139,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _connSub?.cancel();
     _input.dispose();
     _scrollController.dispose();
     super.dispose();

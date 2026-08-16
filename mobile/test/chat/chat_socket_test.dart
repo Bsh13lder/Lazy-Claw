@@ -3,6 +3,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/chat/chat_socket.dart';
 import 'package:lazyclaw_mobile/chat/ws_frames.dart';
 
+/// A [WsSink] that records when it is closed — proves reconnect tears the
+/// old socket down instead of leaking it.
+class _ClosingSink implements WsSink {
+  @override
+  final Stream<dynamic> stream;
+  final void Function() onClose;
+  _ClosingSink(this.stream, this.onClose);
+  @override
+  void add(String data) {}
+  @override
+  Future<void> close() async => onClose();
+}
+
 void main() {
   test('emits parsed frames from the underlying socket', () async {
     final incoming = StreamController<dynamic>();
@@ -85,6 +98,73 @@ void main() {
 
     expect(factoryCalls, 1,
         reason: 'no reconnect attempts should fire after dispose');
+  });
+
+  test('reconnect CLOSES the old sink (no zombie sockets)', () async {
+    // The storm bug: _open() cancelled the subscription but never closed the
+    // old socket, so every reconnect leaked a live connection server-side.
+    final closed = <int>[];
+    var idx = 0;
+    final socket = ChatSocket(
+      channelFactory: (url, headers) {
+        final id = idx++;
+        return _ClosingSink(const Stream.empty(), () => closed.add(id));
+      },
+    );
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc',
+        force: true);
+    // The first sink (id 0) must have been closed when the second dialled.
+    expect(closed, contains(0),
+        reason: 'the previous socket must be closed on reconnect');
+    await socket.dispose();
+  });
+
+  test('verifyAlive reconnects when the socket is already disconnected',
+      () async {
+    var factoryCalls = 0;
+    final controllers = <StreamController<dynamic>>[];
+    final socket = ChatSocket(
+      channelFactory: (url, headers) {
+        factoryCalls++;
+        final c = StreamController<dynamic>();
+        controllers.add(c);
+        return FakeSink(c.stream, <String>[]);
+      },
+    );
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    expect(factoryCalls, 1);
+    await controllers.first.close(); // server drops → onDone → _isConnected=false
+    await Future<void>.delayed(Duration.zero);
+    expect(socket.isConnected, isFalse);
+
+    socket.verifyAlive();
+    await Future<void>.delayed(Duration.zero);
+    expect(factoryCalls, 2, reason: 'a known-dead socket reconnects at once');
+    await socket.dispose();
+  });
+
+  test('verifyAlive does NOT reconnect a socket that pongs', () async {
+    var factoryCalls = 0;
+    final sent = <String>[];
+    late StreamController<dynamic> incoming;
+    final socket = ChatSocket(
+      channelFactory: (url, headers) {
+        factoryCalls++;
+        incoming = StreamController<dynamic>();
+        return FakeSink(incoming.stream, sent);
+      },
+    );
+    await socket.connect('ws://x/ws/chat', cookie: 'session_id=abc');
+    expect(factoryCalls, 1);
+
+    socket.verifyAlive();
+    // Server pongs the probe ping → a frame arrives → socket proven alive.
+    incoming.add('{"type":"pong"}');
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(factoryCalls, 1, reason: 'a live socket must not be re-dialled');
+    await incoming.close();
+    await socket.dispose();
   });
 
   test('force reconnect re-dials a stale-connected socket', () async {

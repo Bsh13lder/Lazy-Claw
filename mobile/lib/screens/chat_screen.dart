@@ -116,12 +116,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // Re-establish the chat WebSocket FIRST: if the app was backgrounded
-      // when the server dropped the connection (e.g. a server restart), the
-      // suspended isolate never saw the drop, so the socket still believes
-      // it is connected and would silently swallow the next message. Force a
-      // fresh channel, then catch up on history missed while away.
-      unawaited(_connect(force: true));
+      // Cheaply VERIFY the socket rather than blindly re-dialling. Resume
+      // fires on every keyboard/notification, so force-reconnecting here
+      // buried the server in zombie sockets and stopped sends landing
+      // (2026-08-16). verifyAlive() pings once and only reconnects if the
+      // server doesn't pong — a genuinely dead socket (e.g. dropped while
+      // backgrounded). Then catch up on history missed while away.
+      ref.read(chatSocketProvider).verifyAlive();
       unawaited(ref.read(chatControllerProvider.notifier).refreshHistory());
     }
   }

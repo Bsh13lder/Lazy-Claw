@@ -64,6 +64,14 @@ class ChatSocket {
   StreamSubscription<dynamic>? _sub;
   Timer? _ping;
   Timer? _reconnect;
+  Timer? _resumeProbe;
+
+  // Liveness: set true whenever ANY frame arrives (the server pongs every
+  // ping, so a live socket always sees a frame each ping cycle). The ping
+  // timer treats a full cycle of silence as a dead socket — this is how a
+  // drop that fired no onDone (e.g. dropped while the isolate was suspended)
+  // gets detected instead of leaving `_isConnected` stale-true forever.
+  bool _sawFrameSincePing = false;
 
   // Reconnect bookkeeping — last successful target so we can re-dial it.
   String? _wsUrl;
@@ -106,6 +114,39 @@ class ChatSocket {
   /// True while a live channel is open.
   bool get isConnected => _isConnected;
 
+  /// Cheap app-resume liveness check. Replaces the old
+  /// `connect(force: true)` on resume, which re-dialled on EVERY resume
+  /// (keyboard, notification — Android fires "resumed" constantly) and, with
+  /// the sink leak, buried the server in zombie sockets.
+  ///
+  /// If we already know we're disconnected, reconnect now. Otherwise send one
+  /// ping and wait briefly: the server pongs a live socket, so no reply within
+  /// [_resumeProbeTimeout] means the socket died silently (e.g. dropped while
+  /// backgrounded) → drop and reconnect. One ping + one short timer per
+  /// resume — never a storm.
+  static const Duration _resumeProbeTimeout = Duration(seconds: 6);
+
+  void verifyAlive() {
+    if (_disposed || _wsUrl == null) return;
+    final sink = _sink;
+    if (!_isConnected || sink == null) {
+      unawaited(_open());
+      return;
+    }
+    _sawFrameSincePing = false;
+    try {
+      sink.add(encodePing());
+    } catch (_) {
+      _onDrop();
+      return;
+    }
+    _resumeProbe?.cancel();
+    _resumeProbe = Timer(_resumeProbeTimeout, () {
+      if (_disposed) return;
+      if (!_sawFrameSincePing) _onDrop(); // no pong → dead → reconnect
+    });
+  }
+
   Future<void> connect(
     String wsUrl, {
     required String cookie,
@@ -133,7 +174,23 @@ class ChatSocket {
     if (_disposed) return;
     // Tear down any previous channel before dialing a fresh one.
     _ping?.cancel();
+    _resumeProbe?.cancel();
     await _sub?.cancel();
+    // CLOSE the old socket, don't just stop listening. Cancelling _sub ends
+    // OUR subscription but leaves the underlying WebSocket open server-side,
+    // so repeated reconnects (force-reconnect fired on every app resume) piled
+    // up zombie connections — the server logged connect after connect with no
+    // disconnect and sends stopped landing (2026-08-16 storm). Closing here
+    // makes every reconnect self-cleaning.
+    final old = _sink;
+    _sink = null;
+    if (old != null) {
+      try {
+        await old.close();
+      } catch (_) {
+        // Already-dead sink — nothing to close.
+      }
+    }
 
     // IMPORTANT: send the session cookie, and DO NOT send an Origin header
     // (native client → server allows absent Origin; presence triggers CORS).
@@ -145,6 +202,7 @@ class ChatSocket {
       (data) {
         // First byte off a fresh channel means we're healthy — reset backoff.
         _attempt = 0;
+        _sawFrameSincePing = true;
         _frames.add(parseServerFrame(data.toString()));
       },
       onError: (e) {
@@ -154,8 +212,18 @@ class ChatSocket {
       onDone: _onDrop,
       cancelOnError: true,
     );
-    _ping = Timer.periodic(
-        const Duration(seconds: 30), (_) => _sink?.add(encodePing()));
+    _sawFrameSincePing = true; // grace for the first cycle
+    _ping = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!_sawFrameSincePing) {
+        // A full cycle with no pong/frame — the socket is dead even though no
+        // onDone fired. Drop → reconnect (backoff), instead of pinging a
+        // corpse forever.
+        _onDrop();
+        return;
+      }
+      _sawFrameSincePing = false;
+      _sink?.add(encodePing());
+    });
     _isConnected = true;
     _connected.add(true);
     _flushOutbox(sink);
@@ -243,6 +311,7 @@ class ChatSocket {
     _disposed = true;
     _ping?.cancel();
     _reconnect?.cancel();
+    _resumeProbe?.cancel();
     for (final p in _outbox) {
       p.expiry?.cancel();
     }

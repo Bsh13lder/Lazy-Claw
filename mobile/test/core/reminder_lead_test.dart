@@ -245,4 +245,38 @@ void main() {
           (value: 90, unit: ReminderLeadUnit.minutes));
     });
   });
+
+  group('leadRepresentsReminder', () {
+    test('true for a clean 30-min lead pair', () {
+      expect(
+        leadRepresentsReminder('2026-06-10T17:00:00', '2026-06-10T16:30:00'),
+        isTrue,
+      );
+    });
+
+    test('true for an at-time pair', () {
+      expect(
+        leadRepresentsReminder('2026-06-10T17:00:00', '2026-06-10T17:00:00'),
+        isTrue,
+      );
+    });
+
+    test('FALSE for a reminder AFTER its due (negative lead)', () {
+      // The midnight-due / late-night-reminder recurring chain — the shape
+      // whose coerced "At time" save caused the 2026-07-31 past-fire.
+      expect(
+        leadRepresentsReminder('2026-06-10T00:00:00', '2026-06-10T23:30:00'),
+        isFalse,
+      );
+    });
+
+    test('true when there is nothing to lose', () {
+      expect(leadRepresentsReminder('2026-06-10T17:00:00', null), isTrue);
+      expect(leadRepresentsReminder('2026-06-10T17:00:00', ''), isTrue);
+      expect(
+        leadRepresentsReminder('2026-06-10', '2026-06-10T09:00:00'),
+        isTrue, // date-only due: the surviving-reminder path owns preservation
+      );
+    });
+  });
 }

@@ -144,6 +144,28 @@ ReminderLead leadFromReminderAt(String? dueDate, String? reminderAt) {
   return ReminderLead(diff);
 }
 
+/// True when the stored due/reminder pair ROUND-TRIPS through the lead model —
+/// i.e. recomposing `due − leadFromReminderAt(due, rem)` reproduces the stored
+/// reminder instant. False for shapes the picker cannot express, above all a
+/// reminder AFTER its due (a NEGATIVE lead, which [leadFromReminderAt] coerces
+/// to `At time`): the recurring "due at midnight, ping at 23:30 that night"
+/// chain is exactly that shape. A save that trusts the coerced lead rewrites
+/// such a reminder onto the due instant — for a midnight due edited during the
+/// day, an instant HOURS in the past, which the server then nags within a
+/// minute (the 2026-07-31 "fired at 13:27 instead of midnight" incident).
+/// Callers must preserve the raw reminder instead of recomposing when this is
+/// false and the user hasn't touched the reminder control.
+bool leadRepresentsReminder(String? dueDate, String? reminderAt) {
+  if (reminderAt == null || reminderAt.isEmpty) return true; // nothing to lose
+  if (!dueDateHasTime(dueDate)) return true; // date-only path preserves already
+  final due = DateTime.tryParse(dueDate!);
+  final rem = DateTime.tryParse(reminderAt);
+  if (due == null || rem == null) return true;
+  final lead = leadFromReminderAt(dueDate, reminderAt).lead;
+  if (lead == null) return false;
+  return due.subtract(lead).isAtSameMomentAs(rem);
+}
+
 /// Format a reminder instant as the local ISO string the store expects — same
 /// `yyyy-MM-ddTHH:mm:00` shape as [composeDueDate] (no millis, no `Z`), so it
 /// round-trips through `DateTime.parse` / `tz.TZDateTime.from` like a due date.

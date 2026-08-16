@@ -186,10 +186,27 @@ def test_resolver_leaves_every_other_tool_unchanged():
 
 def test_override_table_stays_small():
     """A per-skill config surface here would re-create the budget sprawl this
-    file exists to prevent. Any addition must come with a nesting proof."""
-    assert set(PER_TOOL_TIMEOUTS) == {"browser"}
+    file exists to prevent. Any addition must come with a nesting proof.
+
+    Nesting proofs on file:
+      browser (180s): one Cloudflare navigation exceeds 60s; 180 < 480 floor.
+      ask_brain (320s): the tool legitimately WAITS — brain consult (~60s
+        worst case) + 240s user-question checkpoint (QUESTION_TIMEOUT_SECONDS
+        in skills/builtin/ask_brain.py). First live use (2026-08-16 09:55)
+        proved the 60s default kills it mid-wait. 240 < 320 < 480 floor.
+    """
+    assert set(PER_TOOL_TIMEOUTS) == {"browser", "ask_brain"}
     for name, value in PER_TOOL_TIMEOUTS.items():
         assert value < _BROWSER_SYNC_TIMEOUT_FLOOR_S, (
             f"per-tool cap for {name} ({value}s) must stay under the "
             f"innermost dispatch budget ({_BROWSER_SYNC_TIMEOUT_FLOOR_S}s)"
         )
+
+    # The inner checkpoint wait must finish BEFORE the executor cap, or the
+    # executor kills ask_brain while the user is still typing an answer.
+    from lazyclaw.skills.builtin.ask_brain import QUESTION_TIMEOUT_SECONDS
+
+    assert QUESTION_TIMEOUT_SECONDS < PER_TOOL_TIMEOUTS["ask_brain"], (
+        "ask_brain's user-question wait must be strictly inside its own "
+        "executor cap (child < parent, always)"
+    )

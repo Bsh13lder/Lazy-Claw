@@ -49,6 +49,13 @@ DEFAULT_TOOL_TIMEOUT = 60
 # tail latency does not fit the default, not a per-skill config surface.
 PER_TOOL_TIMEOUTS: dict[str, int] = {
     "browser": 180,
+    # ask_brain legitimately WAITS: brain consult (~1 min worst case) plus
+    # the 240s user-question checkpoint (QUESTION_TIMEOUT_SECONDS in
+    # skills/builtin/ask_brain.py). The 60s default killed it mid-wait on
+    # first live use (2026-08-16 09:55 — three kills, dangling question
+    # cards, stuck-detector cleanup). 320s keeps the nesting rule intact:
+    # 240s inner wait < 320s tool cap < 480s sync browser floor < 600s.
+    "ask_brain": 320,
 }
 
 

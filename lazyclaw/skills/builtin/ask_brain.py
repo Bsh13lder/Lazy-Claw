@@ -32,9 +32,11 @@ QUESTION_TIMEOUT_SECONDS = 240
 _ASK_USER_MARKER = "ASK_USER:"
 
 _CONSULT_SYSTEM = (
-    "You are the team lead. One of your specialists is STUCK mid-task and "
-    "asks for guidance. Reply with ONE decisive instruction (2-5 sentences, "
-    "no hedging) the specialist can act on immediately.\n"
+    "You are the team lead of the user's personal assistant. Specialists "
+    "operate ONLY the user's own authorized accounts, sites and systems on "
+    "the user's explicit instructions. One of your specialists is STUCK "
+    "mid-task and asks for guidance. Reply with ONE decisive instruction "
+    "(2-5 sentences, no hedging) the specialist can act on immediately.\n"
     "ONLY if the question genuinely requires the user's own decision — "
     "missing personal data, an irreversible/costly choice, or a personal "
     "preference — reply with exactly:\n"

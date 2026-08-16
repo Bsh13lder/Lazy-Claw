@@ -188,34 +188,47 @@ def wildcard_allows(
 
 
 _BROWSER_SKIP_MESSAGE = (
-    "[skipped] Browser actions are SEQUENTIAL — only the FIRST browser call "
-    "in this turn was executed; this one was planned against a snapshot that "
-    "the previous action may have invalidated (stale refs, changed page). "
-    "Read the result of the executed action, then plan your next single "
-    "browser call from the fresh state. To batch known-safe steps in one "
-    "call, use browser(action='chain', steps=[...])."
+    "[skipped] Only ONE state-changing browser action runs per turn; this one "
+    "was planned against a snapshot the executed action may have invalidated "
+    "(stale refs, changed page). Read the result of the executed action, then "
+    "plan your next single action from the fresh state. To batch known-safe "
+    "steps in one call, use browser(action='chain', steps=[...])."
 )
+
+# Read-only browser actions don't mutate page state, so any number may run in
+# one turn AND they never starve a following action. Everything else (click,
+# type, open, chain, scroll, …) is state-changing and serialized to one/turn.
+_READONLY_BROWSER_ACTIONS = frozenset({
+    "snapshot", "read", "tabs", "screenshot", "console_logs",
+    "network", "ocr", "show", "ask_vision",
+})
 
 
 def browser_calls_to_skip(tool_calls) -> frozenset[str]:
-    """IDs of `browser` tool calls after the FIRST one in an assistant turn.
+    """IDs of `browser` calls to skip: everything AFTER the first STATE-CHANGING
+    browser action in the turn.
 
-    Browser actions mutate shared page state: parallel browser calls in one
-    turn are all planned against the SAME pre-action snapshot, so every call
-    after the first executes blind (stale ref ids, wrong page — 2026-08-16
-    incident: 6-15 parallel calls per turn on himap admin). The first browser
-    call executes normally; the rest get ``_BROWSER_SKIP_MESSAGE`` as their
-    tool result so the conversation stays well-formed and the model re-plans
-    from fresh state. Non-browser tools are never skipped.
+    Multiple browser ACTIONS in one turn are all planned against the same
+    pre-action snapshot, so actions 2..N execute blind (stale refs, wrong
+    page — 2026-08-16 himap incident: 6-15 parallel calls/turn). But keeping
+    only the *first browser call regardless of type* starved the action when
+    the model front-loaded a snapshot: [snapshot, click, …] ran the snapshot
+    and skipped the click EVERY turn, so the page never changed and the task
+    failed (regression 2026-08-16 12:34). So: read-only calls (snapshot/read/
+    tabs/…) run freely, the FIRST state-changing action runs, and only calls
+    after that first action are skipped. Non-browser tools are never skipped.
     """
     skip: set[str] = set()
-    seen_browser = False
+    seen_action = False
     for tc in tool_calls:
         if tc.name != "browser":
             continue
-        if seen_browser:
+        if seen_action:
             skip.add(tc.id)
-        seen_browser = True
+            continue
+        action = (tc.arguments or {}).get("action", "")
+        if action not in _READONLY_BROWSER_ACTIONS:
+            seen_action = True  # the one action that runs; skip any after it
     return frozenset(skip)
 
 

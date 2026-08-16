@@ -25,20 +25,21 @@ class TestBrowserCallsToSkip:
         calls = [_tc("1", "browser", action="read")]
         assert browser_calls_to_skip(calls) == frozenset()
 
-    def test_second_and_later_browser_calls_skipped(self):
+    def test_calls_after_the_first_action_are_skipped(self):
+        # read runs, click (first action) runs, the trailing read is skipped.
         calls = [
             _tc("1", "browser", action="read"),
             _tc("2", "browser", action="click", ref="e5"),
             _tc("3", "browser", action="read"),
         ]
-        assert browser_calls_to_skip(calls) == frozenset({"2", "3"})
+        assert browser_calls_to_skip(calls) == frozenset({"3"})
 
     def test_non_browser_calls_never_skipped(self):
         calls = [
-            _tc("1", "browser", action="read"),
-            _tc("2", "web_search", query="x"),
-            _tc("3", "browser", action="click", ref="e5"),
-            _tc("4", "save_memory", content="y"),
+            _tc("1", "browser", action="click", ref="e5"),   # first action → runs
+            _tc("2", "web_search", query="x"),               # non-browser → never
+            _tc("3", "browser", action="type", ref="e6", text="z"),  # 2nd action → skip
+            _tc("4", "save_memory", content="y"),            # non-browser → never
         ]
         assert browser_calls_to_skip(calls) == frozenset({"3"})
 
@@ -49,10 +50,53 @@ class TestBrowserCallsToSkip:
     def test_empty(self):
         assert browser_calls_to_skip([]) == frozenset()
 
-    def test_first_browser_call_kept_even_when_not_first_overall(self):
+    def test_read_then_action_not_starved_across_non_browser(self):
+        # web_search interleaved; the read runs and the scroll (first action)
+        # runs — nothing is skipped.
         calls = [
             _tc("1", "web_search", query="x"),
             _tc("2", "browser", action="read"),
             _tc("3", "browser", action="scroll"),
         ]
-        assert browser_calls_to_skip(calls) == frozenset({"3"})
+        assert browser_calls_to_skip(calls) == frozenset()
+
+
+class TestReadBeforeActionNotStarved:
+    """Regression 2026-08-16 12:34: the specialist emitted
+    [snapshot, click, ...] and the guard kept ONLY the first browser call
+    (the snapshot), skipping the click EVERY turn — the page never changed,
+    the stuck-detector killed it, and the himap task failed repeatedly. A
+    read-only call before the action must NOT starve the action."""
+
+    def test_snapshot_then_click_runs_both(self):
+        calls = [
+            _tc("1", "browser", action="snapshot", task_hint="admin nav"),
+            _tc("2", "browser", action="click", target="Blog posts add"),
+        ]
+        # Neither is skipped: the read runs, then the first (only) action runs.
+        assert browser_calls_to_skip(calls) == frozenset()
+
+    def test_reads_run_but_second_action_skipped(self):
+        calls = [
+            _tc("1", "browser", action="snapshot"),
+            _tc("2", "browser", action="read"),
+            _tc("3", "browser", action="click", ref="e5"),   # first action → runs
+            _tc("4", "browser", action="type", ref="e6", text="x"),  # 2nd action → skip
+            _tc("5", "browser", action="snapshot"),          # after action → skip
+        ]
+        assert browser_calls_to_skip(calls) == frozenset({"4", "5"})
+
+    def test_two_actions_first_runs_second_skipped(self):
+        calls = [
+            _tc("1", "browser", action="click", ref="e1"),
+            _tc("2", "browser", action="click", ref="e2"),
+        ]
+        assert browser_calls_to_skip(calls) == frozenset({"2"})
+
+    def test_all_readonly_calls_run(self):
+        calls = [
+            _tc("1", "browser", action="snapshot"),
+            _tc("2", "browser", action="read"),
+            _tc("3", "browser", action="tabs"),
+        ]
+        assert browser_calls_to_skip(calls) == frozenset()

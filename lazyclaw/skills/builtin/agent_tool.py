@@ -262,6 +262,13 @@ class AgentDispatchSkill(BaseSkill):
         from lazyclaw.teams import runner as team_runner
 
         task_id = f"agent-{uuid.uuid4().hex[:8]}"
+        # One token shared by team_lead (request_cancel fires it) and the
+        # runner loop (polls is_cancelled each iteration). Without it the
+        # user's stop button was a silent no-op on sync dispatches
+        # ("request_cancel denied reason=no_token", 2026-08-16).
+        from lazyclaw.runtime.callbacks import CancellationToken
+
+        cancel_token = CancellationToken()
         if self._team_lead is not None:
             try:
                 self._team_lead.register(
@@ -271,6 +278,7 @@ class AgentDispatchSkill(BaseSkill):
                     lane="subagent",
                     instruction_full=task,
                     user_id=user_id,
+                    cancel_token=cancel_token,
                 )
             except Exception:
                 logger.debug(
@@ -310,6 +318,7 @@ class AgentDispatchSkill(BaseSkill):
                         permission_checker=self._permission_checker,
                         callback=wrapped_callback,
                         task_id=task_id,
+                        cancel_token=cancel_token,
                     )
                 finally:
                     _IS_SUBAGENT.reset(token)

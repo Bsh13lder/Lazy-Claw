@@ -289,3 +289,44 @@ def test_all_already_dispatched_gates_include_agent():
     assert 'for d in ("delegate", "dispatch_subagents", "run_background")' not in src, (
         "a tuple-shaped already-dispatched gate is missing \"agent\""
     )
+
+
+class _FakeTeamLead:
+    """Captures register() kwargs so the cancel-token wiring is pinned."""
+
+    def __init__(self):
+        self.registered = []
+
+    def register(self, **kwargs):
+        self.registered.append(kwargs)
+
+
+def test_sync_dispatch_registers_live_cancel_token(fake_run_specialist):
+    """The user's stop button fires team_lead.request_cancel → token.cancel().
+
+    Incident 2026-08-16 10:46: sync specialist dispatches registered NO
+    cancel token ("request_cancel denied reason=no_token"), so the user's
+    cancel was silently ignored and an unwanted browser task ground on to
+    its 600s budget. The same token object must reach BOTH team_lead
+    (so request_cancel can fire it) and run_specialist (whose loop checks
+    is_cancelled every iteration).
+    """
+    lead = _FakeTeamLead()
+    skill = _make_skill(team_lead=lead)
+    asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "find X",
+    }))
+
+    assert len(lead.registered) == 1
+    registered_token = lead.registered[0].get("cancel_token")
+    assert registered_token is not None, (
+        "sync dispatch must register a cancel token or the stop button "
+        "is a no-op (no_token denial)"
+    )
+    passed_token = fake_run_specialist[0].get("cancel_token")
+    assert passed_token is registered_token, (
+        "team_lead and run_specialist must share the SAME token object"
+    )
+    # Firing it must flip the flag the runner polls.
+    registered_token.cancel()
+    assert registered_token.is_cancelled is True

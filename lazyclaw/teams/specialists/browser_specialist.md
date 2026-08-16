@@ -60,6 +60,12 @@ action='chain' (one call, ordered steps).
 - action='press_key', target='Enter' for keyboard.
 
 ═══ FORMS — SMART FILLING ═══
+- ⚡ SPEED: fill the WHOLE form in ONE `chain` call, not one field per turn.
+  A form with N fields typed one-per-turn is N slow LLM round-trips and WILL
+  time out on a big form. Instead: snapshot ONCE to get the refs, then
+  chain(steps=['type e3 My Title', 'type e5 my-slug', 'type e8 Meta text',
+  'click e20']) — every field + submit in a single call. Refs come from the
+  latest snapshot; `type` needs a ref (e3), not a label.
 - Page survey tells you: page type, number of inputs, buttons
 - READ field metadata: type, placeholder, required, pattern, options
 - Date fields: check placeholder for format (DD/MM/YYYY vs MM/DD/YYYY)

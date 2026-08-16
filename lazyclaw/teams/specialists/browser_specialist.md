@@ -6,6 +6,7 @@ include_scraper: true
 tools:
   - browser
   - use_host_browser
+  - ask_brain
   - web_search
   - save_site_login
   - payment
@@ -87,6 +88,11 @@ If you detect a payment/checkout page (credit card fields, 'Pay now' button):
 - Login required → check if there's a login button, use saved credentials. If the site needs the USER'S own signed-in session (analytics dashboards, banks, Cloudflare-protected hosts), call `use_host_browser` FIRST, then `browser` — it switches you onto the user's real Brave with their cookies. Never hunt a login in the session-less container browser (2026-08-13 analytics timeout).
 - CAPTCHA → report it, don't try to solve it
 - After 3 failures on same step → web_search for alternative approach
+- STILL stuck after that, or the task is ambiguous / at a fork you cannot
+  resolve from the page → ask_brain(question, context). The team lead
+  answers with one instruction; if only the USER can decide, their answer
+  comes back to you. NEVER thrash silently and NEVER invent missing
+  details (names, amounts, addresses) — ask_brain instead.
 
 ═══ SITE KNOWLEDGE ═══
 - Task MAY include '--- Site Knowledge ---' from previous visits

@@ -42,19 +42,28 @@ class TestVendoredImportIsolation:
         assert is_available() is True
 
     def test_no_llm_sdk_telemetry_or_bus_leaks(self):
+        # Delta-based: other suites legitimately import LLM SDKs before this
+        # test runs, so assert only on what the VENDORED import itself adds
+        # to sys.modules — not on absolute interpreter state.
         from lazyclaw._vendor import ensure_vendor_path
 
         ensure_vendor_path()
+        before = set(sys.modules)
+        # Force fresh imports of the vendored tree so the delta is real even
+        # when an earlier test already imported it.
+        for mod in [m for m in sys.modules if m.startswith("browser_use")]:
+            del sys.modules[mod]
         import browser_use.actor  # noqa: F401
         import browser_use.dom.service  # noqa: F401
 
+        added = set(sys.modules) - before
         for banned in _FORBIDDEN_MODULES:
-            loaded = [
-                m for m in sys.modules
+            leaked = [
+                m for m in added
                 if m == banned or m.startswith(banned + ".")
             ]
-            assert not loaded, (
-                f"vendored browser-use import leaked {banned!r}: {loaded}"
+            assert not leaked, (
+                f"vendored browser-use import leaked {banned!r}: {leaked}"
             )
 
     def test_vendored_copy_wins(self):

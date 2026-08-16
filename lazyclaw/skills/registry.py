@@ -414,6 +414,13 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.checkpoint_skill import RequestUserApprovalSkill
         self.register(RequestUserApprovalSkill(config=config))
 
+        # Stuck-worker escalation (worker → brain → user). Registered here
+        # WITHOUT a router (falls straight through to the user checkpoint);
+        # agent.py re-registers it per-turn with the live eco_router so the
+        # brain-consult step works. register() replaces by name.
+        from lazyclaw.skills.builtin.ask_brain import AskBrainSkill
+        self.register(AskBrainSkill(config=config))
+
         # Browser templates (saved-agent recipes for govt appointments etc.)
         from lazyclaw.skills.builtin.browser_templates_skill import (
             DeleteBrowserTemplateSkill, ListBrowserTemplatesSkill,

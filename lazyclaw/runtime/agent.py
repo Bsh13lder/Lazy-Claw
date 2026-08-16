@@ -2974,6 +2974,16 @@ class Agent:
             agent_dispatch_skill._caller_depth = self._depth
             self.registry.register(agent_dispatch_skill)
 
+            # Re-register ask_brain WITH the live router so a stuck
+            # specialist's consult actually reaches the brain model (the
+            # registry-boot copy has no router and skips straight to the
+            # user checkpoint).
+            from lazyclaw.skills.builtin.ask_brain import AskBrainSkill
+
+            self.registry.register(AskBrainSkill(
+                config=self.config, eco_router=self.eco_router,
+            ))
+
         # Initialize channel state (used by tool nudge later, must exist for all paths)
         _matched_channels: list[str] = []
 

@@ -370,42 +370,61 @@ async function loadAuthState() {
 
 // Lock file to prevent multiple processes connecting with same auth
 const LOCK_FILE = path.join(DATA_DIR, "whatsapp.lock");
+const { lockDecision } = require("./lock.js");
+
+// Hostname identifies the container incarnation (Docker sets it to the
+// container id, new on every recreate). Written into the lock so a rebuild
+// can't strand us cache-only on a PID that collided across PID namespaces
+// (2026-08-18: fresh-looking lock from the previous container + PID reuse
+// → sends failed "WhatsApp not connected" until manual reconnect).
+const LOCK_HOSTNAME = require("os").hostname();
+
+// True only after WE acquired (or force-took) the lock. The 30s refresh
+// below must not run for a cache-only loser — refreshing unconditionally
+// made the loser clobber the real holder's pid/heartbeat (last-writer-wins
+// oscillation between the two processes).
+let _ownsLock = false;
+
+function _writeLock() {
+  fs.writeFileSync(LOCK_FILE, JSON.stringify({
+    pid: process.pid, time: Date.now(), hostname: LOCK_HOSTNAME,
+  }));
+}
 
 function acquireLock() {
   try {
     if (fs.existsSync(LOCK_FILE)) {
       const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
-      const age = Date.now() - lockData.time;
-      // Lock is stale if older than 60s (refresh is every 30s, so 60s = missed 2 refreshes)
-      if (age >= 60000) {
-        log(`Lock is stale (${Math.round(age / 1000)}s old) — taking over`);
-      } else {
-        const otherPid = lockData.pid;
-        // Check if the locking process is still alive
-        try {
-          process.kill(otherPid, 0);
-          // Alive — check if it's us (shouldn't be) or a different process
-          if (otherPid !== process.pid) {
-            return false; // Legitimate process holds the lock
-          }
-        } catch (_) {
-          // Process dead — take over
-          log(`Lock holder (pid=${otherPid}) is dead — taking over`);
-        }
+      const decision = lockDecision(lockData, {
+        now: Date.now(),
+        pid: process.pid,
+        hostname: LOCK_HOSTNAME,
+        isPidAlive: (pid) => {
+          try { process.kill(pid, 0); return true; } catch (_) { return false; }
+        },
+      });
+      if (!decision.takeover) {
+        return false; // Legitimate process holds the lock
+      }
+      if (decision.reason !== "no-lock") {
+        log(`Lock takeover (${decision.reason}) — previous holder pid=${lockData.pid} host=${lockData.hostname || "?"}`);
       }
     }
-    fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));
+    _writeLock();
+    _ownsLock = true;
     return true;
-  } catch (_) { return true; }
+  } catch (_) { _ownsLock = true; return true; }
 }
 
 function releaseLock() {
+  _ownsLock = false;
   try { fs.unlinkSync(LOCK_FILE); } catch (_) {}
 }
 
-// Refresh lock periodically
+// Refresh lock periodically — holders only (see _ownsLock).
 setInterval(() => {
-  try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch (_) {}
+  if (!_ownsLock) return;
+  try { _writeLock(); } catch (_) {}
 }, 30000);
 
 process.on("exit", releaseLock);
@@ -450,7 +469,8 @@ async function startWhatsApp(force = false) {
   if (force) {
     // User explicitly requested reconnect — take over the lock
     releaseLock();
-    fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));
+    _writeLock();
+    _ownsLock = true;
   }
 
   const {

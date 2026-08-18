@@ -18,6 +18,7 @@ from lazyclaw.config import load_config
 from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.deadline import budget_note
 from lazyclaw.runtime.stuck_detector import detect_stuck
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.base import BaseSkill
@@ -232,6 +233,90 @@ def browser_calls_to_skip(tool_calls) -> frozenset[str]:
     return frozenset(skip)
 
 
+# Sentinel prefix for the browser action-memory scratchpad. Re-injected
+# fresh each iteration (old copies removed by prefix match) so it survives
+# tool-result pruning — the pruner keeps only the last 2 tool results, which
+# made the worker forget its OWN actions and e.g. click is_published twice,
+# silently un-publishing (2026-08-18 himap form incident).
+_ACTION_LOG_MARK = "[ACTIONS ALREADY TAKEN — do NOT repeat these]"
+
+_ACTION_LOG_MAX_ENTRIES = 14
+
+
+def summarize_browser_action(arguments: dict) -> "str | None":
+    """One compact line for a MUTATING browser action, or None for reads.
+
+    The scratchpad only records state-changing actions — reads/snapshots are
+    cheap to repeat; a repeated click/type is a bug.
+    """
+    args = arguments or {}
+    action = (args.get("action") or "").strip()
+    if not action or action in _READONLY_BROWSER_ACTIONS:
+        return None
+    bits = [action]
+    for key in ("target", "ref", "direction"):
+        v = args.get(key)
+        if v:
+            bits.append(f"{key}={str(v)[:60]}")
+    text = args.get("text")
+    if text:
+        bits.append(f'text="{str(text)[:40]}"')
+    steps = args.get("steps")
+    if isinstance(steps, list) and steps:
+        bits.append("steps=[" + "; ".join(str(s)[:40] for s in steps[:6]) + "]")
+    return " ".join(bits)
+
+
+def render_action_log(entries: list) -> str:
+    """Render the scratchpad system message from logged action lines."""
+    recent = entries[-_ACTION_LOG_MAX_ENTRIES:]
+    lines = [_ACTION_LOG_MARK]
+    if len(entries) > len(recent):
+        lines.append(f"(… {len(entries) - len(recent)} earlier actions omitted)")
+    for i, entry in enumerate(recent, start=max(1, len(entries) - len(recent) + 1)):
+        lines.append(f"{i}. {entry}")
+    lines.append(
+        "These actions ALREADY HAPPENED — their effects are live on the page "
+        "even if the results were pruned from your context. Never re-click a "
+        "checkbox you already clicked; never re-type a field you already "
+        "filled (see its current value in the snapshot)."
+    )
+    return "\n".join(lines)
+
+
+_ESCALATION_DEFER_MESSAGE = (
+    "[deferred] You batched an escalation (ask_brain) in the SAME turn as a "
+    "browser action, before seeing the browser result. That is escalating "
+    "blind. Read the browser result that just came back; only if you are "
+    "still genuinely stuck on the NEXT turn should you ask_brain."
+)
+
+# Tools that hand the turn off to the brain/user. They must never fire in the
+# same turn as a browser action — the worker has to see the result first.
+_ESCALATION_TOOLS = frozenset({"ask_brain"})
+
+
+def escalation_calls_to_skip(tool_calls) -> frozenset[str]:
+    """IDs of escalation calls (``ask_brain``) to defer when the SAME turn also
+    issues a browser action.
+
+    A worker that batches "do a browser thing" with "I'm stuck, ask the brain"
+    is giving up before it has seen the result — the turn-1 panic. Incident
+    2026-08-17 (himap blog): the specialist emitted use_host_browser +
+    browser(open himap.co/admin) + ask_brain together; the browser open
+    SUCCEEDED (41 elements), but ask_brain still ran, hit an upstream brain
+    safeguard refusal, and cascaded into a 600s background-task timeout — so
+    nothing executed for the user. Deferring the escalation lets the browser
+    result come back first; the worker re-decides next turn from real state.
+    Non-escalation, non-browser tools are never touched.
+    """
+    if not any(tc.name == "browser" for tc in tool_calls):
+        return frozenset()
+    return frozenset(
+        tc.id for tc in tool_calls if tc.name in _ESCALATION_TOOLS
+    )
+
+
 def _filter_tools(
     registry: SkillRegistry,
     allowed: tuple[str, ...],
@@ -334,6 +419,8 @@ async def run_specialist(
     task_id: str | None = None,
     code_session_id: str | None = None,
     on_session_id: Callable[[str], Awaitable[None]] | None = None,
+    budget_s: float | None = None,
+    progress_beat: dict | None = None,
 ) -> SpecialistResult:
     """Run a specialist agent loop for a single task.
 
@@ -351,6 +438,8 @@ async def run_specialist(
     list ride on ``SpecialistResult`` for the CodeSpecialist Web UI.
     """
     start_time = time.monotonic()
+    _budget_notes_sent: set = set()
+    _action_log: list = []
     tools_used: list[str] = []
     step_history: list[StepEntry] = []
     transcript: list[TranscriptStep] = []
@@ -565,10 +654,42 @@ async def run_specialist(
                     specialist.name, _iteration + 1, MAX_ITERATIONS,
                 )
 
+            # Time-budget awareness (2026-08-18: 63 successful steps hard-
+            # killed at 480s with nothing delivered). Two one-shot notes:
+            # half-budget pacing + final-window "synthesize NOW".
+            if budget_s:
+                _bnote = budget_note(
+                    time.monotonic() - start_time, budget_s, _budget_notes_sent,
+                )
+                if _bnote:
+                    messages.append(LLMMessage(role="system", content=_bnote))
+                    logger.info(
+                        "Specialist %s: budget note injected (%s of %ds)",
+                        specialist.name,
+                        "final-window" if "final" in _budget_notes_sent
+                        else "half",
+                        budget_s,
+                    )
+
             # Prune old tool results to save tokens
             if _iteration > 0:
                 from lazyclaw.runtime.agent import _prune_old_tool_results
                 messages = _prune_old_tool_results(messages, keep_last_n=2)
+
+            # Action-memory scratchpad: ONE fresh copy per iteration (old
+            # copies removed by sentinel match) — survives the pruning above.
+            if _action_log:
+                messages = [
+                    m for m in messages
+                    if not (
+                        m.role == "system"
+                        and isinstance(m.content, str)
+                        and m.content.startswith(_ACTION_LOG_MARK)
+                    )
+                ]
+                messages.append(LLMMessage(
+                    role="system", content=render_action_log(_action_log),
+                ))
 
             # Fire specialist thinking event for observability
             if callback:
@@ -759,6 +880,18 @@ async def run_specialist(
                     specialist.name, len(_browser_skips),
                 )
 
+            # An escalation (ask_brain) batched alongside a browser action is a
+            # blind give-up — defer it so the worker sees the browser result
+            # first (2026-08-17 himap blog incident: escalate-before-result
+            # hit a brain refusal and cascaded to a 600s timeout).
+            _escalation_skips = escalation_calls_to_skip(response.tool_calls)
+            if _escalation_skips:
+                logger.warning(
+                    "Specialist %s: deferring %d escalation call(s) batched "
+                    "with a browser action (see result first)",
+                    specialist.name, len(_escalation_skips),
+                )
+
             for tc in response.tool_calls:
                 # Log what the specialist is calling (critical for debugging)
                 _args_summary = {k: (str(v)[:80] if isinstance(v, str) else v)
@@ -773,6 +906,14 @@ async def run_specialist(
                     messages.append(LLMMessage(
                         role="tool",
                         content=_BROWSER_SKIP_MESSAGE,
+                        tool_call_id=tc.id,
+                    ))
+                    continue
+
+                if tc.id in _escalation_skips:
+                    messages.append(LLMMessage(
+                        role="tool",
+                        content=_ESCALATION_DEFER_MESSAGE,
                         tool_call_id=tc.id,
                     ))
                     continue
@@ -870,6 +1011,18 @@ async def run_specialist(
                     tool_result if isinstance(tool_result, str) else str(tool_result)
                 )
 
+                # Action-memory scratchpad: record MUTATING browser actions
+                # that executed without an error result, so the worker can't
+                # forget (and repeat) its own clicks/types after pruning.
+                if tc.name == "browser":
+                    _summary = summarize_browser_action(tc.arguments or {})
+                    _errored = (
+                        isinstance(tool_result, str)
+                        and tool_result.startswith(("Error", "[MCP ERROR]"))
+                    )
+                    if _summary and not _errored:
+                        _action_log.append(_summary)
+
                 # Per-step transcript row — Code Specialist only. Captures
                 # every tool execution (allowed + denied) so the user can
                 # see the full sequence on CodeSpecialist.tsx, including
@@ -888,6 +1041,12 @@ async def run_specialist(
                         success=not _is_step_error,
                         error=tool_result[:200] if _is_step_error else "",
                     ))
+
+            # Progress heartbeat for the runner's extension decision — a
+            # tool call completed this iteration means the worker is alive
+            # and working, not wedged (see runtime/deadline.should_extend).
+            if progress_beat is not None and response.tool_calls:
+                progress_beat["t"] = time.monotonic()
 
             # ── Stuck detection after processing all tool calls ──
             stuck = detect_stuck(_tool_history, _tool_results, _tool_results[-1] if _tool_results else None)
@@ -924,6 +1083,38 @@ async def run_specialist(
                     _tool_history = _tool_history[:-3] if len(_tool_history) >= 3 else []
                     _rescue_used = True
                     continue  # let the worker loop run one more iteration with the hint
+
+                # One-shot rescue: same_result means the page is STABLE, and a
+                # stable page is an ANSWER, not a loading failure. 2026-08-17
+                # himap blog: the specialist ran a duplicate-check search, got
+                # an unchanging (likely empty) results list, re-read it 3× and
+                # was killed here one step short of the create form. Tell it
+                # to act on what it sees and move to the task's next step.
+                if not _rescue_used and stuck.reason == "same_result":
+                    logger.info(
+                        "Specialist %s stuck on same_result — injecting "
+                        "act-on-stable-page rescue hint",
+                        specialist.name,
+                    )
+                    messages.append(LLMMessage(
+                        role="system",
+                        content=(
+                            "RESCUE: Your last reads returned the SAME page — "
+                            "it is stable and re-reading will NEVER change it. "
+                            "That stable content IS your answer: extract what "
+                            "it shows (an empty list means '0 results'), state "
+                            "the conclusion in one line, and take the NEXT "
+                            "step of your task (e.g. open the create/add form, "
+                            "click the target row, or report the extracted "
+                            "data). Do NOT read or snapshot this page again."
+                        ),
+                    ))
+                    # Trim the identical tail so detect_same_result doesn't
+                    # re-trip immediately on the next iteration.
+                    _tool_results = _tool_results[:-3] if len(_tool_results) >= 3 else []
+                    _tool_history = _tool_history[:-3] if len(_tool_history) >= 3 else []
+                    _rescue_used = True
+                    continue
 
                 logger.warning(
                     "Specialist %s stuck: %s (%s)",

@@ -13,7 +13,10 @@ rules on tool discipline don't hold).
 from __future__ import annotations
 
 from lazyclaw.llm.providers.base import ToolCall
-from lazyclaw.teams.runner import browser_calls_to_skip
+from lazyclaw.teams.runner import (
+    browser_calls_to_skip,
+    escalation_calls_to_skip,
+)
 
 
 def _tc(id_: str, name: str, **args) -> ToolCall:
@@ -100,3 +103,52 @@ class TestReadBeforeActionNotStarved:
             _tc("3", "browser", action="tabs"),
         ]
         assert browser_calls_to_skip(calls) == frozenset()
+
+
+class TestEscalationCallsToSkip:
+    """Incident 2026-08-17 (himap blog): on its FIRST turn the browser
+    specialist emitted [use_host_browser, browser(open), browser, browser,
+    browser, use_host_browser, ask_brain, web_search] in one batch. The
+    browser(open) SUCCEEDED (41 elements), but ask_brain fired in the SAME
+    turn — a give-up escalation planned before the worker ever saw its own
+    result. That consult hit an upstream opus-5 safeguard refusal and
+    cascaded into a 600s background-task timeout; nothing executed for the
+    user. Defer ask_brain whenever a browser action rides along in the same
+    turn: read the result first, escalate next turn only if still stuck."""
+
+    def test_ask_brain_deferred_when_batched_with_browser_action(self):
+        calls = [
+            _tc("1", "use_host_browser", action="start"),
+            _tc("2", "browser", action="open", target="https://himap.co/admin"),
+            _tc("3", "ask_brain", question="everything I do gets skipped?"),
+            _tc("4", "web_search", query="x"),
+        ]
+        assert escalation_calls_to_skip(calls) == frozenset({"3"})
+
+    def test_ask_brain_deferred_even_with_readonly_browser_call(self):
+        # A snapshot returns fresh state — read it before escalating.
+        calls = [
+            _tc("1", "browser", action="snapshot"),
+            _tc("2", "ask_brain", question="what now?"),
+        ]
+        assert escalation_calls_to_skip(calls) == frozenset({"2"})
+
+    def test_ask_brain_alone_is_not_deferred(self):
+        # No browser action in the turn → a genuine stuck-escalation runs.
+        calls = [_tc("1", "ask_brain", question="user's DNI is required")]
+        assert escalation_calls_to_skip(calls) == frozenset()
+
+    def test_multiple_ask_brain_all_deferred_when_browser_present(self):
+        calls = [
+            _tc("1", "browser", action="click", ref="e5"),
+            _tc("2", "ask_brain", question="a?"),
+            _tc("3", "ask_brain", question="b?"),
+        ]
+        assert escalation_calls_to_skip(calls) == frozenset({"2", "3"})
+
+    def test_no_browser_no_ask_brain(self):
+        calls = [_tc("1", "web_search", query="x"), _tc("2", "save_memory", content="y")]
+        assert escalation_calls_to_skip(calls) == frozenset()
+
+    def test_empty(self):
+        assert escalation_calls_to_skip([]) == frozenset()

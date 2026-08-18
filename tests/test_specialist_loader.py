@@ -202,6 +202,7 @@ def test_browser_specialist_fields():
     assert s.allowed_skills == (
         "browser",
         "use_host_browser",
+        "ask_brain",
         "web_search",
         "save_site_login",
         "payment",

@@ -267,6 +267,30 @@ def _build_tool_wrappers(
     return sdk_tools, name_map
 
 
+def _result_error_text(
+    *,
+    is_error: bool,
+    subtype: str,
+    errors: "list | None",
+    result: "str | None",
+    has_output: bool,
+) -> "str | None":
+    """Map a ResultMessage error state to an error string, or None if benign.
+
+    With ``max_turns=1`` (the one-turn-per-chat contract), a turn that ends
+    because the model emitted tool calls reports ``subtype="error_max_turns"``
+    — that is the EXPECTED outcome, not a failure: lazyclaw's runtime executes
+    the harvested calls and continues its own loop. Only treat it as an error
+    when the turn produced nothing usable at all.
+    """
+    if not is_error:
+        return None
+    if subtype == "error_max_turns" and has_output:
+        return None
+    errs = errors or [result or "unknown"]
+    return "; ".join(str(e) for e in errs)
+
+
 # Read-only listing tools that should NEVER be called more than once per
 # assistant turn. Sonnet has a habit of "exploring" by re-issuing the same
 # listing call with slightly-varied args (limit=5 vs limit=10 vs unread_only
@@ -477,6 +501,27 @@ def _success_tail_action(
     if not already_retried:
         return "retry"
     return "raise"
+
+
+def _max_turns_tail_action(
+    err_str: str,
+    have_usable_response: bool,
+) -> "str | None":
+    """Classify the max_turns=1 stop → "swallow" | "raise" | None.
+
+    The one-turn-per-chat contract (``max_turns=1`` in _build_options) is
+    NOT surfaced by SDK 0.1.81 as a parseable ResultMessage: the internal
+    reader raises a bare Exception on the message channel — "Claude Code
+    returned an error result: Reached maximum number of turns (1)"
+    (query.py receive_messages). The AssistantMessage has already streamed
+    by then, so with text/tool calls harvested this is the EXPECTED end of
+    a successful turn → "swallow". An empty turn that still hit the cap is
+    a genuine failure → "raise". Returns None when the exception is not
+    this quirk (caller falls through to _success_tail_action).
+    """
+    if "Reached maximum number of turns" not in err_str:
+        return None
+    return "swallow" if have_usable_response else "raise"
 
 
 def _classify_oauth_credentials(
@@ -732,13 +777,18 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id
-                    if msg.is_error:
-                        # SDK signals an upstream error — surface it as
-                        # a clear runtime failure (NOT SDKUnavailable, so
-                        # eco_router doesn't silently fall back over a
-                        # legitimate API error).
-                        errs = msg.errors or [msg.result or "unknown"]
-                        api_error = "; ".join(str(e) for e in errs)
+                    # Upstream errors surface as a clear runtime failure
+                    # (NOT SDKUnavailable, so eco_router doesn't silently
+                    # fall back over a legitimate API error). A max_turns=1
+                    # stop with harvested output is the expected success
+                    # path, not an error — see _result_error_text.
+                    api_error = _result_error_text(
+                        is_error=msg.is_error,
+                        subtype=getattr(msg, "subtype", "") or "",
+                        errors=msg.errors,
+                        result=msg.result,
+                        has_output=bool(tool_calls or text_parts),
+                    )
 
                 # SystemMessage / RateLimitEvent / HookEventMessage /
                 # StreamEvent — observability only, nothing to extract.
@@ -779,20 +829,37 @@ class ClaudeSDKProvider(BaseLLMProvider):
             # no upstream api_error), absorb the trailing exception and
             # return normally. Otherwise re-wrap and re-raise so genuine
             # iterator errors still surface.
-            action = _success_tail_action(
-                str(exc),
-                have_usable_response=bool(
-                    (text_parts or tool_calls) and not api_error
-                ),
-                already_retried=bool(kwargs.get("_success_tail_retried")),
-                upstream_error=api_error,
-            )
-            if action == "swallow":
-                logger.warning(
-                    "Claude SDK: swallowed trailing 'error result: success' "
-                    "(turn succeeded — %d text chars + %d tool call(s))",
+            _usable = bool((text_parts or tool_calls) and not api_error)
+            _mt_action = _max_turns_tail_action(str(exc), _usable)
+            if _mt_action == "swallow":
+                # The by-design max_turns=1 stop — the turn succeeded and
+                # lazyclaw's runtime executes the harvested calls next.
+                logger.debug(
+                    "Claude SDK: absorbed max_turns=1 stop (%d text chars "
+                    "+ %d tool call(s))",
                     sum(len(t) for t in text_parts), len(tool_calls),
                 )
+                action = "swallow"
+            elif _mt_action == "raise":
+                raise RuntimeError(
+                    "Claude SDK: turn hit max_turns=1 with no output — "
+                    f"nothing harvested before: {exc}"
+                ) from exc
+            else:
+                action = _success_tail_action(
+                    str(exc),
+                    have_usable_response=_usable,
+                    already_retried=bool(kwargs.get("_success_tail_retried")),
+                    upstream_error=api_error,
+                )
+            if action == "swallow":
+                if _mt_action is None:
+                    logger.warning(
+                        "Claude SDK: swallowed trailing 'error result: "
+                        "success' (turn succeeded — %d text chars + %d tool "
+                        "call(s))",
+                        sum(len(t) for t in text_parts), len(tool_calls),
+                    )
             elif action == "retry":
                 # Empty turn killed by the quirk — nothing was produced
                 # and no lazyclaw tool ran, so ONE full retry is safe.
@@ -969,9 +1036,15 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id
-                    if msg.is_error:
-                        errs = msg.errors or [msg.result or "unknown"]
-                        api_error = "; ".join(str(e) for e in errs)
+                    # Same contract as chat(): a max_turns=1 stop with
+                    # harvested output is success, not an error.
+                    api_error = _result_error_text(
+                        is_error=msg.is_error,
+                        subtype=getattr(msg, "subtype", "") or "",
+                        errors=msg.errors,
+                        result=msg.result,
+                        has_output=bool(tool_calls or text_parts),
+                    )
         except CLINotFoundError as exc:
             raise SDKUnavailable(f"`claude` binary missing: {exc}") from exc
         except CLIConnectionError as exc:
@@ -987,15 +1060,22 @@ class ClaudeSDKProvider(BaseLLMProvider):
         except ClaudeSDKError as exc:
             raise RuntimeError(f"Claude SDK stream error: {exc}") from exc
         except Exception as exc:
-            # Same "error result: success" absorption guard as chat().
+            # Same absorption guards as chat(): the by-design max_turns=1
+            # stop first, then the "error result: success" quirk.
             err_str = str(exc)
-            looks_like_success_tail = (
-                "returned an error result: success" in err_str
-            )
             have_usable_response = bool(
                 (text_parts or tool_calls) and not api_error
             )
-            if looks_like_success_tail and have_usable_response:
+            _mt_action = _max_turns_tail_action(err_str, have_usable_response)
+            looks_like_success_tail = (
+                "returned an error result: success" in err_str
+            )
+            if _mt_action == "swallow":
+                logger.debug(
+                    "Claude SDK stream: absorbed max_turns=1 stop "
+                    "(%d tool call(s))", len(tool_calls),
+                )
+            elif looks_like_success_tail and have_usable_response:
                 logger.warning(
                     "Claude SDK stream: swallowed trailing 'error result: "
                     "success' (turn succeeded)",
@@ -1148,6 +1228,18 @@ class ClaudeSDKProvider(BaseLLMProvider):
             "permission_mode": "bypassPermissions",
             "disallowed_tools": _DISALLOWED_BUILT_INS,
             "env": env,
+            # CRITICAL (one-turn-per-chat contract): our @tool wrappers do
+            # NOT execute anything — they return a sentinel, and the agent
+            # runtime executes the harvested calls itself. Without this cap
+            # the SDK runs its OWN internal loop, feeding that sentinel back
+            # to the model as the tool "result": the model retried browser
+            # calls 5-9× per batch against placeholder results, then
+            # escalated ("returned nothing but the placeholder string for 9
+            # consecutive calls") — 2026-08-16/17 himap incidents. One turn
+            # per chat() means the model never sees the sentinel; a turn
+            # ending in tool calls reports subtype="error_max_turns", which
+            # _result_error_text treats as the expected success path.
+            "max_turns": 1,
             # CRITICAL: without this the SDK inherits the host user's
             # global Claude Code MCP config (~/.claude/mcp_servers.json)
             # — meaning Sonnet sees and uses globally-registered MCPs

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import TYPE_CHECKING
 
 from lazyclaw.runtime.callbacks import AgentEvent, StepTrackingCallback
+from lazyclaw.runtime.deadline import EXTENSION_S, MAX_EXTENSIONS, should_extend
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.specialist_aliases import SPECIALIST_MAP as _SPECIALIST_MAP
@@ -64,6 +66,13 @@ class DelegateSkill(BaseSkill):
 
     # Specialists run multi-step browser loops — 60s default is too short
     timeout = 300
+
+    # Detached delegate specialists get a real deadline (2026-08-18: the
+    # fire-and-forget path had NO timeout at all — a form-filling run
+    # scroll-hunted for 16+ minutes unbounded). Same Claude Code semantics
+    # as agent_tool: budget notes inside run_specialist, progress-based
+    # extensions here, hard ceiling = budget + MAX_EXTENSIONS * EXTENSION_S.
+    DELEGATE_BUDGET_S = 480
 
     @property
     def name(self) -> str:
@@ -267,7 +276,8 @@ class DelegateSkill(BaseSkill):
                 # contends with the user's VISIBLE foreground tab/lock (which
                 # would freeze the next chat message). See ADR-0005.
                 async with browser_turn_scope(BACKGROUND_ROLE):
-                    result = await run_specialist(
+                    _progress_beat: dict = {"t": None}
+                    _work = asyncio.ensure_future(run_specialist(
                         user_id=user_id,
                         specialist=spec,
                         task=enriched_instruction,
@@ -278,7 +288,42 @@ class DelegateSkill(BaseSkill):
                         project_tag=project_tag,
                         goal_id=goal_id,
                         task_id=task_id,
-                    )
+                        budget_s=self.DELEGATE_BUDGET_S,
+                        progress_beat=_progress_beat,
+                    ))
+                    _wait_s: float = self.DELEGATE_BUDGET_S
+                    _extensions = 0
+                    _started = time.monotonic()
+                    while True:
+                        try:
+                            result = await asyncio.wait_for(
+                                asyncio.shield(_work), timeout=_wait_s,
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            _beat = _progress_beat.get("t")
+                            _age = (
+                                time.monotonic() - _beat
+                                if _beat is not None else None
+                            )
+                            if should_extend(_age, _extensions):
+                                _extensions += 1
+                                _wait_s = EXTENSION_S
+                                logger.info(
+                                    "delegate %s (%s): deadline hit but "
+                                    "worker is progressing (last tool "
+                                    "result %.0fs ago) — extending +%ds "
+                                    "(%d/%d)",
+                                    task_id, spec.name, _age or 0.0,
+                                    EXTENSION_S, _extensions, MAX_EXTENSIONS,
+                                )
+                                continue
+                            _work.cancel()
+                            raise TimeoutError(
+                                f"specialist timeout after "
+                                f"{int(time.monotonic() - _started)}s "
+                                f"({_extensions} extension(s) granted)"
+                            )
             except Exception as exc:
                 logger.exception("delegate bg task %s crashed", task_id)
                 if self._team_lead is not None:

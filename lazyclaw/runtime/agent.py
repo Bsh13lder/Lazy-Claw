@@ -4184,9 +4184,16 @@ class Agent:
         # iteration 0) — mutating/domain tools must be reached through
         # delegate/dispatch_subagents. Default off → zero behavior change.
         # Composes with the thin-router cap (filter first, cap after).
+        # Background exemption baked into the ACTIVATION (not just the
+        # guidance block below) so every downstream site — guidance, the
+        # per-iteration tool FILTER, the stall anchor — inherits it. A
+        # background turn IS the delegated worker: filtering its tools to
+        # meta-only guarantees starvation (2026-08-18 himap capability
+        # test: agent:browser bg worker was sent 37 tools, saw 16, no
+        # browser — "the browser tools are not available to me").
         _specialist_first = _specialist_first_enabled(
             _os.environ.get(_SPECIALIST_FIRST_BRAIN_ENV),
-        )
+        ) and not getattr(self, "is_background", False)
         # The synthetic brain fan-out consolidation turn carries the full
         # result set in its prompt and must SYNTHESIZE a summary (or
         # re-delegate once on failure). It must NOT be forced into

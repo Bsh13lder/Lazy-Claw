@@ -246,6 +246,43 @@ def test_background_submit_rejection_surfaces():
     assert "per-user cap reached" in out
 
 
+def test_background_at_depth_cap_degrades_to_sync(fake_run_specialist):
+    """Incident 2026-08-17 (himap blog, 20:35): a depth-2 background worker
+    called agent(run_in_background=true); the task_runner rejected it with
+    "max nesting depth reached", the worker shrugged off the error string and
+    completed "successfully" — the browser was never touched. A depth-capped
+    background dispatch must DEGRADE to the sync specialist path (which is
+    depth-legal via the subagent lane) instead of bouncing an error at a
+    model that will ignore it."""
+    from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
+
+    tr = FakeTaskRunner(raise_exc=RuntimeError("should never be called"))
+    skill = _make_skill(task_runner=tr)
+    skill._caller_depth = MAX_TASK_DEPTH
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "publish the blog post",
+        "run_in_background": True,
+    }))
+    assert tr.submits == []                  # no bg submit attempted
+    assert fake_run_specialist               # specialist actually ran inline
+    assert "completed" in out                # sync result returned in-turn
+    assert "all done" in out
+
+
+def test_background_below_depth_cap_still_goes_background(fake_run_specialist):
+    from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
+
+    tr = FakeTaskRunner()
+    skill = _make_skill(task_runner=tr)
+    skill._caller_depth = MAX_TASK_DEPTH - 1
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "x", "run_in_background": True,
+    }))
+    assert "Background agent 'explore' started" in out
+    assert len(tr.submits) == 1
+    assert not fake_run_specialist
+
+
 def test_background_does_not_consume_sync_cap():
     tr = FakeTaskRunner()
     skill = _make_skill(task_runner=tr)

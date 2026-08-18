@@ -45,6 +45,7 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import encrypt, decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.deadline import EXTENSION_S, MAX_EXTENSIONS, should_extend
 from lazyclaw.runtime.consolidation_guidance import (
     CONSOLIDATION_TURN_PREFIX,
     COHERENCE_LOG_TAG,
@@ -632,6 +633,10 @@ class TaskRunner:
         _TS_CAP = 200
         _ts_steps: list[dict] = []
         _ts_inflight: dict[str, dict] = {}  # tool_call_id -> partial step
+        # Progress heartbeat for the deadline-extension decision below —
+        # bumped on every event the worker emits (tool calls, phases, …).
+        # None until the first event: no progress ever → no extension.
+        _progress_beat: dict = {"t": None}
 
         class _BgEventTap:
             """Transparent wrapper around the user's original callback.
@@ -656,6 +661,7 @@ class TaskRunner:
 
             async def on_event(self, event: AgentEvent) -> None:
                 nonlocal _captured_summary
+                _progress_beat["t"] = time.monotonic()
                 if event.kind == "work_summary":
                     _captured_summary = event.metadata.get("summary")
                 elif event.kind == "tool_call":
@@ -780,10 +786,40 @@ class TaskRunner:
             )
             agent.is_background = True  # Browser uses headless in background
 
-            async with asyncio.timeout(timeout):
-                result = await agent.process_message(
-                    user_id, instruction, callback=callback,
-                )
+            # Claude Code semantics (2026-08-18): a background worker that is
+            # demonstrably progressing gets bounded extra time instead of a
+            # mid-step kill — see runtime/deadline.py. The user's stop
+            # (cancel) path is untouched; MAX_EXTENSIONS keeps a hard
+            # runaway ceiling. Progress = any worker event via _BgEventTap.
+            _work = asyncio.ensure_future(agent.process_message(
+                user_id, instruction, callback=callback,
+            ))
+            _wait_s: float = timeout
+            _extensions = 0
+            while True:
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(_work), timeout=_wait_s,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    _beat = _progress_beat.get("t")
+                    _age = (
+                        time.monotonic() - _beat if _beat is not None else None
+                    )
+                    if should_extend(_age, _extensions):
+                        _extensions += 1
+                        _wait_s = EXTENSION_S
+                        logger.info(
+                            "[taskrunner] task %s deadline hit but worker "
+                            "is progressing (last event %.0fs ago) — "
+                            "extending +%ds (%d/%d)",
+                            task_id[:8], _age or 0.0, EXTENSION_S,
+                            _extensions, MAX_EXTENSIONS,
+                        )
+                        continue
+                    _work.cancel()
+                    raise
 
             # Empty-reply fallback: when the brain's final LLM call returns
             # ``content_len=0`` (no synthesis text), the user otherwise sees

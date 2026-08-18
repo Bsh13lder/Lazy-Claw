@@ -42,6 +42,25 @@ def test_specialist_first_gate_exempts_background() -> None:
     )
 
 
+def test_specialist_first_activation_exempts_background() -> None:
+    """2026-08-18 capability-test incident: the guidance block (above) was
+    exempt but the per-iteration TOOL FILTER was not — a background
+    agent:browser worker was sent 37 tools and had them silently filtered
+    to 16 meta/readonly ones (no browser), so it stopped with 'the browser
+    tools are not available to me'. The exemption must be baked into the
+    ``_specialist_first`` activation expression itself so EVERY downstream
+    site (guidance, filter, stall anchor) inherits it."""
+    src = _source()
+    idx = src.find("_specialist_first = _specialist_first_enabled(")
+    assert idx != -1, "specialist-first activation expression not found"
+    window = src[idx : idx + 300]
+    assert 'not getattr(self, "is_background", False)' in window, (
+        "specialist-first activation lost the background-worker exemption — "
+        "background turns ARE the delegated worker; filtering their tools "
+        "to meta-only guarantees starvation (2026-08-18 himap publish)"
+    )
+
+
 def test_browser_sync_timeout_floor_and_bg_budget() -> None:
     """Timeout loop killer (2026-08-14): sync browser dispatches are
     floored at 480s (himap admin flows need 300-400s; the LLM kept

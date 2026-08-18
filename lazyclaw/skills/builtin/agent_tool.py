@@ -26,6 +26,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from lazyclaw.runtime.callbacks import AgentEvent, StepTrackingCallback
+from lazyclaw.runtime.deadline import EXTENSION_S, MAX_EXTENSIONS, should_extend
 from lazyclaw.runtime.dispatcher import _IS_SUBAGENT
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.specialist_aliases import (
@@ -235,7 +236,25 @@ class AgentDispatchSkill(BaseSkill):
             )
 
         if run_bg:
-            return await self._execute_background(user_id, agent_type, task)
+            from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
+
+            if self._caller_depth >= MAX_TASK_DEPTH:
+                # The task_runner would reject this submit ("max nesting
+                # depth"). Don't bounce that error string back at a worker
+                # — it shrugs and reports success without doing the work
+                # (2026-08-17 himap blog: depth-2 worker got the rejection,
+                # touched nothing, completed "ok"). Degrade to the sync
+                # specialist path instead: same work, inline, depth-legal
+                # via the subagent lane. Slow-work floor applied because
+                # the caller explicitly asked for background pacing.
+                logger.warning(
+                    "[agent] run_in_background at depth %d >= cap %d — "
+                    "degrading to sync dispatch of %s",
+                    self._caller_depth, MAX_TASK_DEPTH, agent_type,
+                )
+                timeout_s = max(timeout_s, _BROWSER_SYNC_TIMEOUT_FLOOR_S)
+            else:
+                return await self._execute_background(user_id, agent_type, task)
 
         self._calls_this_turn += 1
         if self._calls_this_turn > MAX_AGENTS_PER_TURN:
@@ -301,6 +320,10 @@ class AgentDispatchSkill(BaseSkill):
             ))
 
         started = time.monotonic()
+        # Heartbeat updated by run_specialist on every completed tool call —
+        # drives the Claude Code-style extension below. None until the FIRST
+        # real tool result: a worker that produced nothing gets no extension.
+        _progress_beat: dict = {"t": None}
 
         async def _acquire_and_run():
             async with _loop_semaphore():
@@ -319,22 +342,64 @@ class AgentDispatchSkill(BaseSkill):
                         callback=wrapped_callback,
                         task_id=task_id,
                         cancel_token=cancel_token,
+                        budget_s=timeout_s,
+                        progress_beat=_progress_beat,
                     )
                 finally:
                     _IS_SUBAGENT.reset(token)
 
+        # Claude Code semantics (2026-08-18: 63 successful steps hard-killed
+        # mid-work): a worker that is demonstrably progressing gets bounded
+        # extra time instead of a mid-step kill. The cancel token (user's
+        # stop button) remains the true kill; MAX_EXTENSIONS keeps a hard
+        # runaway ceiling.
+        _run_task = asyncio.ensure_future(_acquire_and_run())
+        _wait_s: float = timeout_s
+        _extensions = 0
         try:
-            result = await asyncio.wait_for(
-                _acquire_and_run(), timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            self._mark_failed(task_id, f"timeout after {timeout_s}s")
-            return (
-                f"[agent:{agent_type}] TIMEOUT after {timeout_s}s — the "
-                f"agent was cancelled. For slow work retry with "
-                f"run_in_background=true."
-            )
+            while True:
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(_run_task), timeout=_wait_s,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    _beat = _progress_beat.get("t")
+                    _age = (
+                        time.monotonic() - _beat if _beat is not None else None
+                    )
+                    if should_extend(_age, _extensions):
+                        _extensions += 1
+                        _wait_s = EXTENSION_S
+                        logger.info(
+                            "agent %s (%s): deadline hit but worker is "
+                            "progressing (last tool result %.0fs ago) — "
+                            "extending +%ds (%d/%d)",
+                            task_id, agent_type, _age or 0.0, EXTENSION_S,
+                            _extensions, MAX_EXTENSIONS,
+                        )
+                        if self._callback:
+                            await self._callback.on_event(AgentEvent(
+                                "specialist_extended",
+                                f"{spec.name} still working — extended",
+                                {
+                                    "specialist": spec.name,
+                                    "extension": _extensions,
+                                    "max_extensions": MAX_EXTENSIONS,
+                                },
+                            ))
+                        continue
+                    _run_task.cancel()
+                    _total = int(time.monotonic() - started)
+                    self._mark_failed(task_id, f"timeout after {_total}s")
+                    return (
+                        f"[agent:{agent_type}] TIMEOUT after {_total}s "
+                        f"({_extensions} extension(s) granted) — the agent "
+                        f"was cancelled. For slow work retry with "
+                        f"run_in_background=true."
+                    )
         except Exception as exc:
+            _run_task.cancel()
             logger.exception("agent %s (%s) crashed", task_id, agent_type)
             self._mark_failed(task_id, str(exc))
             return f"[agent:{agent_type}] FAILED: {exc}"

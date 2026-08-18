@@ -131,7 +131,12 @@ JS_SEARCH = """
 
 JS_ARTICLE = """
 () => {
-    const article = document.querySelector('article') || document.querySelector('main') || document.body;
+    const live = document.querySelector('article') || document.querySelector('main') || document.body;
+    // Strip noise on a CLONE — removing nodes from the live DOM mutated the
+    // user's real tab on every read and broke SPA reconciliation (2026-08-18
+    // himap blog: repeated reads returned an identical husk while the page
+    // itself was being chewed up).
+    const article = live.cloneNode(true);
     article.querySelectorAll('script,style,nav,footer,.ad,.ads,aside,[class*="related"]').forEach(el => el.remove());
     const title = document.querySelector('h1')?.textContent?.trim() || document.title || '';
     const meta_desc = document.querySelector('meta[name="description"]')?.content || '';
@@ -316,6 +321,11 @@ JS_PAGE_ANALYSIS = """
 
 # ── Extractors map ───────────────────────────────────────────────────────
 
+# Below this many extracted chars, compare against body.innerText — a rich
+# body behind a tiny extraction means the extractor grabbed the wrong
+# container (first card of a listing, an overlay, …) and we fall back.
+_LOW_CONTENT_FLOOR = 700
+
 EXTRACTORS = {
     "search": JS_SEARCH,
     "email": JS_EMAIL,
@@ -386,17 +396,39 @@ async def run_extractor(backend, url: str | None = None) -> dict:
             return result
         return {"title": title, "text": str(result), "url": url, "type": "search"}
 
-    # Auto-detect article vs generic
+    # Auto-detect article vs generic. Exactly ONE <article> means a real
+    # article page; several mean a LISTING whose cards are each an
+    # <article> — the article extractor would read only the first card
+    # (2026-08-18 himap blog: 537-char husk vs 4187-char page).
     if page_type == "auto":
-        has_article = await backend.evaluate(
-            "(() => !!document.querySelector('article'))()"
+        n_articles = await backend.evaluate(
+            "(() => document.querySelectorAll('article').length)()"
         )
-        page_type = "article" if has_article else "generic"
+        page_type = "article" if n_articles == 1 else "generic"
 
     js = EXTRACTORS.get(page_type, JS_GENERIC)
     result = await backend.evaluate(f"({js})()")
 
     if isinstance(result, dict) and result.get("text"):
+        extracted = result["text"]
+        # Safety net: a tiny extraction on a page whose body text is far
+        # richer means the extractor grabbed the wrong container — hand
+        # the model the real content instead of the husk.
+        if len(extracted) < _LOW_CONTENT_FLOOR:
+            body_len = await backend.evaluate(
+                "(() => (document.body?.innerText || '').trim().length)()"
+            )
+            if body_len and body_len > max(2 * len(extracted), 600):
+                text = await backend.evaluate(
+                    "(() => document.body.innerText.substring(0, 5000))()"
+                )
+                if text:
+                    return {
+                        "title": result.get("title") or title,
+                        "text": text,
+                        "url": url,
+                        "type": "fallback_low_content",
+                    }
         return result
 
     # Fallback: plain innerText

@@ -113,6 +113,53 @@ async def action_click(
     return confirm
 
 
+async def action_select(
+    user_id: str, params: dict, tab_context, snapshot_mgr,
+) -> str:
+    """Choose an option in a native <select> by ref + value/option text.
+
+    Clicking a combobox via CDP opens nothing detectable (the OS dropdown is
+    not part of the page), so click-based attempts fail verification — the
+    2026-08-18 himap Category field killed a run this way. This sets the
+    value directly in page context and fires input/change like a real pick.
+    """
+    ref = (params.get("ref") or "").strip()
+    value = (params.get("value") or params.get("text") or params.get("option") or "")
+    if not ref or not str(value).strip():
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="select requires ref AND value (option text or value).",
+            hint="Example: action='select', ref='e22', value='Guides'",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
+
+    backend = await get_backend(user_id, tab_context)
+    # Ensure the ref engine is present (it survives from the last snapshot).
+    await snapshot_mgr._ensure_engine(backend)
+    import json as _json
+    result = await backend.evaluate(
+        f"window.__lazyclaw.selectOption({_json.dumps(ref)}, {_json.dumps(str(value))})"
+    )
+    if isinstance(result, dict) and result.get("ok"):
+        meta = await snapshot_mgr.get_ref_meta(backend, ref)
+        name = (meta or {}).get("name") or ref
+        return (
+            f"Selected \"{result.get('selected', value)}\" in [{ref}] \"{name}\" "
+            f"(input+change events fired)."
+        )
+    err = (result or {}).get("err", "unknown error") if isinstance(result, dict) else str(result)
+    options = (result or {}).get("options") if isinstance(result, dict) else None
+    hint = "Take a fresh snapshot to get valid refs."
+    if options:
+        hint = "Available options: " + "; ".join(options)
+    return str(ActionError(
+        code=ActionErrorCode.NOT_FOUND,
+        message=f"select on [{ref}] failed: {err}",
+        hint=hint,
+        retry_strategy=RETRY_RE_READ,
+    ))
+
+
 async def action_type(
     user_id: str, params: dict, tab_context, snapshot_mgr, verifier,
 ) -> str:

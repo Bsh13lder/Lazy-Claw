@@ -36,7 +36,7 @@ from lazyclaw.skills.base import BaseSkill
 from .browser_actions.ask_vision import action_ask_vision
 from .browser_actions.backends import get_cdp_backend, reset_backend
 from .browser_actions.capture import action_console_logs, action_screenshot, action_snapshot
-from .browser_actions.interact import action_click, action_drag, action_hover, action_press_key, action_type
+from .browser_actions.interact import action_click, action_drag, action_hover, action_press_key, action_select, action_type
 from .browser_actions.navigation import (
     action_chain,
     action_close,
@@ -151,7 +151,7 @@ class BrowserSkill(BaseSkill):
                 "action": {
                     "type": "string",
                     "enum": [
-                        "read", "open", "click", "type", "press_key",
+                        "read", "open", "click", "type", "select", "press_key",
                         "screenshot", "tabs", "scroll", "close", "close_tab",
                         "show", "snapshot", "hover", "drag", "console_logs",
                         "chain", "network", "ocr", "ask_vision",
@@ -173,6 +173,11 @@ class BrowserSkill(BaseSkill):
                         "INTERACT actions — change page state:\n"
                         "  click: click element by ref (e5) or description. Returns fresh refs if page changed.\n"
                         "  type: type text into element. Returns fresh refs if page changed.\n"
+                        "  select: choose an option in a native dropdown (<select>). "
+                        "REQUIRED for dropdowns — clicking them opens an OS menu the "
+                        "browser cannot see, so click will fail verification. "
+                        "ref='e22', value='Guides' (option text or value, "
+                        "case-insensitive).\n"
                         "  press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown).\n"
                         "  hover: hover over element.\n"
                         "  drag: drag element from source to target.\n"
@@ -217,7 +222,17 @@ class BrowserSkill(BaseSkill):
                 },
                 "text": {
                     "type": "string",
-                    "description": "Text to type (for 'type' action only).",
+                    "description": (
+                        "Text to type (for 'type'). For 'select': the option "
+                        "text or value to choose (alias of 'value')."
+                    ),
+                },
+                "value": {
+                    "type": "string",
+                    "description": (
+                        "For 'select': the option to choose — option text or "
+                        "value attribute, case-insensitive substring ok."
+                    ),
                 },
                 "steps": {
                     "type": "array",
@@ -401,6 +416,8 @@ class BrowserSkill(BaseSkill):
             return await action_open(user_id, params, tab_context, self._config, mgr, v, is_background)
         elif action == "click":
             return await action_click(user_id, params, tab_context, mgr, v)
+        elif action == "select":
+            return await action_select(user_id, params, tab_context, mgr)
         elif action == "type":
             return await action_type(user_id, params, tab_context, mgr, v)
         elif action == "press_key":
@@ -435,7 +452,7 @@ class BrowserSkill(BaseSkill):
             return await action_ask_vision(user_id, params, tab_context)
         else:
             return (
-                f"Unknown action: {action}. Use: read, open, click, type, "
+                f"Unknown action: {action}. Use: read, open, click, type, select, "
                 f"press_key, screenshot, tabs, scroll, close, snapshot, "
                 f"hover, drag, console_logs, chain, network, ocr, ask_vision"
             )

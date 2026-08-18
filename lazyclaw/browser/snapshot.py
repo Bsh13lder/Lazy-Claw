@@ -188,11 +188,11 @@ def _score_landmarks(
 
 # JS fallback — injected when extension is not loaded.
 # Same logic as content.js but as a single evaluate() call.
-_FALLBACK_VERSION = 4  # Bump when changing fallback JS to force re-injection
+_FALLBACK_VERSION = 7  # Bump when changing fallback JS to force re-injection
 
 _JS_INJECT_FALLBACK = """
 (() => {
-  const EXPECTED_VERSION = 4;
+  const EXPECTED_VERSION = 7;
   if (typeof window.__lazyclaw !== 'undefined' && window.__lazyclaw_version === EXPECTED_VERSION) return 'already_loaded';
   // Force re-inject if version mismatch (code updated)
 
@@ -242,20 +242,61 @@ _JS_INJECT_FALLBACK = """
     return t;
   }
   function nm(el) {
+    // Form controls: the <label> IS the name (2026-08-18 himap incident:
+    // Django admin fields have no aria-label/placeholder, so every input
+    // rendered as a NAMELESS textbox and the model scroll-hunted for 40+
+    // steps trying to tell excerpt from meta_title).
+    try {
+      if (el.labels && el.labels.length) {
+        const t = (el.labels[0].textContent||'').trim().slice(0,80);
+        if (t) return t;
+      }
+      const wrap = el.closest && el.closest('label');
+      if (wrap) {
+        const t = (wrap.textContent||'').trim().slice(0,80);
+        if (t) return t;
+      }
+    } catch(_){}
+    // <input type=submit|button|reset>: the visible label is .value
+    // (Django's Save renders as name="_save" value="Save" — show "Save").
+    try {
+      if (el.tagName==='INPUT' && /^(submit|button|reset)$/.test(el.type) && el.value) {
+        return String(el.value).trim().slice(0,80);
+      }
+    } catch(_){}
     return el.getAttribute('aria-label') || el.getAttribute('data-tooltip') ||
       el.getAttribute('title') || el.getAttribute('alt') ||
       el.getAttribute('placeholder') ||
-      (el.textContent||'').trim().slice(0,80) || '';
+      (el.textContent||'').trim().slice(0,80) ||
+      el.getAttribute('name') || '';
   }
   function props(el) {
     const p = {};
-    if (el.checked) p.checked='true';
+    const tag = el.tagName;
+    // Checkboxes/radios report BOTH states — 'checked' only-when-true left
+    // the model unable to see "unchecked", so it clicked is_published twice
+    // (2026-08-18) and silently un-published the post.
+    if (tag==='INPUT' && (el.type==='checkbox'||el.type==='radio')) {
+      p.checked = el.checked ? 'true' : 'false';
+    } else if (el.checked) p.checked='true';
     if (el.selected||el.getAttribute('aria-selected')==='true') p.selected='true';
     if (el.disabled) p.disabled='true';
+    if (el.required) p.required='true';
     if (el.getAttribute('aria-expanded')) p.expanded=el.getAttribute('aria-expanded');
     if (el.placeholder) p.placeholder=el.placeholder;
     if (el.type&&el.type!=='text') p.type=el.type;
     if (el.href) p.href=el.href.slice(0,120);
+    // Current value — lets the model SEE what is already filled instead of
+    // re-reading the page to check its own work.
+    try {
+      const NO_VAL = {checkbox:1, radio:1, submit:1, button:1, password:1, file:1, hidden:1};
+      if ((tag==='INPUT' && !NO_VAL[el.type]) || tag==='TEXTAREA') {
+        if (el.value) p.value = String(el.value).slice(0,40);
+      } else if (tag==='SELECT' && el.selectedOptions && el.selectedOptions[0]) {
+        const v = (el.selectedOptions[0].textContent||'').trim().slice(0,40);
+        if (v) p.value = v;
+      }
+    } catch(_){}
     return p;
   }
 
@@ -296,6 +337,30 @@ _JS_INJECT_FALLBACK = """
       } catch(_){}
       return {version:_v,url:location.href,title:document.title||'',
         landmarks,elements,elementCount:c,context,dirty:false};
+    },
+    selectOption(id, want) {
+      // Native <select> support — clicking a combobox via CDP opens nothing
+      // detectable, so 3 clicks in a row "failed verification" and killed
+      // the run one field short of Save (2026-08-18 himap Category field).
+      const el=_refs.get(id);
+      if (!el||!el.isConnected) return {ok:false, err:'ref not found or stale'};
+      if (el.tagName!=='SELECT') {
+        return {ok:false, err:'not a <select> (tag='+el.tagName.toLowerCase()+')'};
+      }
+      const w=String(want==null?'':want).trim().toLowerCase();
+      if (!w) return {ok:false, err:'empty value'};
+      const opts=[...el.options];
+      const opt=opts.find(o=>String(o.value).toLowerCase()===w)
+        || opts.find(o=>(o.textContent||'').trim().toLowerCase()===w)
+        || opts.find(o=>(o.textContent||'').trim().toLowerCase().includes(w));
+      if (!opt) {
+        return {ok:false, err:'no option matching "'+String(want).slice(0,40)+'"',
+          options:opts.map(o=>(o.textContent||'').trim().slice(0,40)).filter(Boolean).slice(0,25)};
+      }
+      el.value=opt.value;
+      el.dispatchEvent(new Event('input',{bubbles:true}));
+      el.dispatchEvent(new Event('change',{bubbles:true}));
+      return {ok:true, selected:(opt.textContent||'').trim().slice(0,60)};
     },
     resolve(id) {
       const el=_refs.get(id);
@@ -675,6 +740,10 @@ def _format_element(el: ElementRef) -> str:
             parts.append(f'placeholder="{val}"')
         elif key == "type" and val not in ("text", "submit"):
             parts.append(f"type={val}")
+        elif key == "value":
+            # Current field value — the model must see filled-vs-empty
+            # without re-reading the page (2026-08-18 himap form incident).
+            parts.append(f'value="{val}"')
     return " ".join(parts)
 
 

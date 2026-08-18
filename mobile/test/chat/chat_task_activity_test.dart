@@ -178,4 +178,54 @@ void main() {
     expect(c.messages.last.role, 'bg_task', reason: 'the card is still added');
     expect(c.isStreaming, isTrue);
   });
+
+  // ── 2026-08-18: "whatsapp · delegated" chip spun forever ───────────────────
+  // team_delegate mints a kind='delegate' row, but NO server frame ever
+  // carries a terminal for that (kind, subject) — the specialist completes
+  // under its own name. A sync delegation cannot outlive its turn, so the
+  // turn-end frame must settle any still-spinning non-bg rows.
+
+  test('delegate chip with no terminal frame settles when the turn ends', () {
+    final c = ChatReducer();
+    c.onUserSend('reply to the whatsapp message');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'delegate', subject: 'whatsapp', detail: 'delegated'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'messaging_specialist', detail: 'started'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist',
+        subject: 'messaging_specialist',
+        detail: 'finished',
+        done: true));
+    c.onFrame(const DoneFrame('Sent ✓', null));
+
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    final delegate =
+        host.agentActivities.firstWhere((a) => a.kind == 'delegate');
+    expect(delegate.done, isTrue,
+        reason: 'sync delegation cannot outlive its turn');
+    expect(host.streaming, isFalse);
+    expect(c.isStreaming, isFalse);
+  });
+
+  test('turn-end also settles delegate rows on error frames', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'delegate', subject: 'whatsapp', detail: 'delegated'));
+    c.onFrame(const ErrorFrame('boom'));
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    expect(host.agentActivities.single.done, isTrue);
+  });
+
+  test('bg rows are NOT settled by the turn-end frame', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'bg', subject: 'job', detail: 'started', taskId: 'T'));
+    c.onFrame(const DoneFrame('dispatched — running in background', null));
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    expect(host.agentActivities.single.done, isFalse,
+        reason: 'background work legitimately outlives the turn');
+  });
 }

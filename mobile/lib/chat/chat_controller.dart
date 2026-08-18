@@ -224,11 +224,16 @@ class ChatReducer {
         if (messages.isEmpty) return;
         final finalText = content.isNotEmpty ? content : _buf.toString();
         // Terminal frame: a chip whose result never arrived must not spin on.
-        _replaceLast(messages.last.withRunningToolsInterrupted().copyWith(
-          content: finalText,
-          streaming: false,
-          usage: usage ?? _pendingUsage,
-        ));
+        // Sync activity rows (delegate/specialist) settle too — a delegate
+        // row has NO terminal frame of its own in the wire contract.
+        _replaceLast(messages.last
+            .withRunningToolsInterrupted()
+            .withSyncActivitiesSettled()
+            .copyWith(
+              content: finalText,
+              streaming: false,
+              usage: usage ?? _pendingUsage,
+            ));
         _pendingUsage = null;
 
       case UsageFrame(:final usage):
@@ -253,6 +258,7 @@ class ChatReducer {
         }
         _replaceLast(messages.last
             .withRunningToolsInterrupted()
+            .withSyncActivitiesSettled()
             .copyWith(content: '⚠️ $message', streaming: false));
 
       case SendFailedFrame(:final message):

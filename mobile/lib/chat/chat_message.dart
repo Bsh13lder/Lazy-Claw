@@ -461,4 +461,33 @@ class ChatMessage {
       ],
     );
   }
+
+  /// Settle every still-spinning NON-background agent-activity row.
+  ///
+  /// Called on turn-end frames (done / error). A sync delegation or
+  /// specialist cannot outlive its turn, but a `delegate`-kind row has no
+  /// terminal frame in the wire contract at all (team_delegate mints it;
+  /// the specialist completes under its own subject) — 2026-08-18: the
+  /// "whatsapp · delegated" chip spun forever after the reply was sent.
+  /// `bg` rows are exempt: background work legitimately outlives the turn
+  /// and settles via its own background_done / task_completed frames.
+  ChatMessage withSyncActivitiesSettled() {
+    final hasSpinning =
+        agentActivities.any((a) => a.kind != 'bg' && !a.done && !a.failed);
+    if (!hasSpinning) return this;
+    return _clone(
+      agentActivities: [
+        for (final a in agentActivities)
+          (a.kind != 'bg' && !a.done && !a.failed)
+              ? a.merge(AgentActivity(
+                  kind: a.kind,
+                  subject: a.subject,
+                  taskId: a.taskId,
+                  detail: 'finished',
+                  done: true,
+                ))
+              : a,
+      ],
+    );
+  }
 }

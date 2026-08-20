@@ -16,6 +16,19 @@ import '../../chat/chat_message.dart';
 import '../../ui/ui.dart';
 import 'tool_detail_sheet.dart';
 
+/// Chip label: display name, plus the dispatch target for `agent`/legacy
+/// `delegate` calls. Three parallel dispatches rendered as identical
+/// "Dispatch Agent" chips (2026-08-20) were indistinguishable from one
+/// eternal chip — the target gives each dispatch an identity.
+String _chipLabel(ToolActivity t) {
+  final base = t.displayName ?? t.name;
+  final target = t.args['agent_type'] ?? t.args['specialist'];
+  if (target is String && target.trim().isNotEmpty) {
+    return '$base · ${target.trim()}';
+  }
+  return base;
+}
+
 class ToolChip extends StatefulWidget {
   const ToolChip({super.key, required this.activity});
   final ToolActivity activity;
@@ -113,7 +126,7 @@ class _ToolChipState extends State<ToolChip> {
             const SizedBox(width: 5),
             Flexible(
               child: Text(
-                t.displayName ?? t.name,
+                _chipLabel(t),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: AppText.caption.copyWith(

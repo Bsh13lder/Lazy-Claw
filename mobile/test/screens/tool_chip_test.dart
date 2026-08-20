@@ -207,4 +207,35 @@ void main() {
     expect(find.text('No arguments captured'), findsOneWidget);
     expect(find.text('No result captured'), findsOneWidget);
   });
+
+  // 2026-08-20: three parallel `agent` dispatches all rendered as identical
+  // "Dispatch Agent" chips — visually indistinguishable, so sequential OR
+  // parallel runs both read as one chip that never settles. The chip must
+  // carry its target so each dispatch has an identity.
+
+  testWidgets('agent chip appends the agent_type from args', (tester) async {
+    await _pump(
+      tester,
+      const ToolActivity(
+        name: 'agent',
+        displayName: 'Dispatch Agent',
+        args: {'agent_type': 'browser', 'task': 'check the blog'},
+        status: ToolStatus.running,
+      ),
+    );
+    expect(find.text('Dispatch Agent · browser'), findsOneWidget);
+  });
+
+  testWidgets('non-agent chips ignore stray agent_type-less args',
+      (tester) async {
+    await _pump(
+      tester,
+      const ToolActivity(
+        name: 'web_search',
+        args: {'query': 'x'},
+        status: ToolStatus.done,
+      ),
+    );
+    expect(find.text('web_search'), findsOneWidget);
+  });
 }

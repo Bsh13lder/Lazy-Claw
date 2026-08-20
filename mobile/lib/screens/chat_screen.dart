@@ -23,6 +23,7 @@ import 'package:go_router/go_router.dart';
 import '../chat/chat_controller.dart';
 import '../chat/chat_message.dart';
 import '../chat/chat_socket.dart';
+import '../chat/socket_rewire.dart';
 import '../core/config/server_config.dart';
 import '../local_ai/local_ai_providers.dart';
 import '../notifications/local_notifications.dart';
@@ -89,6 +90,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   bool _connected = false;
   String? _connectError;
   StreamSubscription<bool>? _connSub;
+  // Re-points the socket whenever the resolved gateway changes at runtime
+  // (2026-08-20: cold start seeded the LAN last-known-good, reresolve moved
+  // REST to the Funnel, and the WS kept dialing the dead LAN IP forever).
+  SocketRewirer? _rewirer;
+  ProviderSubscription<String>? _baseUrlSub;
 
   /// Chat vs Inbox — the top segment. Rendered via an [IndexedStack] so the
   /// chat subtree (scroll position, in-flight streaming bubbles) stays alive
@@ -108,7 +114,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     // green dot and the user (and I) were misled (2026-08-16). The stream
     // emits false on every drop, true on every (re)connect.
     _connSub = ref.read(chatSocketProvider).connectionState.listen((up) {
-      if (mounted) setState(() => _connected = up);
+      // A (re)connect also clears any stale error banner — after the
+      // rewirer heals the socket, "can't connect" over a green dot lies.
+      if (mounted) {
+        setState(() {
+          _connected = up;
+          if (up) _connectError = null;
+        });
+      }
+    });
+    // The gateway can change AFTER mount (background reresolve, resume
+    // self-heal). REST follows automatically (apiClient watches the
+    // provider); the socket needs this explicit rewire or it re-dials the
+    // mount-time URL forever.
+    _rewirer = SocketRewirer(
+      socket: ref.read(chatSocketProvider),
+      getSessionCookie: () => ref.read(apiClientProvider).getSessionCookie(),
+    );
+    _baseUrlSub = ref.listenManual<String>(baseUrlProvider, (previous, next) {
+      unawaited(_rewirer!.onBaseUrl(next));
     });
     _connect();
     // Replay prior conversation so the screen isn't empty on open (first call
@@ -139,6 +163,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _baseUrlSub?.close();
     _connSub?.cancel();
     _input.dispose();
     _scrollController.dispose();

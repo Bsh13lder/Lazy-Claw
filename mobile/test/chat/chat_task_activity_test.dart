@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/chat/chat_controller.dart';
+import 'package:lazyclaw_mobile/chat/chat_message.dart';
 import 'package:lazyclaw_mobile/chat/ws_frames.dart';
 
 /// Bug 4 (task_id keying) + Bug 2 (streaming bubble never clears on
@@ -227,5 +228,93 @@ void main() {
     final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
     expect(host.agentActivities.single.done, isFalse,
         reason: 'background work legitimately outlives the turn');
+  });
+
+  // ── 2026-08-20: sync dispatch now emits specialist_done MID-turn ───────────
+  // The backend historically never sent a terminal for sync `agent`
+  // dispatches, so a completed specialist's row spun until turn end while
+  // its siblings ran. This locks the wire contract the fix relies on: a
+  // specialist_done settles ITS row immediately, turn still open.
+
+  test('specialist_done settles the row mid-turn while the turn streams', () {
+    final c = ChatReducer();
+    c.onUserSend('check whatsapp and the blog');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'browser_specialist', detail: 'started'));
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist',
+        subject: 'messaging_specialist',
+        detail: 'started'));
+    // First dispatch completes — NO DoneFrame yet, siblings still working.
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist',
+        subject: 'browser_specialist',
+        detail: 'finished',
+        done: true));
+
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    final browser = host.agentActivities
+        .firstWhere((a) => a.subject == 'browser_specialist');
+    final messaging = host.agentActivities
+        .firstWhere((a) => a.subject == 'messaging_specialist');
+    expect(browser.done, isTrue,
+        reason: 'a completed dispatch must stop spinning mid-turn');
+    expect(messaging.done, isFalse,
+        reason: 'its still-running sibling keeps spinning');
+    expect(c.isStreaming, isTrue, reason: 'the turn itself is still open');
+  });
+
+  // ── 2026-08-20: settle frames lost in a WS blip leave zombie spinners ──────
+  // A container restart dropped the socket right as a turn's terminals went
+  // out; the answer text later arrived via history refresh but the old
+  // bubble's activity rows kept spinning forever ("leftover up there").
+  // Sync activities cannot outlive their turn — any bubble that is not the
+  // live streaming tail must have its rows settled by the sweep, which runs
+  // on reconnect and when a new user turn starts.
+
+  test('a new user send settles zombie rows from a terminal-less turn', () {
+    final c = ChatReducer();
+    c.onUserSend('check seo');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'research_specialist', detail: 'started'));
+    c.onFrame(const ToolCallFrame('agent', {'agent_type': 'research'}, 'tc1'));
+    // No DoneFrame / specialist_done — the WS dropped. Next turn starts:
+    c.onUserSend('and the weather?');
+
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    expect(host.agentActivities.single.done, isTrue,
+        reason: 'sync rows cannot outlive their turn');
+    expect(host.toolActivities.single.status, isNot(ToolStatus.running),
+        reason: 'orphaned chips must stop spinning');
+  });
+
+  test('settleStaleSyncActivities spares the live streaming tail', () {
+    final c = ChatReducer();
+    c.onUserSend('first');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'old_specialist', detail: 'started'));
+    c.onFrame(const DoneFrame('done text', null));
+    c.onUserSend('second');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'specialist', subject: 'live_specialist', detail: 'started'));
+
+    c.settleStaleSyncActivities();
+
+    final live = c.messages.last;
+    expect(live.streaming, isTrue);
+    expect(live.agentActivities.single.done, isFalse,
+        reason: 'the in-flight turn keeps its live spinners');
+  });
+
+  test('the sweep leaves bg rows running (they outlive turns)', () {
+    final c = ChatReducer();
+    c.onUserSend('go');
+    c.onFrame(const AgentActivityFrame(
+        kind: 'bg', subject: 'job', detail: 'started', taskId: 'T'));
+    c.onFrame(const DoneFrame('dispatched', null));
+    c.onUserSend('next');
+
+    final host = c.messages.firstWhere((m) => m.agentActivities.isNotEmpty);
+    expect(host.agentActivities.single.done, isFalse);
   });
 }

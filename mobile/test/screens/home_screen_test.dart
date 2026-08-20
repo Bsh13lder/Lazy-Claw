@@ -108,7 +108,11 @@ class _NopSocket extends ChatSocket {
   Stream<ServerFrame> get frames => _ctrl.stream;
 
   @override
-  Future<void> connect(String url, {required String cookie}) async {}
+  Future<void> connect(
+    String url, {
+    required String cookie,
+    bool force = false,
+  }) async {}
 
   @override
   Future<void> dispose() async => _ctrl.close();

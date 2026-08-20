@@ -57,7 +57,36 @@ class ChatReducer {
       createdAt: DateTime.now().toUtc(),
       sendState: delivered ? SendState.sent : SendState.sending,
     ));
+    // With the new message appended, every earlier bubble is dead as a
+    // frame target — sweep zombie spinners whose settle frames were lost
+    // (2026-08-20).
+    settleStaleSyncActivities();
     if (delivered) _startAssistantTurn();
+  }
+
+  /// Settles running tool chips + non-bg activity rows (and the stale
+  /// streaming flag) on every bubble EXCEPT the last one. Live frames
+  /// only ever target the newest bubble, so anything above it can never
+  /// settle on its own — yet its terminal frames CAN be lost in a WS
+  /// blip (2026-08-20: a server restart dropped the socket mid-settle;
+  /// the answer later arrived via history refresh while the old bubble's
+  /// rows spun forever). Runs after a user send, on reconnect, and after
+  /// a history merge. `bg` rows are spared — background work
+  /// legitimately outlives turns and has its own replayable terminals.
+  void settleStaleSyncActivities() {
+    for (var i = 0; i < messages.length - 1; i++) {
+      final m = messages[i];
+      final zombie = m.streaming ||
+          m.agentActivities
+              .any((a) => !a.done && !a.failed && a.kind != 'bg') ||
+          m.toolActivities.any((t) => t.status == ToolStatus.running);
+      if (zombie) {
+        messages[i] = m
+            .withRunningToolsInterrupted()
+            .withSyncActivitiesSettled()
+            .copyWith(streaming: false);
+      }
+    }
   }
 
   /// Queued messages went out on reconnect: clear their "sending…" marks and
@@ -673,7 +702,13 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
     _connSub = _socket.connectionState.listen((up) {
       final was = _wasConnected;
       _wasConnected = up;
-      if (up && !was) unawaited(refreshHistory());
+      if (up && !was) {
+        // A reconnect means frames may have been lost while down — settle
+        // zombie sync spinners before the history refresh brings the text.
+        _reducer.settleStaleSyncActivities();
+        state = List.unmodifiable(_reducer.messages);
+        unawaited(refreshHistory());
+      }
     });
   }
 
@@ -685,6 +720,9 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   void seedHistory(List<ChatMessage> history) {
     if (_seeded) {
       if (_reducer.mergeHistoryTail(history)) {
+        // The merge may have appended the turn's final text below a
+        // bubble whose settle frames were lost — sweep its zombies.
+        _reducer.settleStaleSyncActivities();
         state = List.unmodifiable(_reducer.messages);
       }
       return;

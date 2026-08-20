@@ -1,6 +1,7 @@
 ---
 name: research_specialist
 display_name: Research Specialist
+description: web research: search plus browser reading for open-web questions
 include_scraper: true
 tools:
   - web_search

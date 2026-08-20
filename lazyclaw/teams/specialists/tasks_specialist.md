@@ -1,6 +1,7 @@
 ---
 name: tasks_specialist
 display_name: Tasks & Budget Specialist
+description: encrypted tasks, projects, reminders/cron, budgets and expense tracking
 include_scraper: false
 tools:
   - add_task

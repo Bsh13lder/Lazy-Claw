@@ -1,6 +1,7 @@
 ---
 name: email_specialist
 display_name: Email Specialist
+description: live email: read inboxes and threads, compose and send replies
 include_scraper: false
 tools:
   - send_email

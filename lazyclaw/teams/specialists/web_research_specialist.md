@@ -1,6 +1,7 @@
 ---
 name: web_research_specialist
 display_name: Web Research Specialist
+description: read-only web and documentation research and summarization
 include_scraper: true
 tools:
   - web_search

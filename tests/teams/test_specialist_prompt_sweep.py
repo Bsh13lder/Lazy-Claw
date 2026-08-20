@@ -142,3 +142,36 @@ def test_startup_self_check_is_quiet_when_prompts_are_clean(caplog, monkeypatch)
     with caplog.at_level(logging.WARNING):
         specialist_loader.startup_specialist_self_check(_Registry())
     assert not [r for r in caplog.records if "prompt" in r.getMessage().lower()]
+
+
+# ── description gate (2026-08-19 MCP-restart routing incident) ─────────
+# The `description:` frontmatter is compiled into the dispatch schemas'
+# agent_type description and ships on many turns — it must exist (else
+# the specialist is invisible to routing) and stay short (token budget).
+
+
+@pytest.mark.parametrize("spec", _builtins(), ids=lambda s: s.name)
+def test_builtin_has_short_single_line_description(spec):
+    assert spec.description.strip(), (
+        f"{spec.name}.md has no `description:` frontmatter — without it "
+        "the brain cannot route to this specialist except by name-vibes "
+        "(exactly the 2026-08-19 MCP-restart dead-end)"
+    )
+    assert "\n" not in spec.description, spec.name
+    assert len(spec.description) <= 100, (
+        f"{spec.name} description is {len(spec.description)} chars — the "
+        "roster ships in the dispatch schema on many turns; keep each "
+        "line <= 100 chars"
+    )
+
+
+def test_mcp_restart_reachable_from_system_specialist():
+    """2026-08-19 incident regression: 'restart the mcp-whatsapp server'
+    was delegated to system_specialist, whose allowlist had zero MCP
+    tools — the restart trio must stay reachable there. Full lifecycle
+    (install/add/remove/remote) intentionally stays automation-only."""
+    spec = next(s for s in _builtins() if s.name == "system_specialist")
+    for tool in (
+        "list_mcp_servers", "connect_mcp_server", "disconnect_mcp_server",
+    ):
+        assert tool in spec.allowed_skills, tool

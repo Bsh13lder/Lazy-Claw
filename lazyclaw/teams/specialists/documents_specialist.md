@@ -1,6 +1,7 @@
 ---
 name: documents_specialist
 display_name: Documents Specialist
+description: native encrypted office suite: Sheets, Docs, PDFs (never Google)
 include_scraper: false
 tools:
   - create_sheet

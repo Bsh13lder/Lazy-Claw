@@ -1,6 +1,7 @@
 ---
 name: code_research_specialist
 display_name: Code Research Specialist
+description: read-only codebase research: read files, list dirs, run inspection commands
 include_scraper: false
 tools:
   - read_file

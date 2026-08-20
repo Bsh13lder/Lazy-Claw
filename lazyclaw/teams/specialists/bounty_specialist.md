@@ -1,6 +1,7 @@
 ---
 name: bounty_specialist
 display_name: Bug Bounty Specialist
+description: authorized bug-bounty security research: recon, in-scope probing, evidence-based reports
 include_scraper: true
 tools:
   - bounty_disable_program

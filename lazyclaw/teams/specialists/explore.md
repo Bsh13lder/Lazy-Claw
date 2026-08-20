@@ -1,6 +1,7 @@
 ---
 name: explore
 display_name: Explore Agent
+description: read-only research: gather info, return a summary, never mutate state
 include_scraper: true
 tools:
   - web_search

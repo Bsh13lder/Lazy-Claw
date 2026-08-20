@@ -1,6 +1,7 @@
 ---
 name: automation_specialist
 display_name: Automation Specialist
+description: n8n workflows, MCP server lifecycle (install/connect/disconnect/remove), atomic Google tasks
 include_scraper: false
 tools:
   - n8n_create_credential

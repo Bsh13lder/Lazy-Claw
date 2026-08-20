@@ -1,6 +1,7 @@
 ---
 name: browser_specialist
 display_name: Browser Specialist
+description: interactive browser automation: navigate, click, fill forms, read live pages
 model: smart
 include_scraper: true
 tools:

@@ -1,6 +1,7 @@
 ---
 name: contacts_specialist
 display_name: Contacts & Pipeline Specialist
+description: unified encrypted contact store + CRM pipeline: resolve people, track deals
 include_scraper: false
 tools:
   - find_contact

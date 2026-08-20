@@ -1,6 +1,7 @@
 ---
 name: notes_specialist
 display_name: Notes & Memory Specialist
+description: LazyBrain PKM and long-term memory: notes, wikilinks, retrieval, daily logs
 include_scraper: false
 tools:
   - lazybrain_append_journal

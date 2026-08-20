@@ -305,3 +305,20 @@ def test_startup_self_check_accepts_bare_mcp_suffixes(caplog):
     # With a near-empty registry the drift IS reported, loudly.
     assert "freelance_specialist" in report
     assert any("unknown tools" in r.message for r in caplog.records)
+
+
+# ── parse_specialist_md — description frontmatter (2026-08-19) ─────────
+
+
+def test_parse_description_key():
+    """`description:` is the routing summary compiled into the dispatch
+    schemas' agent_type enum — one line, stripped."""
+    md = "---\nname: descy\ndescription:  Does the thing quickly \n---\nBody."
+    cfg = parse_specialist_md(md)
+    assert cfg.description == "Does the thing quickly"
+
+
+def test_parse_description_defaults_empty():
+    md = "---\nname: bare\n---\nDo work."
+    cfg = parse_specialist_md(md)
+    assert cfg.description == ""

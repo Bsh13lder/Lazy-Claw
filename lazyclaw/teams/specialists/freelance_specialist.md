@@ -1,6 +1,7 @@
 ---
 name: freelance_specialist
 display_name: Freelance Specialist
+description: Upwork and gigs: job search, proposals, client chats, invoicing
 include_scraper: true
 tools:
   - apply_job

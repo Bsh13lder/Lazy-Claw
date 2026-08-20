@@ -98,6 +98,12 @@ class SpecialistConfig:
     # fall back to opening Chrome for read-only contact-data work that
     # `extract_entities` would solve in one JS-rendered call.
     include_scraper: bool = False
+    # One-line routing summary compiled into the dispatch tools'
+    # agent_type schema (specialist_aliases.AGENT_TYPE_ROSTER). Without
+    # it the brain routes by name-vibes alone — the 2026-08-19
+    # mcp-whatsapp restart dead-end. Kept <= 100 chars by CI
+    # (test_specialist_prompt_sweep).
+    description: str = ""
 
 
 # ── Built-in specialists ─────────────────────────────────────

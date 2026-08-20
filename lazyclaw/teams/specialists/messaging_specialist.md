@@ -1,6 +1,7 @@
 ---
 name: messaging_specialist
 display_name: Messaging Specialist
+description: WhatsApp and Instagram DMs: read conversations, send replies
 include_scraper: false
 tools:
   - find_contact

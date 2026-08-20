@@ -9,6 +9,7 @@ Frontmatter → :class:`SpecialistConfig`::
 
     name            (required)            -> name
     display_name    (optional, ->name)    -> display_name
+    description     (optional, ->"")      -> description
     model           (optional, ->None)    -> preferred_model
     include_scraper (optional bool, False)-> include_scraper
     tools           (optional list, ())   -> allowed_skills
@@ -68,6 +69,13 @@ def parse_specialist_md(text: str, *, is_builtin: bool = False) -> SpecialistCon
         else name
     )
 
+    raw_description = props.get("description")
+    description = (
+        raw_description.strip()
+        if isinstance(raw_description, str)
+        else ""
+    )
+
     raw_model = props.get("model")
     preferred_model = (
         raw_model.strip()
@@ -97,6 +105,7 @@ def parse_specialist_md(text: str, *, is_builtin: bool = False) -> SpecialistCon
         preferred_model=preferred_model,
         is_builtin=is_builtin,
         include_scraper=include_scraper,
+        description=description,
     )
 
 

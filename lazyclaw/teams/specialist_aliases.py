@@ -34,6 +34,10 @@ SHORT_ALIASES: dict[str, str] = {
     "pipeline": "contacts_specialist",
     "automation": "automation_specialist",
     "n8n": "automation_specialist",
+    # 2026-08-19 mcp-whatsapp restart incident: explicit MCP intent must
+    # reach the full-lifecycle owner (system_specialist carries only the
+    # restart trio: list/connect/disconnect).
+    "mcp": "automation_specialist",
     "bounty": "bounty_specialist",
     "system": "system_specialist",
 }
@@ -65,7 +69,42 @@ def specialist_choices() -> list[str]:
     return front + rest
 
 
+def _build_agent_type_roster() -> str:
+    """Compile the per-specialist routing roster shipped in the dispatch
+    schemas (`agent` + legacy `delegate`).
+
+    One line per canonical builtin — primary enum key, alternate aliases
+    in parens, then the ``description:`` frontmatter. Single source of
+    truth: the same file that owns the ``tools:`` allowlist owns the one
+    line that advertises it, so the roster cannot drift the way the
+    hand-written delegate.py hint did (3 of 17 specialists by 2026-08-19,
+    and the brain routed an MCP restart to a specialist with zero MCP
+    tools). Descriptions are CI-gated non-empty and <= 100 chars
+    (test_specialist_prompt_sweep).
+    """
+    aliases_by_full: dict[str, list[str]] = {}
+    for short, full in SHORT_ALIASES.items():
+        aliases_by_full.setdefault(full, []).append(short)
+
+    lines: list[str] = []
+    for spec in BUILTIN_SPECIALISTS:
+        primary = spec.name.removesuffix("_specialist")
+        if primary not in SPECIALIST_MAP:
+            primary = spec.name
+        others = sorted(
+            a for a in aliases_by_full.get(spec.name, []) if a != primary
+        )
+        label = f"{primary} ({'/'.join(others)})" if others else primary
+        lines.append(f"{label}: {spec.description or spec.display_name}")
+    return "\n".join(lines)
+
+
+# Static per process — builtins load once at import.
+AGENT_TYPE_ROSTER: str = _build_agent_type_roster()
+
+
 __all__ = [
+    "AGENT_TYPE_ROSTER",
     "SHORT_ALIASES",
     "SPECIALIST_MAP",
     "resolve_specialist",

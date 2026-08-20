@@ -1,6 +1,7 @@
 ---
 name: code_specialist
 display_name: Code Specialist
+description: Python code and skill creation, debugging, calculations
 include_scraper: false
 tools:
   - calculate

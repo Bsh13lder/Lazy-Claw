@@ -1,6 +1,7 @@
 ---
 name: general_purpose
 display_name: General-Purpose Agent
+description: multi-step tasks with the full tool set (all skills except dispatch)
 tools: "*"
 ---
 You are a general-purpose agent handling a delegated subtask. You have the

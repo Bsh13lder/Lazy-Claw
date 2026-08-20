@@ -1,5 +1,19 @@
 # TODO
 
+## Shipped 2026-08-19/20 — agent-orchestration hardening wave
+Eight incidents closed in 48h (details: DOCS.md → "Agent-orchestration
+hardening wave"; commits 4237726..9d74e03 + SDK retry on main):
+- [x] Cross-roster MCP routing (roster descriptions + restart trio + mcp alias + keyword exemption)
+- [x] Parallel agent fan-out (`parallel_safe`) + spawn-time chip announce
+- [x] Plan-JSON leak stripped at display/history-write/history-read
+- [x] `specialist_done` terminals + named dispatch chips
+- [x] Sync browser dispatches auto-promote to background (dispatch-and-free)
+- [x] Specialist identical-args loop guard (search-grind killer)
+- [x] Agent-result envelope trust (no keyword-scanning specialist prose) + Site Knowledge provenance
+- [x] SDK zero-output max_turns retry (built-in-tool leak transient)
+- [x] Mobile v1.33.6→1.33.9: WS rewire on gateway change, zombie-spinner sweep, scrollable tables
+- [x] SOUL.md: 17-type routing table, MCP ownership, weather=inline web_search
+
 ## Specialist routing dead-ends — cross-roster gap backlog (2026-08-19)
 Fallout of the mcp-whatsapp restart incident (fixed same day: `_wants_mcp_mgmt`
 specialist-first exemption, system_specialist restart trio, compiled

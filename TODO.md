@@ -1,5 +1,22 @@
 # TODO
 
+## Specialist routing dead-ends — cross-roster gap backlog (2026-08-19)
+Fallout of the mcp-whatsapp restart incident (fixed same day: `_wants_mcp_mgmt`
+specialist-first exemption, system_specialist restart trio, compiled
+`AGENT_TYPE_ROSTER` in both dispatch schemas, `mcp` alias, SOUL.md roster
+table). The audit found more capabilities unreachable by intuitive routing —
+61 builtin skills are in NO specialist allowlist (~14 deliberately brain/meta):
+- [ ] **Watcher family has no home**: `watch_site`, `stop_watcher`, `pause/resume/edit/test_watcher`, `watch_appointment_slots` are in no allowlist — "watch this site" delegations dead-end. Decide owner (system? browser?) + add with confirm-first discipline
+- [ ] Browser-management constellation (15 orphans): templates (`save/run/list/delete_browser_template`), accounts (`register/switch/list_browser_accounts`), hosts, `share_browser_control`, site memory — browser_specialist has none
+- [ ] Goal/code-session family (`start_goal`, `continue_code_goal`, `list_goals`, …) in no allowlist; `code` alias routes to a hollow code_specialist (calculate + skill CRUD only, prompt names Claude Code MCP it can't call)
+- [ ] tasks_specialist near-misses: `add_task_comment`, `add_to_list`, `check_off_list_item` ("add milk to my list" dies)
+- [ ] System-adjacent orphans: `awake_mode`, team management (`list_specialists`, `manage_specialist`, `set_team_mode`, …), `background_status`
+- [ ] Media dead-ends: `generate_image`, `text_to_speech` (mutations → specialist-first blocks inline, no specialist carries them)
+- [ ] Automation near-misses: `n8n_google_oauth_setup/services_setup/sheets_setup`, `n8n_run_task`, `project_planning_kickoff`, `keyword_research`
+- [ ] Self-check lane 3: `warn_on_unrouted_capabilities` (curated user-reachable frozenset vs union of allowlists) + hard CI gate `test_specialist_capability_coverage.py` beside the prompt sweep
+- [ ] `search_tools` late-inject churn: injection block (agent.py ~6858) ignores `_suppressed_tool_names` — re-injects specialist-first-stripped schemas every discovery ("Injected 8 tool schemas" the filter then reverts); harmless but wasteful + misleads the brain
+- [ ] Chip-settle WS-blip gap (found 2026-08-20 chip audit): `tool_call`/`tool_result` frames are NOT in the task_event_bus replay ring — a WS reconnect between the pair loses the settle forever; only the mobile 3-min stall guard demotes the spinner to a schedule icon. Fix: add the pair to the replayable ring or re-derive chip state from history on reconnect. Same audit: parallel same-agent_type specialist rows merge (subject-keyed); `task_id` now rides on specialist_start/done frames — key rows by it when present
+
 ## Browser action layer — vendored browser-use (2026-08-15)
 Architecture-review §5 outcome. Details in DOCS.md → "Browser action layer —
 vendored browser-use adoption (2026-08-15)".

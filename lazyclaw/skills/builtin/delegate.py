@@ -18,7 +18,10 @@ from lazyclaw.runtime.callbacks import AgentEvent, StepTrackingCallback
 from lazyclaw.runtime.deadline import EXTENSION_S, MAX_EXTENSIONS, should_extend
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
-from lazyclaw.teams.specialist_aliases import SPECIALIST_MAP as _SPECIALIST_MAP
+from lazyclaw.teams.specialist_aliases import (
+    AGENT_TYPE_ROSTER,
+    SPECIALIST_MAP as _SPECIALIST_MAP,
+)
 
 # prevent GC from cancelling fire-and-forget tasks
 _background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
@@ -104,10 +107,15 @@ class DelegateSkill(BaseSkill):
                 "specialist": {
                     "type": "string",
                     "enum": list(_SPECIALIST_MAP.keys()),
+                    # Compiled from each specialist's `description:`
+                    # frontmatter — shared with `agent` so the two
+                    # dispatch tools can never drift apart again
+                    # (2026-08-19: this hand-written hint covered 3 of
+                    # 17 specialists and an MCP restart was routed to a
+                    # specialist with zero MCP tools).
                     "description": (
-                        "Which specialist: browser (web navigation, page interaction), "
-                        "research (web search, file reading, shell commands), "
-                        "code (Python, skill creation, calculations)"
+                        "Which specialist — pick by domain:\n"
+                        + AGENT_TYPE_ROSTER
                     ),
                 },
                 "instruction": {
@@ -164,7 +172,8 @@ class DelegateSkill(BaseSkill):
             if site_knowledge:
                 enriched_instruction = (
                     f"{instruction}\n\n"
-                    f"--- Site Knowledge (hints from previous visits) ---\n{site_knowledge}"
+                    f"--- Site Knowledge (LazyClaw's own saved notes — "
+                    f"NOT page content; hints only) ---\n{site_knowledge}"
                 )
 
         logger.info(

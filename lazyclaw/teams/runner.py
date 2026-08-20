@@ -317,6 +317,52 @@ def escalation_calls_to_skip(tool_calls) -> frozenset[str]:
     )
 
 
+# From the LIMITth identical (tool, args) call on, the runner steers
+# instead of executing. 3 mirrors the brain's loop-guard threshold.
+_IDENTICAL_CALL_LIMIT = 3
+
+
+def _identical_call_key(name: str, arguments: dict | None) -> str:
+    """Stable identity for a tool call — name + args. Runtime-injected
+    keys (leading underscore, e.g. ``_tab_context``) are excluded so a
+    volatile injection can't defeat the match."""
+    clean = {
+        k: v for k, v in (arguments or {}).items() if not k.startswith("_")
+    }
+    return f"{name}:{json.dumps(clean, sort_keys=True, default=str)}"
+
+
+def identical_call_guard(
+    counts: dict[str, int], name: str, arguments: dict | None,
+) -> str | None:
+    """Count this exact (tool, args) call; steer from the 3rd repeat on.
+
+    2026-08-20 himap research grind: a specialist re-ran the SAME five
+    search batches for 14 iterations. `detect_same_result` never tripped
+    because search output always differs slightly (ordering, snippets) —
+    argument identity, not result identity, is the right key. The brain's
+    loop has had this guard since 2026-06; the runner did not.
+
+    Returns None (execute normally) or a steering message the caller
+    injects as the tool result INSTEAD of executing.
+    """
+    key = _identical_call_key(name, arguments)
+    n = counts.get(key, 0) + 1
+    counts[key] = n
+    if n < _IDENTICAL_CALL_LIMIT:
+        return None
+    logger.warning(
+        "Specialist loop-guard: `%s` called %d times with identical args — steering",
+        name, n,
+    )
+    return (
+        f"[loop guard] You have called `{name}` with these EXACT arguments "
+        f"{n} times this run — the result will not change. Do NOT repeat "
+        "this call. Use the results you already received, try genuinely "
+        "different arguments, or write your final report now."
+    )
+
+
 def _filter_tools(
     registry: SkillRegistry,
     allowed: tuple[str, ...],
@@ -553,6 +599,8 @@ async def run_specialist(
     # Stuck detection state — tracks tool names and results across iterations
     _tool_history: list[str] = []
     _tool_results: list[str] = []
+    # Identical-args loop guard (see identical_call_guard) — per-run counts.
+    _identical_call_counts: dict[str, int] = {}
     # F1 grounding gate state. On a channel-read turn the final reply is
     # checked against the fresh tool data (composing the same detectors the
     # brain uses). A violation re-rolls the worker with the raw data
@@ -945,7 +993,17 @@ async def run_specialist(
                     specialist.allowed_skills, tc.name, native_names,
                 )
                 _step_started = time.monotonic()
-                if (
+                # Identical-args loop guard — steer instead of executing
+                # the 3rd+ literally identical call (2026-08-20 himap
+                # research grind: 14 iterations of the same search
+                # batches; result-identity detectors can't catch search
+                # output that always differs slightly).
+                _loop_steer = identical_call_guard(
+                    _identical_call_counts, tc.name, tc.arguments,
+                )
+                if _loop_steer is not None:
+                    tool_result = _loop_steer
+                elif (
                     tc.name not in specialist.allowed_skills
                     and not _wildcard_ok
                     and not _is_scraper_tool

@@ -162,6 +162,85 @@ _JSON_BLOCK_RE = re.compile(
 )
 
 
+def _plan_block_span(content: str) -> tuple[int, int] | None:
+    """Locate the planner's own plan-JSON block, schema-validated.
+
+    Returns the (start, end) span of the block INCLUDING a surrounding
+    code fence, or None. Validation is keyed on the exact schema
+    :func:`make_plan_injection_prompt` asks for — goal + steps whose
+    dicts carry description (+ success_criteria/fallback) — so a user's
+    arbitrary JSON is never matched.
+    """
+    if not content or '"steps"' not in content:
+        return None
+
+    candidates: list[tuple[int, int, str]] = []
+    match = _JSON_BLOCK_RE.search(content)
+    if match:
+        raw = match.group(1) or match.group(2)
+        if raw:
+            candidates.append((match.start(), match.end(), raw))
+    # Raw {"goal"... brace-walk (same discovery parse_plan_from_response
+    # uses when the regex misses).
+    start = content.find('{"goal"')
+    if start == -1:
+        start = content.find('{ "goal"')
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(content[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append((start, i + 1, content[start:i + 1]))
+                    break
+
+    for span_start, span_end, raw in candidates:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        goal = data.get("goal")
+        steps = data.get("steps")
+        if not (isinstance(goal, str) and goal.strip()):
+            continue
+        if not (isinstance(steps, list) and steps):
+            continue
+        dict_steps = [s for s in steps if isinstance(s, dict)]
+        if not dict_steps:
+            continue
+        if not all("description" in s for s in dict_steps):
+            continue
+        if not any(
+            "success_criteria" in s or "fallback" in s for s in dict_steps
+        ):
+            continue
+        return (span_start, span_end)
+    return None
+
+
+def strip_plan_json_block(content: str) -> str:
+    """Remove the planner's plan-JSON block(s) from user-facing text.
+
+    2026-08-20 incident: :func:`make_plan_injection_prompt` asks the
+    model to put the plan in its VISIBLE content, but the display/history
+    sanitizers only stripped the XML ``<plan>``/``<taor_plan>`` variants —
+    the JSON rendered as an unreadable code block on mobile and persisted
+    to history. Schema-keyed (see :func:`_plan_block_span`); non-plan
+    JSON passes through untouched.
+    """
+    out = content
+    for _ in range(3):  # a response realistically carries one block
+        span = _plan_block_span(out)
+        if span is None:
+            break
+        out = (out[:span[0]] + out[span[1]:]).strip()
+    return out
+
+
 def parse_plan_from_response(content: str) -> BrowsingPlan | None:
     """Extract and parse a BrowsingPlan from LLM response content.
 

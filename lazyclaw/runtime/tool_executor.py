@@ -295,12 +295,13 @@ class ToolExecutor:
         if not tool_calls:
             return []
 
-        # Separate read-only tools from state-modifying tools, preserving order.
+        # Separate parallel-safe tools (reads + opt-ins like `agent`
+        # dispatch) from strictly sequential state tools, preserving order.
         read_only_indices: list[int] = []
         state_indices: list[int] = []
         for i, tc in enumerate(tool_calls):
             skill = self._registry.get(tc.name)
-            if skill and getattr(skill, "read_only", False):
+            if skill and getattr(skill, "parallel_safe", False):
                 read_only_indices.append(i)
             else:
                 state_indices.append(i)

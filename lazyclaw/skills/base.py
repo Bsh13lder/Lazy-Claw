@@ -41,6 +41,22 @@ class BaseSkill(ABC):
         return False
 
     @property
+    def parallel_safe(self) -> bool:
+        """Whether sibling calls to this skill in ONE assistant message may
+        run concurrently.
+
+        This — not ``read_only`` — is the batching predicate for the TAOR
+        loop and ``ToolExecutor.execute_batch``. It defaults to
+        ``read_only`` (reads are trivially parallel-safe), but a skill can
+        opt in without claiming to be a read: ``agent`` dispatch fans out
+        by design (2026-08-20: 3 dispatches in one message ran strictly
+        sequentially — 3x wall clock — because the old predicate was
+        ``read_only``, which dispatch must never claim since that flag
+        also feeds permission reasoning).
+        """
+        return self.read_only
+
+    @property
     @abstractmethod
     def parameters_schema(self) -> dict:
         """JSON Schema for the skill's parameters."""

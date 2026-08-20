@@ -371,6 +371,8 @@ class WebSocketCallback:
                 "type": "specialist_start",
                 "name": event.metadata.get("specialist", event.detail),
                 "task": event.metadata.get("task", ""),
+                # Lets clients key parallel same-type dispatches apart.
+                "task_id": event.metadata.get("task_id"),
             })
 
         elif kind == "specialist_thinking":
@@ -395,6 +397,7 @@ class WebSocketCallback:
                 "duration_ms": event.metadata.get("duration_ms"),
                 "tools_used": event.metadata.get("tools_used"),
                 "error": event.metadata.get("error"),
+                "task_id": event.metadata.get("task_id"),
             })
 
         elif kind == "phase":

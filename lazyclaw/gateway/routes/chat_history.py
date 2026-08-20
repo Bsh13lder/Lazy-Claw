@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from lazyclaw.browser.action_planner import strip_plan_json_block
 from lazyclaw.config import load_config
 from lazyclaw.crypto.encryption import decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
@@ -42,9 +43,15 @@ _INTERNAL_BARE_TAG_RE = re.compile(r"</?(plan|taor_plan|think)>\s*")
 
 
 def _strip_internal_blocks(content: str) -> str:
-    """Remove <plan>/<taor_plan>/<think> reasoning blocks for display."""
+    """Remove <plan>/<taor_plan>/<think> reasoning blocks for display.
+
+    Also drops the action planner's plan-JSON block (schema-keyed, see
+    strip_plan_json_block) — rows stored before the 2026-08-20 write-side
+    strip still carry it, so the read side heals them."""
     out = _INTERNAL_BLOCK_RE.sub("", content)
     out = _INTERNAL_BARE_TAG_RE.sub("", out)
+    if '"steps"' in out:
+        out = strip_plan_json_block(out)
     return out.lstrip()
 
 

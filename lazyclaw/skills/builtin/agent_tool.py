@@ -30,6 +30,7 @@ from lazyclaw.runtime.deadline import EXTENSION_S, MAX_EXTENSIONS, should_extend
 from lazyclaw.runtime.dispatcher import _IS_SUBAGENT
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.specialist_aliases import (
+    AGENT_TYPE_ROSTER,
     resolve_specialist,
     specialist_choices,
 )
@@ -70,6 +71,14 @@ _BROWSER_SYNC_TIMEOUT_FLOOR_S = 480
 # TaskRunner 300s default — shorter than many sync budgets. Give bg
 # agents a full 600s.
 _BG_TIMEOUT_S = 600
+
+# Specialists whose sync dispatches are KNOWN slow (the same knowledge
+# behind _BROWSER_SYNC_TIMEOUT_FLOOR_S). A sync dispatch to one of these
+# auto-promotes to background (2026-08-20 user directive): the foreground
+# turn ends with a short "dispatched" ack instead of holding the chat in
+# "acting" for 5-8 minutes, and the consolidated report + notification
+# arrive when the worker finishes.
+_AUTO_BG_SPECIALISTS = frozenset({"browser_specialist"})
 
 
 def _agent_concurrency() -> int:
@@ -153,7 +162,11 @@ class AgentDispatchSkill(BaseSkill):
             "agents; all results come back this turn and you synthesize ONE "
             "reply. Set run_in_background=true ONLY for slow work (>2 min: "
             "bulk scrapes, long browser flows) — you get a task id now and "
-            "one consolidated report later. Agent types: explore (read-only "
+            "one consolidated report later. NOTE: browser dispatches "
+            "auto-promote to background even without the flag — on a "
+            "'Background agent started' result, tell the user it's "
+            "dispatched and the report will follow; do NOT wait or "
+            "re-dispatch. Agent types: explore (read-only "
             "research), general_purpose (all tools, multi-step), or a domain "
             "specialist (browser, upwork, email, notes, tasks, documents, "
             "...). Each agent has its own tools and NO chat history — write "
@@ -165,6 +178,16 @@ class AgentDispatchSkill(BaseSkill):
         return "orchestration"
 
     @property
+    def parallel_safe(self) -> bool:
+        """Fan-out IS this tool's design: N `agent` calls in one message
+        must overlap (2026-08-20 incident: they ran strictly sequentially
+        for 3x wall clock). NOT `read_only` — dispatch mutates the world
+        via its specialist, and that flag feeds permission reasoning.
+        Real throttling: the loop semaphore (6) + domain locks (e.g. the
+        per-user browser turn lock)."""
+        return True
+
+    @property
     def parameters_schema(self) -> dict:
         return {
             "type": "object",
@@ -172,11 +195,13 @@ class AgentDispatchSkill(BaseSkill):
                 "agent_type": {
                     "type": "string",
                     "enum": specialist_choices(),
+                    # Compiled from each specialist's `description:`
+                    # frontmatter (single source of truth, next to its
+                    # `tools:` allowlist). A bare enum routed by
+                    # name-vibes: 2026-08-19 an MCP restart went to
+                    # `system`, which then had zero MCP tools.
                     "description": (
-                        "explore = read-only research/search. "
-                        "general_purpose = multi-step task, full tools. "
-                        "Domain names (browser, upwork, email, ...) = "
-                        "scoped specialist."
+                        "Pick by domain:\n" + AGENT_TYPE_ROSTER
                     ),
                 },
                 "task": {
@@ -234,6 +259,26 @@ class AgentDispatchSkill(BaseSkill):
                 "Error: sub-agents cannot spawn sub-agents (single-depth). "
                 "Complete the task with your own tools."
             )
+
+        # Slow-lane auto-promotion — see _AUTO_BG_SPECIALISTS. Falls
+        # through to sync when the runner is missing or depth-capped
+        # (the same degradation the explicit-bg path below uses).
+        if (
+            not run_bg
+            and spec.name in _AUTO_BG_SPECIALISTS
+            and self._task_runner is not None
+        ):
+            from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
+
+            if self._caller_depth < MAX_TASK_DEPTH:
+                logger.info(
+                    "[agent] sync %s dispatch auto-promoted to background "
+                    "(slow lane) — foreground turn frees now",
+                    agent_type,
+                )
+                return await self._execute_background(
+                    user_id, agent_type, task,
+                )
 
         if run_bg:
             from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
@@ -316,7 +361,10 @@ class AgentDispatchSkill(BaseSkill):
             await self._callback.on_event(AgentEvent(
                 "specialist_start",
                 spec.name,
-                {"specialist": spec.name, "task": task[:200]},
+                # task_id lets clients key parallel same-type dispatches
+                # apart (and match the specialist_done below).
+                {"specialist": spec.name, "task": task[:200],
+                 "task_id": task_id},
             ))
 
         started = time.monotonic()
@@ -392,6 +440,10 @@ class AgentDispatchSkill(BaseSkill):
                     _run_task.cancel()
                     _total = int(time.monotonic() - started)
                     self._mark_failed(task_id, f"timeout after {_total}s")
+                    await self._emit_specialist_done(
+                        spec.name, task_id, success=False,
+                        error=f"timeout after {_total}s",
+                    )
                     return (
                         f"[agent:{agent_type}] TIMEOUT after {_total}s "
                         f"({_extensions} extension(s) granted) — the agent "
@@ -402,6 +454,9 @@ class AgentDispatchSkill(BaseSkill):
             _run_task.cancel()
             logger.exception("agent %s (%s) crashed", task_id, agent_type)
             self._mark_failed(task_id, str(exc))
+            await self._emit_specialist_done(
+                spec.name, task_id, success=False, error=str(exc),
+            )
             return f"[agent:{agent_type}] FAILED: {exc}"
 
         elapsed = int(time.monotonic() - started)
@@ -415,12 +470,48 @@ class AgentDispatchSkill(BaseSkill):
                     self._team_lead.fail(task_id, error=result.error or "")
             except Exception:
                 logger.debug("team_lead settle failed", exc_info=True)
+        await self._emit_specialist_done(
+            spec.name, task_id, success=result.success,
+            error=result.error, duration_ms=elapsed * 1000,
+        )
 
         status = (
             "completed" if result.success
             else f"FAILED: {result.error or 'unknown error'}"
         )
         return f"[agent:{agent_type}] {status} in {elapsed}s\n{body}"
+
+    async def _emit_specialist_done(
+        self,
+        spec_name: str,
+        task_id: str,
+        *,
+        success: bool,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Settle the client's specialist activity row for THIS dispatch.
+
+        The sync path historically emitted `specialist_start` but never a
+        terminal, so the mobile row could only settle at turn end
+        (0f91036) — a completed dispatch kept spinning while its siblings
+        ran (2026-08-20). Every `_execute_sync` exit calls this."""
+        if not self._callback:
+            return
+        try:
+            await self._callback.on_event(AgentEvent(
+                "specialist_done",
+                spec_name,
+                {
+                    "specialist": spec_name,
+                    "task_id": task_id,
+                    "success": success,
+                    "error": error,
+                    "duration_ms": duration_ms,
+                },
+            ))
+        except Exception:
+            logger.debug("specialist_done emit failed", exc_info=True)
 
     def _mark_failed(self, task_id: str, error: str) -> None:
         if self._team_lead is not None:

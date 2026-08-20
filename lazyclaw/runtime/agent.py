@@ -32,6 +32,7 @@ from lazyclaw.browser.action_planner import (
     make_plan_injection_prompt,
     parse_plan_from_response,
     should_inject_plan,
+    strip_plan_json_block,
 )
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
@@ -3006,6 +3007,9 @@ class Agent:
         # turn ("hello") has needs_tools=False, so the branch is skipped and the
         # gate would hit UnboundLocalError. Default here so every path is bound.
         _wants_tasks: bool = False
+        # Same rationale for the MCP-mgmt intent (specialist-first exempt
+        # gate, added 2026-08-19 after the mcp-whatsapp restart dead-end).
+        _wants_mcp_mgmt: bool = False
 
         if needs_tools and _is_slim_heartbeat:
             # Tier-A slim heartbeat. Tool budget is split by envelope kind:
@@ -4259,6 +4263,15 @@ class Agent:
         # turns are completely unaffected.
         if _wants_tasks:
             _specialist_first_exempt |= _TASK_TOOL_NAMES
+        # Same trust for explicit MCP-management intent (2026-08-19
+        # mcp-whatsapp restart incident): _MCP_MGMT_KEYWORDS →
+        # _wants_mcp_mgmt injects the lifecycle suite at ~3372, but only
+        # the task tools got the 2026-07-03 exemption — so the filter
+        # stripped connect/disconnect_mcp_server every iteration and the
+        # turn dead-ended in a blind delegation. Structurally identical
+        # intent, identical remedy.
+        if _wants_mcp_mgmt:
+            _specialist_first_exempt |= _MCP_MGMT_TOOL_NAMES
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
         # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
@@ -4718,6 +4731,14 @@ class Agent:
                                 _display_content = re.sub(
                                     r"<think>.*?</think>\s*", "", _display_content, flags=re.DOTALL
                                 ).strip()
+                            # Strip the action-planner's plan-JSON block —
+                            # its prompt puts the plan in VISIBLE content,
+                            # and only the XML variants were sanitized
+                            # (2026-08-20 unreadable-bubble incident).
+                            if '"steps"' in _display_content:
+                                _display_content = strip_plan_json_block(
+                                    _display_content,
+                                )
                             if _display_content:
                                 await cb.on_event(AgentEvent(
                                     "token", _display_content, {"model": response.model},
@@ -5613,6 +5634,14 @@ class Agent:
                     # historical messages"). `_final_content` is the user-facing
                     # version with internal tags stripped.
                     _history_content = _final_content
+                    # Plan-JSON block: internal scratchpad, never history
+                    # (2026-08-20 — persisted plans re-rendered on every
+                    # reload; read-side scrub in chat_history.py heals
+                    # rows stored before this).
+                    if '"steps"' in _history_content:
+                        _history_content = strip_plan_json_block(
+                            _history_content,
+                        ).strip()
                     if "<taor_plan>" in _history_content:
                         _history_content = re.sub(
                             r"<taor_plan>.*?</taor_plan>\s*",
@@ -6163,20 +6192,45 @@ class Agent:
                         tool_call_id=sc.id,
                     ))
 
-                # ── Parallel pre-execution for read-only tools ─────────────
-                # Identify read-only tools that are not already in the cache.
-                # Run them concurrently via execute_batch(), then use the
-                # pre-computed results in the sequential loop below.
-                # State-modifying tools always run sequentially in the loop.
+                # ── Parallel pre-execution for parallel-safe tools ─────────
+                # Identify parallel-safe tools (reads + opt-ins like the
+                # `agent` dispatch skill) not already in the cache. Run them
+                # concurrently via execute_batch(), then use the pre-computed
+                # results in the sequential loop below. State-modifying tools
+                # without the opt-in always run sequentially in the loop.
+                # (2026-08-20: the predicate was `read_only`, so 3 `agent`
+                # calls in one message ran strictly sequentially — 3x wall
+                # clock on every fan-out.)
                 _pre_executed: dict[str, tuple[str, int]] = {}  # tc.id → (result, duration_ms)
                 _ro_to_batch: list[ToolCall] = []
                 for _btc in _tool_calls_to_run:
                     _bkey = f"{_btc.name}:{json.dumps(_btc.arguments, sort_keys=True)}"
                     if _bkey not in _tool_call_cache:
                         _skill = self.registry.get(_btc.name) if self.registry else None
-                        if _skill and getattr(_skill, "read_only", False):
+                        if _skill and getattr(_skill, "parallel_safe", False):
                             _ro_to_batch.append(_btc)
+                # Announce batched calls BEFORE the gather: the sequential
+                # loop below only reaches their `tool_call` emit after the
+                # batch finishes, so a minutes-long parallel dispatch would
+                # otherwise show NO chips while running and then mount-and-
+                # settle them all instantly at the end.
+                _announced_tool_ids: set[str] = set()
                 if len(_ro_to_batch) > 1:
+                    for _btc in _ro_to_batch:
+                        _bdisplay = (
+                            self.registry.get_display_name(_btc.name)
+                            if self.registry else _btc.name
+                        )
+                        await cb.on_event(AgentEvent(
+                            "tool_call", _bdisplay,
+                            {
+                                "tool": _btc.name,
+                                "display_name": _bdisplay,
+                                "args": _btc.arguments,
+                                "tool_call_id": _btc.id,
+                            },
+                        ))
+                        _announced_tool_ids.add(_btc.id)
                     _batch_outcomes = await self.executor.execute_batch(
                         _ro_to_batch, user_id, callback=cb,
                     )
@@ -6195,19 +6249,23 @@ class Agent:
                 for tc in _tool_calls_to_run:
                     _display = self.registry.get_display_name(tc.name) if self.registry else tc.name
                     _all_tools_used.append(_display)
-                    await cb.on_event(AgentEvent(
-                        "tool_call", _display,
-                        {
-                            "tool": tc.name,
-                            "display_name": _display,
-                            "args": tc.arguments,
-                            # Stable id so the chat UI can match the
-                            # later tool_result back to THIS specific
-                            # call (otherwise back-to-back same-name
-                            # calls collide on `name+running`).
-                            "tool_call_id": tc.id,
-                        },
-                    ))
+                    # Skip calls already announced at batch-spawn above —
+                    # the mobile reducer appends a chip per tool_call
+                    # frame, so a re-emit renders a duplicate chip.
+                    if tc.id not in _announced_tool_ids:
+                        await cb.on_event(AgentEvent(
+                            "tool_call", _display,
+                            {
+                                "tool": tc.name,
+                                "display_name": _display,
+                                "args": tc.arguments,
+                                # Stable id so the chat UI can match the
+                                # later tool_result back to THIS specific
+                                # call (otherwise back-to-back same-name
+                                # calls collide on `name+running`).
+                                "tool_call_id": tc.id,
+                            },
+                        ))
                     # Emit browser-specific action event for transparency
                     if tc.name == "browser":
                         _br_action = tc.arguments.get("action", "")

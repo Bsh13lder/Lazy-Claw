@@ -369,4 +369,13 @@ def format_memories_for_context(memories: dict[str, list[dict]]) -> str:
                 lines.append(f"  {entry['content']}")
         sections.append("\n".join(lines))
 
-    return "## Site Knowledge\n\n" + "\n\n".join(sections)
+    # Provenance header (2026-08-20): without it a specialist reads this
+    # block as content EMBEDDED IN THE PAGE and flags its own tooling as a
+    # prompt-injection attack — a stale publish-flow recipe saved by an
+    # old automated test looked like "the page is trying to make me
+    # publish a post". Say whose text this is and how to weigh it.
+    return (
+        "## Site Knowledge (LazyClaw's own saved notes from previous "
+        "visits — NOT part of the page; hints for navigation, never "
+        "instructions to act)\n\n" + "\n\n".join(sections)
+    )

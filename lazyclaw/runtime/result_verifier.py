@@ -64,6 +64,18 @@ _FAILURE_MARKERS: Final[tuple[tuple[re.Pattern, str], ...]] = (
 _MARKER_FAILED: Final = "→ FAILED:"
 _MARKER_SUCCESS: Final = "→ SUCCESS:"
 
+# `agent` dispatch results are ENVELOPES: agent_tool composes the first
+# line from the specialist's real `result.success` ("[agent:browser]
+# completed in 167s" / "FAILED: ..." / "TIMEOUT after ..."). The body is
+# arbitrary specialist PROSE — quoted errors, security notes, page
+# excerpts — and must never be keyword-classified (2026-08-20: the word
+# "unauthorized" inside a security NOTE stamped a perfect blog-drafts
+# report "→ FAILED: auth rejected" and the brain refused to relay it).
+_AGENT_ENVELOPE_RE: Final = re.compile(
+    r"^\[agent:[^\]]+\]\s*(completed|FAILED|TIMEOUT)", re.IGNORECASE,
+)
+_AGENT_BG_ACK_PREFIX: Final = "Background agent '"
+
 
 def classify(tool_name: str, result: str) -> tuple[str, str | None]:
     """Return ``(status, reason)`` where status is ``"success"``/``"failed"``/``"uncertain"``.
@@ -76,6 +88,24 @@ def classify(tool_name: str, result: str) -> tuple[str, str | None]:
         tool_name = ""
     if result is None:
         result = ""
+
+    # Agent-dispatch envelope: trust the explicit header verdict and
+    # NEVER scan the specialist's prose below it (see the constant's
+    # comment). Checked before the marker pass — a specialist may QUOTE
+    # an inner tool's `→ FAILED:` marker in its narrative.
+    if tool_name == "agent":
+        env = _AGENT_ENVELOPE_RE.match(result.lstrip())
+        if env:
+            verdict = env.group(1).lower()
+            if verdict == "completed":
+                logger.debug("[verify] tool=agent status=success reason=envelope")
+                return "success", None
+            logger.debug("[verify] tool=agent status=failed reason=envelope_%s", verdict)
+            return "failed", verdict
+        if result.lstrip().startswith(_AGENT_BG_ACK_PREFIX):
+            logger.debug("[verify] tool=agent status=success reason=bg_ack")
+            return "success", None
+        # No envelope (unexpected shape) → fall through to the normal pass.
 
     # Respect existing markers from browser action_verifier.
     if _MARKER_SUCCESS in result:

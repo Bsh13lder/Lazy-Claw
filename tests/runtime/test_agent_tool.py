@@ -367,3 +367,154 @@ def test_sync_dispatch_registers_live_cancel_token(fake_run_specialist):
     # Firing it must flip the flag the runner polls.
     registered_token.cancel()
     assert registered_token.is_cancelled is True
+
+
+def test_agent_type_description_carries_roster():
+    """2026-08-19 MCP-restart incident: the enum alone gave the brain
+    name-vibes-only routing ("restart a server" → system, which had no
+    MCP tools). The agent_type description must carry the compiled
+    per-specialist roster so routing is informed, not guessed."""
+    from lazyclaw.teams.specialist_aliases import AGENT_TYPE_ROSTER
+
+    skill = _make_skill()
+    desc = skill.parameters_schema["properties"]["agent_type"]["description"]
+    assert AGENT_TYPE_ROSTER in desc
+    assert "MCP" in desc
+
+
+# ── specialist_done on sync dispatch (2026-08-20 eternal-spinner fix) ──
+# The sync path emitted specialist_start but NEVER specialist_done, so the
+# mobile specialist activity row could only settle at turn end (0f91036) —
+# a completed dispatch kept spinning while its siblings ran.
+
+
+class _RecordingCallback:
+    def __init__(self):
+        self.events = []
+
+    async def on_event(self, event):
+        self.events.append(event)
+
+
+def _events_of(cb, kind):
+    return [e for e in cb.events if e.kind == kind]
+
+
+def test_sync_dispatch_emits_specialist_done_on_success(fake_run_specialist):
+    cb = _RecordingCallback()
+    skill = _make_skill(callback=cb)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "find X",
+    }))
+    assert "completed" in out
+    starts = _events_of(cb, "specialist_start")
+    dones = _events_of(cb, "specialist_done")
+    assert len(starts) == 1 and len(dones) == 1
+    assert dones[0].metadata.get("success") is True
+    assert dones[0].metadata.get("specialist") == starts[0].metadata["specialist"]
+    # task_id threads through both so parallel same-type dispatches can be
+    # keyed apart by clients.
+    assert starts[0].metadata.get("task_id")
+    assert dones[0].metadata.get("task_id") == starts[0].metadata["task_id"]
+
+
+def test_sync_dispatch_emits_specialist_done_on_failure(monkeypatch):
+    async def _failing(**kwargs):
+        return SpecialistResult(
+            agent_name="explore", task="t", result="",
+            tools_used=(), model_used="worker", duration_ms=10,
+            success=False, error="boom",
+        )
+
+    monkeypatch.setattr("lazyclaw.teams.runner.run_specialist", _failing)
+    cb = _RecordingCallback()
+    skill = _make_skill(callback=cb)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "find X",
+    }))
+    assert "FAILED" in out
+    dones = _events_of(cb, "specialist_done")
+    assert len(dones) == 1
+    assert dones[0].metadata.get("success") is False
+
+
+def test_timeout_and_crash_branches_emit_specialist_done():
+    """Source-level guard for the slow branches (a behavioral timeout test
+    would need the 10s minimum budget): every early exit of _execute_sync
+    must emit specialist_done, or its chip spins to turn end."""
+    import inspect as _inspect
+    from lazyclaw.skills.builtin import agent_tool as _mod
+
+    src = _inspect.getsource(_mod.AgentDispatchSkill._execute_sync)
+    assert src.count("_emit_specialist_done") >= 3, (
+        "success, timeout, and crash exits must all settle the "
+        "specialist row"
+    )
+
+
+# ── Slow-lane auto-promotion (2026-08-20 user directive) ──────────────
+# A sync browser dispatch blocks the foreground turn 300-480s+ — the chat
+# sat in "acting" and the user couldn't send anything. Browser dispatches
+# now auto-promote to the background runner: the turn ends with a short
+# "dispatched" ack, the lane frees, and the consolidated report +
+# notification arrive when the worker finishes.
+
+
+class _FakeTaskRunner:
+    def __init__(self):
+        self.submits = []
+
+    async def submit(self, **kwargs):
+        self.submits.append(kwargs)
+        return "tid1234567890"
+
+
+def test_sync_browser_dispatch_auto_promotes_to_background(
+    fake_run_specialist,
+):
+    runner = _FakeTaskRunner()
+    skill = _make_skill(task_runner=runner)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "browser", "task": "check the blog drafts",
+    }))
+    assert "Background agent 'browser' started" in out
+    assert len(runner.submits) == 1
+    assert fake_run_specialist == [], (
+        "auto-promoted dispatch must not run the sync specialist loop"
+    )
+
+
+def test_sync_browser_dispatch_without_runner_stays_sync(
+    fake_run_specialist,
+):
+    skill = _make_skill(task_runner=None)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "browser", "task": "check the blog drafts",
+    }))
+    assert "completed" in out
+    assert len(fake_run_specialist) == 1
+
+
+def test_sync_browser_dispatch_depth_capped_stays_sync(fake_run_specialist):
+    from lazyclaw.runtime.task_runner import MAX_TASK_DEPTH
+
+    runner = _FakeTaskRunner()
+    skill = _make_skill(task_runner=runner)
+    skill._caller_depth = MAX_TASK_DEPTH
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "browser", "task": "check the blog drafts",
+    }))
+    assert "completed" in out
+    assert runner.submits == []
+    assert len(fake_run_specialist) == 1
+
+
+def test_non_browser_sync_dispatch_stays_sync(fake_run_specialist):
+    runner = _FakeTaskRunner()
+    skill = _make_skill(task_runner=runner)
+    out = asyncio.run(skill.execute("u1", {
+        "agent_type": "explore", "task": "find X",
+    }))
+    assert "completed" in out
+    assert runner.submits == []
+    assert len(fake_run_specialist) == 1

@@ -214,7 +214,7 @@ class _BubbleContent extends StatelessWidget {
       data: data,
       selectable: !m.streaming,
       onTapLink: openChatLink,
-      styleSheet: _assistantMarkdownStyle(),
+      styleSheet: assistantMarkdownStyle(),
     );
   }
 }
@@ -236,8 +236,20 @@ Future<void> openChatLink(String text, String? href, String title) async {
 }
 
 /// Shared markdown styling for assistant-authored text (normal replies and
-/// notification bodies) — design-system tokens only.
-MarkdownStyleSheet _assistantMarkdownStyle() => MarkdownStyleSheet(
+/// notification bodies) — design-system tokens only. Public so the table
+/// regression test can pin the behavior.
+///
+/// Tables: `IntrinsicColumnWidth` sizes columns to their CONTENT, which
+/// flips flutter_markdown into its built-in horizontal table scroller.
+/// The default flexed columns crushed a 3-column report into vertical
+/// word-shards with no way to scroll (2026-08-20 SEO-report incident).
+MarkdownStyleSheet assistantMarkdownStyle() => MarkdownStyleSheet(
+      tableColumnWidth: const IntrinsicColumnWidth(),
+      tableBorder: TableBorder.all(color: AppColors.borderSubtle),
+      tableHead: AppText.label.copyWith(color: AppColors.textPrimary),
+      tableBody: AppText.body.copyWith(color: AppColors.textPrimary),
+      tableCellsPadding:
+          const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       p: AppText.body.copyWith(color: AppColors.textPrimary),
       strong: AppText.body.copyWith(
         color: AppColors.textPrimary,
@@ -318,7 +330,7 @@ class _NotificationContent extends StatelessWidget {
             data: body,
             selectable: true,
             onTapLink: openChatLink,
-            styleSheet: _assistantMarkdownStyle(),
+            styleSheet: assistantMarkdownStyle(),
           ),
         ],
       ],

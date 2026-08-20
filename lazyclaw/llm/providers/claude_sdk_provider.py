@@ -506,8 +506,9 @@ def _success_tail_action(
 def _max_turns_tail_action(
     err_str: str,
     have_usable_response: bool,
+    already_retried: bool = False,
 ) -> "str | None":
-    """Classify the max_turns=1 stop → "swallow" | "raise" | None.
+    """Classify the max_turns=1 stop → "swallow" | "retry" | "raise" | None.
 
     The one-turn-per-chat contract (``max_turns=1`` in _build_options) is
     NOT surfaced by SDK 0.1.81 as a parseable ResultMessage: the internal
@@ -515,13 +516,22 @@ def _max_turns_tail_action(
     returned an error result: Reached maximum number of turns (1)"
     (query.py receive_messages). The AssistantMessage has already streamed
     by then, so with text/tool calls harvested this is the EXPECTED end of
-    a successful turn → "swallow". An empty turn that still hit the cap is
-    a genuine failure → "raise". Returns None when the exception is not
-    this quirk (caller falls through to _success_tail_action).
+    a successful turn → "swallow".
+
+    An EMPTY turn that hit the cap is the transient built-in-tool leak:
+    the SDK-side model burns its single turn on one of the CLI's own
+    tools and nothing reaches the harvester. 2026-08-20 19:23: this
+    killed a specialist after 3 min of good work while the very next
+    identical call succeeded — so retry ONCE (mirrors
+    _success_tail_action's empty-turn retry), then "raise". Returns None
+    when the exception is not this quirk (caller falls through to
+    _success_tail_action).
     """
     if "Reached maximum number of turns" not in err_str:
         return None
-    return "swallow" if have_usable_response else "raise"
+    if have_usable_response:
+        return "swallow"
+    return "raise" if already_retried else "retry"
 
 
 def _classify_oauth_credentials(
@@ -830,7 +840,10 @@ class ClaudeSDKProvider(BaseLLMProvider):
             # return normally. Otherwise re-wrap and re-raise so genuine
             # iterator errors still surface.
             _usable = bool((text_parts or tool_calls) and not api_error)
-            _mt_action = _max_turns_tail_action(str(exc), _usable)
+            _mt_action = _max_turns_tail_action(
+                str(exc), _usable,
+                already_retried=bool(kwargs.get("_max_turns_retried")),
+            )
             if _mt_action == "swallow":
                 # The by-design max_turns=1 stop — the turn succeeded and
                 # lazyclaw's runtime executes the harvested calls next.
@@ -840,6 +853,19 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     sum(len(t) for t in text_parts), len(tool_calls),
                 )
                 action = "swallow"
+            elif _mt_action == "retry":
+                # Zero-output cap hit: the SDK-side model burned its one
+                # turn on a built-in tool — transient, nothing ran on our
+                # side, so ONE full retry is safe (2026-08-20 19:23).
+                logger.warning(
+                    "Claude SDK: turn hit max_turns=1 with NOTHING "
+                    "harvested (built-in tool burned the turn) — "
+                    "retrying once"
+                )
+                return await self.chat(
+                    messages, model,
+                    **{**kwargs, "_max_turns_retried": True},
+                )
             elif _mt_action == "raise":
                 raise RuntimeError(
                     "Claude SDK: turn hit max_turns=1 with no output — "

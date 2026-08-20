@@ -105,10 +105,26 @@ class TestMaxTurnsTailAction:
             self._ERR, have_usable_response=True,
         ) == "swallow"
 
-    def test_raise_when_turn_produced_nothing(self):
+    def test_empty_turn_retries_once(self):
+        """2026-08-20 19:23: a worker's turn hit max_turns=1 with NOTHING
+        harvested (the SDK-side model burned its single turn on a
+        built-in tool) and the specialist was declared dead after 3 min
+        of good work — while the very next identical call succeeded. The
+        zero-output stop is transient: retry ONCE before raising
+        (mirrors _success_tail_action's empty-turn retry)."""
         assert _max_turns_tail_action(
             self._ERR, have_usable_response=False,
+        ) == "retry"
+
+    def test_empty_turn_raises_after_the_one_retry(self):
+        assert _max_turns_tail_action(
+            self._ERR, have_usable_response=False, already_retried=True,
         ) == "raise"
+
+    def test_usable_output_swallows_even_after_retry(self):
+        assert _max_turns_tail_action(
+            self._ERR, have_usable_response=True, already_retried=True,
+        ) == "swallow"
 
     def test_not_this_quirk_passes_through(self):
         assert _max_turns_tail_action(

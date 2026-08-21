@@ -100,43 +100,53 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     }
   }
 
-  Future<String?> _promptName(DocKind kind) async {
-    final ctrl = TextEditingController(
-      text: kind == DocKind.sheets ? 'Untitled sheet' : 'Untitled doc',
-    );
-    try {
-      return await _showNameDialog(kind, ctrl);
-    } finally {
-      ctrl.dispose();
-    }
-  }
+  /// Ask for a name for a new sheet/doc. Null when cancelled.
+  ///
+  /// The controller is owned by [_NameField], NOT by this method. Creating it
+  /// here and disposing it after the `await` looks right and is not: the
+  /// dialog's future completes the instant `Navigator.pop` runs, but its widget
+  /// tree stays mounted for the whole exit transition — so the dispose lands on
+  /// a still-live `TextField` and the next frame throws "A TextEditingController
+  /// was used after being disposed", taking the route down with it. Letting the
+  /// field's own State own the lifecycle ties disposal to the widget actually
+  /// leaving the tree.
+  Future<String?> _promptName(DocKind kind) {
+    final isSheet = kind == DocKind.sheets;
+    final fieldKey = GlobalKey<_NameFieldState>();
 
-  Future<String?> _showNameDialog(DocKind kind, TextEditingController ctrl) {
     return LzDialog.show<String>(
       context,
-      title: 'New ${kind == DocKind.sheets ? "sheet" : "doc"}',
-      content: LzTextField(
-        controller: ctrl,
-        label: 'Name',
-        autofocus: true,
-        textInputAction: TextInputAction.done,
-        onSubmitted: (_) =>
-            Navigator.of(context).pop(ctrl.text.trim().isEmpty ? null : ctrl.text.trim()),
+      title: 'New ${isSheet ? "sheet" : "doc"}',
+      content: _NameField(
+        key: fieldKey,
+        initial: isSheet ? 'Untitled sheet' : 'Untitled doc',
+        // Keyboard "done" — pop through the dialog's OWN context.
+        onSubmit: (name) => _popWithName(fieldKey.currentContext, name),
       ),
-      actions: [
+      // actionsBuilder hands us the DIALOG's context. Popping with the outer
+      // screen context would dismiss the wrong route (see the confirm-dialog
+      // freeze in mobile/CLAUDE.md).
+      actionsBuilder: (dialogContext) => [
         LzButton.ghost(
           label: 'Cancel',
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: () => Navigator.of(dialogContext).pop(),
         ),
         const SizedBox(width: AppSpacing.sm),
         LzButton.primary(
           label: 'Create',
           icon: Icons.add_rounded,
-          onPressed: () => Navigator.of(context)
-              .pop(ctrl.text.trim().isEmpty ? null : ctrl.text.trim()),
+          onPressed: () =>
+              _popWithName(dialogContext, fieldKey.currentState?.value ?? ''),
         ),
       ],
     );
+  }
+
+  /// Close the name dialog with [name] (null when it's blank).
+  void _popWithName(BuildContext? dialogContext, String name) {
+    if (dialogContext == null || !dialogContext.mounted) return;
+    final trimmed = name.trim();
+    Navigator.of(dialogContext).pop(trimmed.isEmpty ? null : trimmed);
   }
 
   void _snack(String msg, {bool error = false}) {
@@ -233,5 +243,49 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
       case DocKind.pdf:
         return Icons.picture_as_pdf_outlined;
     }
+  }
+}
+
+/// The name input inside the "New sheet/doc" dialog.
+///
+/// A [StatefulWidget] purely so the [TextEditingController]'s lifetime is tied
+/// to the widget's own presence in the tree. A controller created by the caller
+/// and disposed after `showDialog`'s future completes is disposed too early —
+/// the dialog stays mounted through its exit animation — and the resulting
+/// "used after being disposed" assertion kills the whole route.
+class _NameField extends StatefulWidget {
+  const _NameField({super.key, required this.initial, required this.onSubmit});
+
+  final String initial;
+
+  /// Called with the entered text when the field is submitted.
+  final void Function(String name) onSubmit;
+
+  @override
+  State<_NameField> createState() => _NameFieldState();
+}
+
+class _NameFieldState extends State<_NameField> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  /// The text currently typed — read by the dialog's Create button.
+  String get value => _ctrl.text;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzTextField(
+      controller: _ctrl,
+      label: 'Name',
+      autofocus: true,
+      textInputAction: TextInputAction.done,
+      onSubmitted: (_) => widget.onSubmit(_ctrl.text),
+    );
   }
 }

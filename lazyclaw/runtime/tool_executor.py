@@ -72,12 +72,24 @@ def resolve_tool_timeout(skill: object, name: str, default: int) -> int:
        inner ``wait_for`` budget so the executor never kills a dispatch
        that is still inside its declared budget).
     2. ``PER_TOOL_TIMEOUTS[name]`` — the runtime override table above.
-    3. *default* — the executor default (``DEFAULT_TOOL_TIMEOUT``).
+    3. Bare-name prefix match for MCP-bridged tools (``mcp_<uuid>_…``):
+       upwork_* drives the same host Brave as ``browser`` AND queues
+       behind mcp-upwork's whole-tool lock (2026-08-21) — a queued call
+       waits out the holder's Cloudflare navigation, so the 60s default
+       produced 7 starvation timeouts on the lock's first day (0 the two
+       days before). Same 180s as ``browser``; nesting rule intact.
+    4. *default* — the executor default (``DEFAULT_TOOL_TIMEOUT``).
     """
     declared = getattr(skill, "timeout", None)
     if declared:
         return int(declared)
-    return PER_TOOL_TIMEOUTS.get(name, default)
+    if name in PER_TOOL_TIMEOUTS:
+        return PER_TOOL_TIMEOUTS[name]
+    from lazyclaw.skills.tool_namespace import bare_tool_name
+
+    if bare_tool_name(name).startswith("upwork_"):
+        return PER_TOOL_TIMEOUTS["browser"]
+    return default
 
 
 class ToolExecutor:

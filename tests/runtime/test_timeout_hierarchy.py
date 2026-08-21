@@ -210,3 +210,34 @@ def test_override_table_stays_small():
         "ask_brain's user-question wait must be strictly inside its own "
         "executor cap (child < parent, always)"
     )
+
+
+# ── Upwork MCP tools under the whole-tool lock (2026-08-21) ───────────
+# The mcp-upwork @serialized lock (2026-08-21) made each tool call's
+# navigate+scrape atomic — correct — but a QUEUED call now waits for the
+# holder's slow Cloudflare navigation and then hit the 60s executor
+# default: 7 timeouts on day one vs 0 the two days before. Upwork tools
+# drive the same host Brave as `browser`, so they get the same 180s
+# (nesting rule intact: 180 < 480 sync-browser floor < 600 ceiling).
+
+
+def test_upwork_mcp_tools_get_the_browser_budget():
+    uuid_name = (
+        "mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_upwork_get_messages"
+    )
+    assert resolve_tool_timeout(_Skill(), uuid_name, DEFAULT_TOOL_TIMEOUT) == 180
+
+
+def test_unrelated_mcp_tools_keep_the_default():
+    uuid_name = "mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_email_read"
+    assert (
+        resolve_tool_timeout(_Skill(), uuid_name, DEFAULT_TOOL_TIMEOUT)
+        == DEFAULT_TOOL_TIMEOUT
+    )
+
+
+def test_explicit_skill_timeout_still_wins_for_mcp_names():
+    uuid_name = (
+        "mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_upwork_get_messages"
+    )
+    assert resolve_tool_timeout(_SkillWithTimeout(), uuid_name, 60) == 999

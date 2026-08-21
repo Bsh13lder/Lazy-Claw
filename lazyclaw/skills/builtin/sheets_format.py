@@ -425,3 +425,138 @@ def _heights(raw: Any) -> dict[int, float]:
             continue
         out[index] = float(height)
     return out
+
+
+class ResizeSheetSkill(BaseSkill):
+    """Insert or delete whole rows / columns."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "insert_delete_rows_columns"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Insert or delete whole ROWS or COLUMNS in a spreadsheet, shifting "
+            "everything else to make room or close the gap. Use for 'add a row "
+            "above the total', 'delete the empty column C', 'insert two rows at "
+            "the top'. NOTE: formula references are not rewritten, so check any "
+            "formulas afterwards — to add data at the BOTTOM of a table just "
+            "write to the next free row with set_cells instead."
+        )
+
+    @property
+    def category(self) -> str:
+        return "sheets"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "sheet_id": {
+                    "type": "string",
+                    "description": "Sheet id or name (optional — defaults to most recent)",
+                },
+                "worksheet": {
+                    "type": ["string", "integer"],
+                    "description": "Worksheet tab name or 0-based index (optional)",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["insert_rows", "delete_rows",
+                             "insert_columns", "delete_columns"],
+                },
+                "at": {
+                    "type": "string",
+                    "description": "Where: a 1-based row number ('3') for rows, or a column letter ('C') for columns",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "How many to insert/delete (default 1)",
+                },
+            },
+            "required": ["action", "at"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.sheets import snapshot as S
+        from lazyclaw.sheets import structure as St
+        from lazyclaw.sheets.store import save_sheet
+
+        action = str(params.get("action") or "").strip()
+        handler = {
+            "insert_rows": St.insert_rows, "delete_rows": St.delete_rows,
+            "insert_columns": St.insert_columns,
+            "delete_columns": St.delete_columns,
+        }.get(action)
+        if handler is None:
+            return (
+                "'action' must be insert_rows, delete_rows, insert_columns or "
+                "delete_columns."
+            )
+        is_row = action.endswith("rows")
+
+        index = _at_index(params.get("at"), is_row=is_row)
+        if index is None:
+            return (
+                "'at' must be a 1-based row number like '3'." if is_row
+                else "'at' must be a column letter like 'C'."
+            )
+        try:
+            count = max(1, int(params.get("count") or 1))
+        except (TypeError, ValueError):
+            return "'count' must be a whole number."
+
+        sid, row, err = await _load(self._config, user_id, params)
+        if err:
+            return err
+        assert row is not None
+
+        sheet = _worksheet(params)
+        try:
+            snap = handler(row["payload"], index, count, sheet)
+        except (ValueError, KeyError, IndexError) as e:
+            return f"Could not change the sheet structure: {e}"
+
+        await save_sheet(self._config, user_id, row["name"], snap, sheet_id=sid)
+        unit = "row" if is_row else "column"
+        verb = "Inserted" if action.startswith("insert") else "Deleted"
+        where = f"{index + 1}" if is_row else S.col_to_letter(index)
+        out = (
+            f"{verb} {count} {unit}(s) at {unit} {where} in **{row['name']}**.\n"
+            f"```\n{_format_grid(snap, sheet)}\n```"
+        )
+        # Only warn when it can actually bite — on a sheet of plain values the
+        # caveat is noise, and noise trains the model to ignore warnings.
+        if St.has_formulas(snap, sheet):
+            out += (
+                "\n\n⚠️ Formula references were NOT adjusted for the shift — "
+                "check any formulas that spanned the changed rows/columns."
+            )
+        return out
+
+
+def _at_index(raw: Any, *, is_row: bool) -> int | None:
+    """'3' → row index 2; 'C' → column index 2. None when unreadable."""
+    from lazyclaw.sheets import snapshot as S
+
+    if raw is None or isinstance(raw, bool):
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        value = int(text)
+        # Rows are spoken 1-based; a column given as a number is already 0-based
+        # nowhere, so treat it as 1-based too for consistency.
+        return value - 1 if value >= 1 else None
+    if is_row:
+        return None
+    try:
+        return S.letter_to_col(text)
+    except ValueError:
+        return None

@@ -8,6 +8,7 @@ tools:
   - create_sheet
   - format_cells
   - format_sheet_layout
+  - insert_delete_rows_columns
   - list_sheets
   - read_sheet
   - recalc_sheet
@@ -46,6 +47,7 @@ SHEETS:
 - `convert_sheet_links` turns bare URLs and `[text](url)` cells into real clickable hyperlinks — run it after writing a column of links.
 - Format with `format_cells` (bold / colour / background / alignment / number format over an A1 range) and `format_sheet_layout` (column widths, row heights, auto-fit, merge, freeze). Format AFTER the values are in — auto-fit measures what is actually there.
 - **A table you just built should be readable without being asked**: bold the header row, `freeze_rows: 1`, `auto_fit_columns: ["*"]`, and give money columns `number_format: "currency"`. That is four calls' worth of polish in two, and it is the difference between a wall of truncated text and something the user can actually read.
+- `insert_delete_rows_columns` adds or removes whole rows/columns. It does NOT rewrite formula references, so prefer writing to the next free row with `set_cells` when you just need to APPEND data, and re-check formulas after any insert or delete in the middle of a table.
 - Deliver with `send_sheet`.
 
 DOCS:

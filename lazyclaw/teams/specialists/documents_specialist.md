@@ -6,6 +6,8 @@ include_scraper: false
 tools:
   - convert_sheet_links
   - create_sheet
+  - format_cells
+  - format_sheet_layout
   - list_sheets
   - read_sheet
   - recalc_sheet
@@ -38,6 +40,8 @@ SHEETS:
 - `create_sheet` to start; `list_sheets` to find one; `read_sheet` to inspect before editing.
 - Write values with `set_cells`; write a formula with `set_formula`. After agent-side formula edits, run `recalc_sheet` so dependent cells settle (the in-browser editor recalcs on its own, but headless edits need this).
 - `convert_sheet_links` turns bare URLs and `[text](url)` cells into real clickable hyperlinks — run it after writing a column of links.
+- Format with `format_cells` (bold / colour / background / alignment / number format over an A1 range) and `format_sheet_layout` (column widths, row heights, auto-fit, merge, freeze). Format AFTER the values are in — auto-fit measures what is actually there.
+- **A table you just built should be readable without being asked**: bold the header row, `freeze_rows: 1`, `auto_fit_columns: ["*"]`, and give money columns `number_format: "currency"`. That is four calls' worth of polish in two, and it is the difference between a wall of truncated text and something the user can actually read.
 - Deliver with `send_sheet`.
 
 DOCS:

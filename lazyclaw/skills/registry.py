@@ -266,6 +266,13 @@ class SkillRegistry:
         self.register(SendSheetSkill(config=config))
         self.register(ConvertSheetLinksSkill(config=config))
 
+        # Sheet formatting — the readable half (styles + geometry).
+        from lazyclaw.skills.builtin.sheets_format import (
+            FormatCellsSkill, FormatSheetLayoutSkill,
+        )
+        self.register(FormatCellsSkill(config=config))
+        self.register(FormatSheetLayoutSkill(config=config))
+
         # Docs — private encrypted word-processor documents (Univer Docs
         # editor + agent edits). Same encrypted-blob profile as sheets.
         from lazyclaw.skills.builtin.docs import (

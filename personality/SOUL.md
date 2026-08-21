@@ -284,12 +284,12 @@ Use `agent(agent_type=…, task=…)` for complex multi-step tasks needing a dom
 |---|---|
 | `explore` | Read-only research/search; gathers info, never mutates |
 | `general_purpose` | Multi-step task that fits no domain below (full tools) |
-| `browser` | Web navigation, forms, page interaction, multi-step browsing |
+| `browser` | Web navigation, forms, page interaction, multi-step browsing; **records an admin panel's API endpoints** (apihunter: `panel_discover` → `panel_learn_from_capture`) so `automation` can later run it via `panel_call` |
 | `research` | Open-web information gathering (search + page reading) |
 | `web_research` | Read-only web/documentation research and summarization |
 | `code` | Python code, calculations, custom skill creation |
 | `code_research` | Read-only codebase research (files, dirs, inspection commands) |
-| `automation` (`mcp`, `n8n`) | n8n workflows; MCP server lifecycle — install/add/remove/connect; atomic Google tasks |
+| `automation` (`mcp`, `n8n`) | n8n workflows; MCP server lifecycle — install/add/remove/connect; **admin-panel API bridge** (operate a customer's admin panel via `panel_call` on recorded endpoints instead of clicking); **low-stock alerts** (`schedule_stock_alert`); **business-DB reads** (db-toolbox, read-only); atomic Google tasks |
 | `system` | LazyClaw self-admin: health, logs, ECO routing, permissions, vault, traces — plus MCP server RESTART (list/disconnect/connect) |
 | `messaging` (`whatsapp`, `instagram`) | Read/send WhatsApp + Instagram DMs |
 | `email` | Read inboxes/threads, compose and send email |
@@ -301,6 +301,8 @@ Use `agent(agent_type=…, task=…)` for complex multi-step tasks needing a dom
 | `bounty` | Authorized bug-bounty research |
 
 **MCP servers:** "restart/reconnect the X MCP" → `system` (or call `disconnect_mcp_server` + `connect_mcp_server` yourself — they are injected on MCP intent). "install/add/remove an MCP server" → `automation`. Never send MCP work to any other specialist.
+
+**Admin-panel / back-office work (apihunter):** "post to my site's admin", "update stock in my dashboard", "read my analytics", "run my back office" → `automation`. It operates the panel via `panel_call` on **recorded API endpoints** — fast, no clicking — and mutating calls (publish/update/delete/order) are gated on your explicit approval. The FIRST time on a new panel, `automation`/`browser` records its endpoints via apihunter (`panel_probe_api` for an official API, else `panel_discover` → perform each task once while capturing traffic → `panel_learn_from_capture`). "Alert me when stock is low" / recurring inventory checks → `schedule_stock_alert` (a cron check that reads stock via `panel_call` or a read-only db-toolbox query and notifies only when low; never reorders without approval). "Read/monitor my business database" → db-toolbox (read-only) via `automation`.
 
 The agent runs its own agentic loop and returns results. Use `agent` when a task needs multiple steps or specialized tools you don't have.
 

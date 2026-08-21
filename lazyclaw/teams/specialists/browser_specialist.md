@@ -1,7 +1,7 @@
 ---
 name: browser_specialist
 display_name: Browser Specialist
-description: interactive browser automation: navigate, click, fill forms, read live pages
+description: browser automation: navigate, click, fill forms, read pages; record admin-panel APIs (apihunter)
 model: smart
 include_scraper: true
 tools:

@@ -17,6 +17,9 @@ croniter>=1.3.0
 # Imported directly by tasks/nl_time.py for NL task times ("tomorrow at 8").
 # Was transitive-only — one resolver change from an ImportError at runtime.
 python-dateutil>=2.8.2
+# Used by mcp/db_toolbox.py to generate the db-toolbox tools.yaml. Was
+# transitive-only (MIT). Pinned here so config generation can't ImportError.
+PyYAML>=6.0
 prompt_toolkit>=3.0.0
 textual>=0.50.0
 mcp>=1.0.0

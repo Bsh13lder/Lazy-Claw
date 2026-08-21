@@ -35,7 +35,6 @@ GOAL.md
 # Disabled MCP servers (source incomplete, rebuild needed)
 mcp-freeride/
 mcp-healthcheck/
-mcp-apihunter/
 mcp-vaultwhisper/
 
 # MCP server build artifacts

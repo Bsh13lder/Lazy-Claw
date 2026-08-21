@@ -182,6 +182,10 @@ class SkillRegistry:
         self.register(EditJobSkill(config=config))
         self.register(ManageJobSkill(config=config))
 
+        # Low-stock alert scheduler (industrial monitoring use case)
+        from lazyclaw.skills.builtin.stock_alert import ScheduleStockAlertSkill
+        self.register(ScheduleStockAlertSkill(config=config))
+
         # Task manager skills (second brain)
         from lazyclaw.skills.builtin.task_manager import (
             AddTaskSkill, ListTasksSkill, CompleteTaskSkill,

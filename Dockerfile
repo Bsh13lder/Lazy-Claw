@@ -21,6 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Google MCP Toolbox for Databases (Apache-2.0). Single static Go binary — the
+# bundled `db-toolbox` MCP (see lazyclaw/mcp/manager.py). No Python dep, so the
+# license gate is untouched. Pinned; bump deliberately and re-verify the CLI
+# flags in the BUNDLED_MCPS entry. arch-aware for amd64/arm64 builds.
+ARG TOOLBOX_VERSION=0.6.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) tarch=amd64 ;; arm64) tarch=arm64 ;; *) echo "unsupported arch $arch"; exit 1 ;; esac; \
+    curl -fsSL -o /usr/local/bin/toolbox \
+        "https://storage.googleapis.com/genai-toolbox/v${TOOLBOX_VERSION}/linux/${tarch}/toolbox"; \
+    chmod +x /usr/local/bin/toolbox; \
+    /usr/local/bin/toolbox --version
+
 # Runtime libs:
 # - lsof: ram_monitor.py port checks
 # - patch: workspace-mcp local patch step below
@@ -108,12 +121,14 @@ COPY --chown=lazyclaw:lazyclaw mcp-email/ ./mcp-email/
 COPY --chown=lazyclaw:lazyclaw mcp-jobspy/ ./mcp-jobspy/
 COPY --chown=lazyclaw:lazyclaw mcp-scraper/ ./mcp-scraper/
 COPY --chown=lazyclaw:lazyclaw mcp-upwork/ ./mcp-upwork/
+COPY --chown=lazyclaw:lazyclaw mcp-apihunter/ ./mcp-apihunter/
 RUN pip install --no-cache-dir \
         ./mcp-instagram \
         ./mcp-email \
         ./mcp-jobspy \
         ./mcp-scraper \
         ./mcp-upwork \
+        ./mcp-apihunter \
         n8n-mcp-server
 
 # mcp-whatsapp source (deps already installed above).

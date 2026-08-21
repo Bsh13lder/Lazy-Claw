@@ -23,7 +23,11 @@ dependencies = [
     # reporting). Shells out to the local `claude` binary, same auth path
     # as the legacy CLI transport. Base dep (default-on per
     # feedback_optional_extras_for_core_features).
-    "claude-agent-sdk>=0.1.81",
+    # PINNED, not a floor. 2026-08-21: a rebuild resolved ">=0.1.81" to
+    # 0.2.143, which changed the max_turns stop from a bare Exception to
+    # ResultError (a ProcessError subclass) — it was then caught one
+    # except-clause too early and EVERY chat failed. Bump deliberately.
+    "claude-agent-sdk==0.2.143",
     "python-multipart>=0.0.7",
     "click>=8.1.0",
     "rich>=13.0.0",

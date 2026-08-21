@@ -187,6 +187,11 @@ _BASE_TOOL_NAMES = frozenset({
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
 })
 
+# Lesson verification pump cadence: run every Nth user turn instead of
+# every message (its tag scan is a non-indexed LIKE over the notes table
+# and promotions are not time-critical — 2026-08-21 learning audit).
+_VERIFY_PUMP_EVERY = 10
+
 # Minimal tools for local models (4B can't handle 4000+ tool tokens)
 # Brain only needs delegate (dispatch workers) + search + memory
 _LOCAL_TOOL_NAMES = frozenset({
@@ -2661,21 +2666,26 @@ class Agent:
 
         # Advance the agent's monotonic turn counter once per user message.
         # The lesson verification pump uses this as its quiet-window clock.
+        _turn_no = 0
         try:
             from lazyclaw.runtime.turn_counter import advance_turn
-            advance_turn(user_id)
+            _turn_no = advance_turn(user_id)
         except Exception:
             logger.debug("turn_counter advance failed", exc_info=True)
         # Fire-and-forget: promote eligible pending shapes to verified.
-        try:
-            from lazyclaw.runtime.aio_helpers import fire_and_forget
-            from lazyclaw.runtime.lesson_verifier import run_verification_pump
-            fire_and_forget(
-                run_verification_pump(self.config, user_id),
-                name=f"verify-pump-{user_id[:8]}",
-            )
-        except Exception:
-            logger.debug("verification pump dispatch failed", exc_info=True)
+        # Every _VERIFY_PUMP_EVERY turns, not every message — the pump's
+        # tag scan is a non-indexed LIKE over the notes table and its
+        # promotions change nothing time-critical (2026-08-21 audit).
+        if _turn_no % _VERIFY_PUMP_EVERY == 0:
+            try:
+                from lazyclaw.runtime.aio_helpers import fire_and_forget
+                from lazyclaw.runtime.lesson_verifier import run_verification_pump
+                fire_and_forget(
+                    run_verification_pump(self.config, user_id),
+                    name=f"verify-pump-{user_id[:8]}",
+                )
+            except Exception:
+                logger.debug("verification pump dispatch failed", exc_info=True)
 
         key = await get_user_dek(self.config, user_id)
         _start_time = time.monotonic()

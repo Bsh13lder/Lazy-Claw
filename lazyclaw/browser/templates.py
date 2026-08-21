@@ -301,6 +301,28 @@ async def update_template(
     return tpl
 
 
+async def record_template_run(
+    config: Config, user_id: str, tpl_id: str,
+) -> None:
+    """Bump run_count/last_run_at for an ACTUAL run.
+
+    2026-08-21 audit: neither run path recorded anything — run_count was
+    bumped only by the autosave upsert, so it counted auto-saves, not
+    runs, and template value was unmeasurable. Best-effort: a failure
+    here must never break the run itself."""
+    try:
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE browser_templates SET run_count = run_count + 1, "
+                "last_run_at = datetime('now') WHERE id = ? AND user_id = ?",
+                (tpl_id, user_id),
+            )
+            await db.commit()
+        logger.info("[templates] run recorded id=%s", tpl_id)
+    except Exception:
+        logger.debug("[templates] run record failed id=%s", tpl_id, exc_info=True)
+
+
 async def delete_template(config: Config, user_id: str, tpl_id: str) -> bool:
     async with db_session(config) as db:
         cursor = await db.execute(

@@ -783,6 +783,18 @@ async def _build_topic_lessons_section(
     scored.sort(reverse=True)
     # Cap at top-2 topics to bound total context injection.
     topics_hit: list[str] = [t for _, t in scored[:2]]
+    # Gate on topics that actually hold cards (cached, 10-min TTL) — a
+    # keyword-matched empty topic previously paid a full Ollama semantic
+    # search for a guaranteed miss (44% of recalls, 2026-08-21 audit).
+    try:
+        from lazyclaw.runtime.skill_lesson import topics_with_lessons
+
+        available = await topics_with_lessons(config, user_id)
+        topics_hit = [t for t in topics_hit if t in available]
+    except Exception:
+        logger.debug("[context] topic gate failed — proceeding", exc_info=True)
+    if not topics_hit:
+        return ""
     logger.debug("[context] topic-lesson topics matched: %s", topics_hit)
     try:
         from lazyclaw.runtime.skill_lesson import (

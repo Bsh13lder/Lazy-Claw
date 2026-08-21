@@ -145,6 +145,17 @@ def _extract_learnings(
     return learnings[:_MAX_LEARNINGS]
 
 
+def _keep_learning(learning) -> bool:
+    """Save only failure knowledge ("AVOID: …", error patterns).
+
+    "WORKS: <flow>" success recipes are the content class behind the
+    2026-08-20 himap incident — a stale publish-flow recipe injected into
+    a read-only task read as a prompt-injection attack — and no replay
+    machinery consumes them. What NOT to do transfers across tasks; a
+    frozen step flow rarely does."""
+    return not str(getattr(learning, "title", "")).startswith("WORKS:")
+
+
 async def save_browser_learnings(
     config: Config,
     user_id: str,
@@ -167,7 +178,10 @@ async def save_browser_learnings(
         if not domain:
             return
 
-        learnings = _extract_learnings(step_history, task, success, error)
+        learnings = [
+            l for l in _extract_learnings(step_history, task, success, error)
+            if _keep_learning(l)
+        ]
         if not learnings:
             return
 
@@ -195,20 +209,12 @@ async def save_browser_learnings(
             len(learnings), domain, success,
         )
 
-        # Compile successful paths for replay without LLM
-        if success and len(step_history) >= 3:
-            try:
-                from lazyclaw.browser.path_compiler import compile_path, save_compiled_path
-
-                compiled = compile_path(step_history, task, url)
-                if compiled:
-                    await save_compiled_path(config, user_id, compiled)
-                    logger.info(
-                        "Compiled path saved for %s (%d steps)",
-                        domain, len(compiled.steps),
-                    )
-            except Exception:
-                logger.debug("Path compilation failed", exc_info=True)
+        # NOTE (2026-08-21 audit): compiled-path saving removed. The
+        # replay machinery it fed (find_compiled_path / replay_path) has
+        # zero callers — the paths were write-only, and their only
+        # runtime effect was being dumped as text into tool results
+        # (the 2026-08-20 himap false-injection incident). Re-add the
+        # save only together with an actual replay consumer.
 
     except Exception:
         logger.debug("Specialist learning save failed", exc_info=True)

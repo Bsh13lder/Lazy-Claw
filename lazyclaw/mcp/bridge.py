@@ -259,26 +259,10 @@ class MCPToolSkill(BaseSkill):
                 self._client = new_client
                 result = await self._client.call_tool(self._tool_name, params)
 
-        # Fire-and-forget: log what worked, once per successful call, so
-        # small models can replay the shape on the next similar request.
-        try:
-            topic = _mcp_topic_for(self._tool_name, self._client.name)
-            if (
-                topic is not None
-                and self._config is not None
-                and not _mcp_result_indicates_error(result)
-            ):
-                from lazyclaw.runtime.skill_lesson import save_skill_lesson
-                await save_skill_lesson(
-                    self._config, user_id,
-                    topic=topic,
-                    action=self._tool_name,
-                    intent=f"call {self._tool_name} via {self._client.name}",
-                    params=params,
-                    outcome="success",
-                )
-        except Exception:
-            logger.debug("mcp bridge lesson save failed", exc_info=True)
+        # Lesson recording happens ONCE, in tool_executor's auto-recorder
+        # (2026-08-21 audit: an inline save here double-charged every
+        # whatsapp/email/instagram call and fragmented the cards across
+        # two different intent slugs).
 
         return result
 
@@ -484,27 +468,7 @@ class PooledMCPToolSkill(BaseSkill):
                 )
                 continue
 
-            # Fire-and-forget skill_lesson — record under canonical name
-            # so recall lookups don't fragment across N shard variants.
-            try:
-                topic = _mcp_topic_for(self._tool_name, _SCRAPER_CANONICAL)
-                if (
-                    topic is not None
-                    and self._config is not None
-                    and not _mcp_result_indicates_error(result)
-                ):
-                    from lazyclaw.runtime.skill_lesson import save_skill_lesson
-                    await save_skill_lesson(
-                        self._config, user_id,
-                        topic=topic,
-                        action=self._tool_name,
-                        intent=f"call {self._tool_name} via {_SCRAPER_CANONICAL}",
-                        params=params,
-                        outcome="success",
-                    )
-            except Exception:
-                logger.debug("scraper pool lesson save failed", exc_info=True)
-
+            # Lesson recording happens once in tool_executor (see above).
             return result
 
         return (

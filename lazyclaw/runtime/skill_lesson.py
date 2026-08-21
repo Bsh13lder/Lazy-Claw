@@ -166,6 +166,91 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── Replay throttle (2026-08-21 audit) ───────────────────────────────
+# One card was re-upserted 926 times in a day — every replay ran the full
+# read-decrypt-merge-re-encrypt-commit-re-embed cycle through the single
+# shared aiosqlite connection just to bump replay_count (whose only
+# reader is a test). A same-outcome replay inside the window carries no
+# new information; skip the write entirely.
+_REPLAY_THROTTLE_S = 3600
+
+
+def should_skip_replay(
+    old_outcome: str,
+    new_outcome: str,
+    last_used_at_iso: str | None,
+    now_ts: float,
+) -> bool:
+    """True when this replay is pure churn: same outcome as the stored
+    card AND the card was touched within the throttle window. Outcome
+    CHANGES (success→failed, verified→failed demotion, …) always write.
+    A missing/unparseable timestamp writes (fail open — never lose a
+    genuine state change to a formatting quirk)."""
+    if new_outcome != old_outcome:
+        return False
+    if not last_used_at_iso:
+        return False
+    try:
+        parsed = datetime.fromisoformat(
+            str(last_used_at_iso).replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    return (now_ts - parsed.timestamp()) < _REPLAY_THROTTLE_S
+
+
+# ── Topics-with-cards cache (2026-08-21 audit) ───────────────────────
+# The context builder's keyword triggers fire on most turns and paid an
+# Ollama semantic search per matched topic — with a 44% total miss rate,
+# because many matched topics hold zero cards. One cheap tag scan per
+# TTL replaces per-turn embeds for empty topics.
+_TOPIC_CACHE: dict[str, tuple[float, set[str]]] = {}
+_TOPIC_CACHE_TTL_S = 600
+
+
+async def _fetch_lesson_topics(config: "Config", user_id: str) -> set[str]:
+    """One tag scan over the (small) notes table → set of topics that
+    actually hold at least one lesson card."""
+    from lazyclaw.db.connection import db_session
+
+    topics: set[str] = set()
+    async with db_session(config) as db:
+        rows = await db.execute_fetchall(
+            "SELECT tags FROM notes WHERE user_id = ? "
+            "AND tags LIKE '%\"kind/shape\"%'",
+            (user_id,),
+        )
+    for row in rows:
+        try:
+            for tag in json.loads(row["tags"] or "[]"):
+                if isinstance(tag, str) and tag.startswith("topic/"):
+                    topics.add(tag[len("topic/"):])
+        except (ValueError, TypeError):
+            continue
+    return topics
+
+
+async def topics_with_lessons(config: "Config", user_id: str) -> set[str]:
+    """Cached (10-min TTL) set of topics holding ≥1 lesson card. Never
+    raises — a failing fetch reports the empty set (callers then skip
+    recall, which is the cheap direction to fail)."""
+    import time as _time
+
+    cached = _TOPIC_CACHE.get(user_id)
+    now = _time.monotonic()
+    if cached is not None and (now - cached[0]) < _TOPIC_CACHE_TTL_S:
+        return cached[1]
+    try:
+        topics = await _fetch_lesson_topics(config, user_id)
+    except Exception:
+        logger.debug("[lesson] topic fetch failed", exc_info=True)
+        return cached[1] if cached else set()
+    _TOPIC_CACHE[user_id] = (now, topics)
+    return topics
+
+
 def _canonical_title(topic: str, action: str, intent_slug: str) -> str:
     """One title per (topic, action, intent) triple — the upsert handle.
 
@@ -300,6 +385,12 @@ async def save_skill_lesson(
             topic, action, slug, "upsert" if existing else "insert",
         )
 
+        # Keep the topics-with-cards cache warm-consistent: a topic being
+        # written now definitely has (or is about to have) a card.
+        _cached = _TOPIC_CACHE.get(user_id)
+        if _cached is not None:
+            _cached[1].add(topic)
+
         tags = [
             "lesson", "auto", "owner/agent",
             "kind/shape",
@@ -325,6 +416,21 @@ async def save_skill_lesson(
             old_props, _body, _has = parse_frontmatter(content)
             old_replay = int(old_props.get("replay_count") or 0)
             old_outcome = str(old_props.get("outcome") or "")
+
+            # Same-outcome replay inside the throttle window: no new
+            # information — skip the whole write cycle (2026-08-21
+            # audit: 925 of one card's 926 writes were this).
+            import time as _time
+
+            if should_skip_replay(
+                old_outcome, outcome,
+                old_props.get("last_used_at"), _time.time(),
+            ):
+                logger.debug(
+                    "[lesson] replay throttled topic=%s action=%s "
+                    "outcome=%s", topic, action, outcome,
+                )
+                return existing.get("id")
 
             effective_outcome = outcome
             effective_pending_turn = pending_since_turn

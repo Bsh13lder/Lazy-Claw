@@ -208,9 +208,14 @@ async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]
     key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
+        # Age cutoff on updated_at (NOT last_used — recall itself bumps
+        # last_used, so an entry looks "fresh" forever merely by being
+        # injected; the 2026-08-20 himap scare was a weeks-old test
+        # recipe that never aged out).
         rows = await db.execute_fetchall(
             "SELECT id, memory_type, title, content, success_count, fail_count "
             "FROM site_memory WHERE user_id = ? AND domain = ? "
+            "AND updated_at >= datetime('now', '-90 day') "
             "ORDER BY success_count DESC, last_used DESC LIMIT 20",
             (user_id, domain),
         )
@@ -339,6 +344,26 @@ async def mark_failed(
             (target_id,),
         )
         await db.commit()
+
+
+# Memory types that are ACTION RECIPES (step flows, compiled paths) —
+# navigation hints they are not. Injected into a read-only task's tool
+# results they read as instructions embedded in the page: the 2026-08-20
+# himap incident had a specialist report its own stale publish-flow
+# recipe as a prompt-injection attack.
+_ACTION_RECIPE_TYPES = frozenset({"site_learning", "compiled_path"})
+
+
+def filter_navigation_memories(
+    memories: dict[str, list[dict]],
+) -> dict[str, list[dict]]:
+    """Drop action-recipe memory types for tool-result injection.
+
+    Read/open results should carry orientation (navigation, login_flow,
+    site_structure, user-correction notes) — never step recipes."""
+    return {
+        k: v for k, v in memories.items() if k not in _ACTION_RECIPE_TYPES
+    }
 
 
 def format_memories_for_context(memories: dict[str, list[dict]]) -> str:

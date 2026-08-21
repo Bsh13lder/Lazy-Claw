@@ -155,8 +155,14 @@ async def action_read(
 
     if url and config:
         try:
-            from lazyclaw.browser.site_memory import recall, format_memories_for_context
-            memories = await recall(config, user_id, url)
+            from lazyclaw.browser.site_memory import (
+                filter_navigation_memories,
+                format_memories_for_context,
+                recall,
+            )
+            memories = filter_navigation_memories(
+                await recall(config, user_id, url)
+            )
             if memories:
                 summary += "\n\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
         except Exception:
@@ -271,8 +277,14 @@ async def action_open(
     # Inject site knowledge
     if nav_url and config:
         try:
-            from lazyclaw.browser.site_memory import recall, format_memories_for_context
-            memories = await recall(config, user_id, nav_url)
+            from lazyclaw.browser.site_memory import (
+                filter_navigation_memories,
+                format_memories_for_context,
+                recall,
+            )
+            memories = filter_navigation_memories(
+                await recall(config, user_id, nav_url)
+            )
             if memories:
                 result += "\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
         except Exception:

@@ -305,6 +305,7 @@ class RunBrowserTemplateSkill(BaseSkill):
         # Mark this template as the active run so side-notes / rejects in
         # this turn are routed to template_corrections.append_correction.
         active_templates.set_active(user_id, tpl["id"])
+        await tpl_store.record_template_run(self._config, user_id, tpl["id"])
 
         instruction = tpl_store.build_run_instruction(tpl, params.get("input"))
         return (

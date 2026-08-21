@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING
 from lazyclaw.llm.providers.base import ToolCall
 from lazyclaw.permissions.audit import log_action
 from lazyclaw.permissions.models import ALLOW, DENY
+# The auto-recorder runs FIRE-AND-FORGET (2026-08-21 audit: it was
+# awaited inline on every tool call — 5-20 ms typical, seconds tail —
+# through the single shared aiosqlite connection, for writes that were
+# 99% same-outcome churn; the throttle in skill_lesson handles that).
+from lazyclaw.runtime.aio_helpers import fire_and_forget
 from lazyclaw.runtime.skill_lesson_auto import (
     outcome_from_result,
     record_skill_outcome,
@@ -184,9 +189,9 @@ class ToolExecutor:
                     )
             except Exception:
                 logger.debug("tool-result failure logging swallowed", exc_info=True)
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
-            )
+            ))
             await self._audit(user_id, "tool_executed", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
@@ -197,9 +202,9 @@ class ToolExecutor:
                 "[toolexec] Tool %s timed out after %ds (user=%s)",
                 tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,
             )
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, exc,
-            )
+            ))
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error(
@@ -207,9 +212,9 @@ class ToolExecutor:
                 tool_call.name, user_id[:8] if user_id else user_id, type(e).__name__, e,
                 exc_info=True,
             )
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, e,
-            )
+            ))
             return f"Error executing {tool_call.name}: {e}"
 
     async def execute_allowed(
@@ -248,9 +253,9 @@ class ToolExecutor:
                 "[toolexec] execute_allowed done name=%s result_len=%d",
                 tool_call.name, len(processed) if processed else 0,
             )
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
-            )
+            ))
             await self._audit(user_id, "tool_approved", tool_call)
             return processed
         except asyncio.TimeoutError as exc:
@@ -261,18 +266,18 @@ class ToolExecutor:
                 "[toolexec] Tool %s (approved) timed out after %ds (user=%s)",
                 tool_call.name, effective_timeout, user_id[:8] if user_id else user_id,
             )
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, exc,
-            )
+            ))
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error(
                 "[toolexec] Tool %s (approved) failed type=%s: %s",
                 tool_call.name, type(e).__name__, e, exc_info=True,
             )
-            await record_skill_outcome(
+            fire_and_forget(record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, None, e,
-            )
+            ))
             return f"Error executing {tool_call.name}: {e}"
 
     async def execute_batch(

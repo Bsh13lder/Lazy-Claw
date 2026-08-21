@@ -186,6 +186,7 @@ async def run_template(
         raise HTTPException(status_code=404, detail="Template not found")
     user_input = (payload or {}).get("input")
     instruction = tpl_store.build_run_instruction(tpl, user_input)
+    await tpl_store.record_template_run(_config, user.id, tpl_id)
     return {
         "template": {"id": tpl["id"], "name": tpl["name"]},
         "instruction": instruction,

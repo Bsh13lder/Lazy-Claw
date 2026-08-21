@@ -59,6 +59,12 @@ _BULLET_TEXT_CAP = 240
 # ── Read side: recall this specialist's own lessons ──────────────────
 
 
+def _base_topic(specialist_name: str) -> str:
+    """`browser_specialist` → `browser`. Lesson writers never produce
+    `<name>_specialist` topics, so the suffixed form can never match."""
+    return specialist_name.removesuffix("_specialist")
+
+
 async def recall_specialist_lessons(
     config: "Config",
     user_id: str,
@@ -85,7 +91,11 @@ async def recall_specialist_lessons(
         lessons = await recall_skill_lessons(
             config,
             user_id,
-            topic=specialist_name,
+            # Writers only ever produce BASE topics ("browser", "email",
+            # skill names) — querying "browser_specialist" missed 11/11
+            # in prod (2026-08-21 audit). Map to the base topic so
+            # recall can actually hit.
+            topic=_base_topic(specialist_name),
             intent=message or "",
             k=k,
         )

@@ -54,7 +54,7 @@ htmlcov/
 # Disabled / scratch MCPs that aren't installed in the Dockerfile.
 # mcp-upwork/ removed — now baked into the image (Apache-2.0 fork of
 # vanooo/upwork-mcp, shares the user's Brave profile via env injection).
-mcp-apihunter/
+# mcp-apihunter/ removed — now baked into the image (admin-panel API bridge).
 mcp-freeride/
 mcp-healthcheck/
 mcp-vaultwhisper/

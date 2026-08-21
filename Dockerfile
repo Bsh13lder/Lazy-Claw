@@ -24,15 +24,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Google MCP Toolbox for Databases (Apache-2.0). Single static Go binary — the
 # bundled `db-toolbox` MCP (see lazyclaw/mcp/manager.py). No Python dep, so the
 # license gate is untouched. Pinned; bump deliberately and re-verify the CLI
-# flags in the BUNDLED_MCPS entry. arch-aware for amd64/arm64 builds.
+# flags in the BUNDLED_MCPS entry.
+# Upstream ships linux/amd64 ONLY (no linux/arm64). db-toolbox is optional and
+# stays inert unless its binary is on PATH, so on other build arches we skip the
+# install rather than fail the whole image — apihunter etc. still build, and
+# db-toolbox simply won't appear until built on amd64 (e.g. prod).
 ARG TOOLBOX_VERSION=0.6.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
-    case "$arch" in amd64) tarch=amd64 ;; arm64) tarch=arm64 ;; *) echo "unsupported arch $arch"; exit 1 ;; esac; \
-    curl -fsSL -o /usr/local/bin/toolbox \
-        "https://storage.googleapis.com/genai-toolbox/v${TOOLBOX_VERSION}/linux/${tarch}/toolbox"; \
-    chmod +x /usr/local/bin/toolbox; \
-    /usr/local/bin/toolbox --version
+    if [ "$arch" = "amd64" ]; then \
+        curl -fsSL -o /usr/local/bin/toolbox \
+            "https://storage.googleapis.com/genai-toolbox/v${TOOLBOX_VERSION}/linux/amd64/toolbox"; \
+        chmod +x /usr/local/bin/toolbox; \
+        /usr/local/bin/toolbox --version; \
+    else \
+        echo "toolbox: no linux/${arch} build upstream — skipping (db-toolbox MCP stays inert on this arch)"; \
+    fi
 
 # Runtime libs:
 # - lsof: ram_monitor.py port checks

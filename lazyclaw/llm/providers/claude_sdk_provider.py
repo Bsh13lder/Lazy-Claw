@@ -818,7 +818,52 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     "on the host (or `docker exec -it lazyclaw claude /login` "
                     "in the container) and retry."
                 ) from exc
-            raise RuntimeError(f"Claude SDK process error: {exc}") from exc
+
+            # The by-design max_turns=1 stop can arrive HERE, not only in the
+            # generic `except Exception` below. claude-agent-sdk >= 0.2 raises
+            # `ResultError`, and ResultError -> ProcessError -> ClaudeSDKError
+            # -> Exception, so this clause catches it first. On 0.1.81 — which
+            # the comments further down were written against — it surfaced as a
+            # bare Exception and only that branch needed to handle it.
+            #
+            # One-turn-per-chat means EVERY successful turn ends at the cap, so
+            # once the SDK moved to 0.2.x this clause rejected every single
+            # chat: "Claude SDK process error: ...Reached maximum number of
+            # turns (1)". The whole brain was down (2026-08-21) while
+            # _max_turns_tail_action and its unit tests stayed green, because
+            # nothing reached them.
+            _usable = bool((text_parts or tool_calls) and not api_error)
+            _mt_action = _max_turns_tail_action(
+                str(exc), _usable,
+                already_retried=bool(kwargs.get("_max_turns_retried")),
+            )
+            if _mt_action == "swallow":
+                # Expected end of a good turn — fall through to the normal
+                # return path below; lazyclaw runs the harvested calls next.
+                logger.debug(
+                    "Claude SDK: absorbed max_turns=1 stop via ProcessError "
+                    "(%d text chars + %d tool call(s))",
+                    sum(len(t) for t in text_parts), len(tool_calls),
+                )
+            elif _mt_action == "retry":
+                logger.warning(
+                    "Claude SDK: turn hit max_turns=1 with NOTHING harvested "
+                    "(built-in tool burned the turn) — retrying once"
+                )
+                return await self.chat(
+                    messages, model,
+                    **{**kwargs, "_max_turns_retried": True},
+                )
+            elif _mt_action == "raise":
+                raise RuntimeError(
+                    "Claude SDK: turn hit max_turns=1 with no output — "
+                    f"nothing harvested before: {exc}"
+                ) from exc
+            else:
+                # Not the cap — a genuine subprocess failure.
+                raise RuntimeError(
+                    f"Claude SDK process error: {exc}"
+                ) from exc
         except ClaudeSDKError as exc:
             raise RuntimeError(f"Claude SDK error: {exc}") from exc
         except Exception as exc:

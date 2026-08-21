@@ -124,9 +124,13 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
     try {
       final d = await ref.read(documentsRepositoryProvider)
           .getPayload(DocKind.sheets, widget.id);
+      final fresh = UniverSheet.fromWorkbook(d.payload);
       if (!mounted) return;
+      // Never let a garbled server payload replace a good sheet with a blank
+      // one — revalidation may only ever upgrade what's on screen.
+      if (!_usable(fresh)) return;
       setState(() {
-        _sheet = UniverSheet.fromWorkbook(d.payload);
+        _sheet = fresh;
         _baseUpdatedAt = d.updatedAt;
         _loading = false;
         _error = null;
@@ -166,37 +170,61 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
 
   // ── Load ─────────────────────────────────────────────────────────────────────
 
-  Future<void> _load() async {
-    final cache = ref.read(documentCacheDaoProvider);
-    CachedDoc? cached;
-    if (cache != null) {
-      // A cache read can THROW on a transient SQLite lock (the foreground app
-      // and the background sync isolate share one DB). If that exception
-      // escaped, `_load` would abort with `_loading` still true → the editor
-      // sits on the infinite shimmer skeleton forever (a black, stuck screen).
-      // Treat a cache miss/failure the same: fall through to the network path.
-      try {
-        cached = await cache.getDoc(DocKind.sheets.api, widget.id);
-      } catch (_) {
-        cached = null;
-      }
-      if (cached != null && mounted) {
-        // Show cached copy immediately; _baseUpdatedAt stays null until the
-        // network path below delivers the authoritative server value.
-        setState(() {
-          _sheet = UniverSheet.fromWorkbook(cached!.payload);
-          _loading = false;
-          _error = null;
-        });
-      }
+  /// A parsed workbook is only renderable when it actually has a worksheet.
+  ///
+  /// An empty/garbled payload parses into a workbook with NO sheets, which used
+  /// to paint as a blank, uneditable grid with `_error` cleared — the "opened a
+  /// document and it's just blank" report. Anything that fails this is treated
+  /// as if we had nothing at all.
+  static bool _usable(UniverSheet? sheet) =>
+      sheet != null && sheet.sheetNames.isNotEmpty;
+
+  /// Parse the on-device cached copy, or null when there is nothing usable.
+  ///
+  /// Two ways this yields null, both of which must fall through to the network:
+  /// the row carries no payload at all (metadata-only — what an import or a
+  /// snapshot-less `/changes` pull writes), or the read/parse throws (a
+  /// transient SQLite lock: the foreground app and the background sync share
+  /// one DB). The parse is INSIDE the try on purpose — `_load` runs from a
+  /// post-frame callback, so an escaping throw would leave `_loading` true and
+  /// strand the editor on the infinite shimmer skeleton.
+  Future<UniverSheet?> _readCache(DocumentCacheDao? cache) async {
+    if (cache == null) return null;
+    try {
+      final cached = await cache.getDoc(DocKind.sheets.api, widget.id);
+      if (cached == null || !cached.hasPayload) return null;
+      final sheet = UniverSheet.fromWorkbook(cached.payload);
+      return _usable(sheet) ? sheet : null;
+    } catch (_) {
+      return null;
     }
-    if (cached == null && mounted) setState(() { _loading = true; _error = null; });
+  }
+
+  Future<void> _load() async {
+    final cached = await _readCache(ref.read(documentCacheDaoProvider));
+    if (!mounted) return;
+    if (cached != null) {
+      // Paint the cached copy immediately; _baseUpdatedAt stays null until the
+      // network path below delivers the authoritative server value.
+      setState(() {
+        _sheet = cached;
+        _loading = false;
+        _error = null;
+      });
+    } else {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final d = await ref.read(documentsRepositoryProvider)
           .getPayload(DocKind.sheets, widget.id);
+      final fresh = UniverSheet.fromWorkbook(d.payload);
       if (!mounted) return;
+      if (!_usable(fresh)) throw StateError('sheet payload has no worksheet');
       setState(() {
-        _sheet = UniverSheet.fromWorkbook(d.payload);
+        _sheet = fresh;
         _baseUpdatedAt = d.updatedAt;
         _loading = false;
         _error = null;
@@ -204,10 +232,10 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen>
       await _cacheWorkbook(d.payload, d.name, updatedAt: d.updatedAt);
     } catch (_) {
       if (!mounted) return;
-      // The network read failed AND we have no cached copy to fall back on.
-      // ALWAYS clear `_loading` so the editor leaves the infinite skeleton and
-      // shows a retryable error instead of hanging on a black/stuck screen.
-      if (cached == null && _sheet == null) {
+      // The network read failed AND there is no usable copy on screen. ALWAYS
+      // clear `_loading` so the editor leaves the skeleton and shows a
+      // retryable error instead of hanging on a black/stuck screen.
+      if (!_usable(_sheet)) {
         setState(() {
           _error = 'Could not open this sheet. Pull to retry.';
           _loading = false;

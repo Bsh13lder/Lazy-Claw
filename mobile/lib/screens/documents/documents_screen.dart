@@ -16,8 +16,9 @@ import 'sheet_editor_screen.dart';
 ///
 /// Three sub-tabs (Sheets · Docs · PDF), each a [DocumentsListView]. A single
 /// kind-aware action creates a blank sheet/doc (name prompt) or imports a PDF
-/// (file picker). Online-only — no offline cache (the suite is decrypted
-/// server-side per request, like Chat + the power surfaces).
+/// (file picker). Offline-first: sheets/docs are created locally (a dirty cache
+/// row + an outbox `create`) and read through the on-device cache, while PDFs
+/// are import-only and fetched over the wire.
 class DocumentsScreen extends ConsumerStatefulWidget {
   const DocumentsScreen({super.key});
 
@@ -30,9 +31,17 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
 
   static const _kinds = [DocKind.sheets, DocKind.docs, DocKind.pdf];
 
-  void _open(DocMeta meta) {
+  /// Open [meta] in the editor for [kind].
+  ///
+  /// [kind] is REQUIRED rather than read off the mutable `_kind` field: create
+  /// and import both await a dialog or the OS file picker, and the user can
+  /// switch tabs while that is open. Reading `_kind` afterwards handed a sheet
+  /// id to the doc editor (or vice versa) — the wrong parser, hence an empty
+  /// document on a near-black screen. Passing the kind captured at the start of
+  /// the flow makes that mismatch impossible.
+  void _open(DocKind kind, DocMeta meta) {
     final Widget screen;
-    switch (_kind) {
+    switch (kind) {
       case DocKind.sheets:
         screen = SheetEditorScreen(id: meta.id, name: meta.name);
       case DocKind.docs:
@@ -44,10 +53,12 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
   }
 
   Future<void> _create() async {
-    if (_kind == DocKind.pdf) {
-      await _import(DocKind.pdf);
+    // Capture the kind ONCE, up front — everything below awaits.
+    final kind = _kind;
+    if (kind == DocKind.pdf) {
+      await _import(kind);
     } else {
-      await _createBlank(_kind);
+      await _createBlank(kind);
     }
   }
 
@@ -56,7 +67,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     if (name == null || !mounted) return;
     final meta =
         await ref.read(documentsListProvider(kind).notifier).createBlank(name);
-    if (meta != null && mounted) _open(meta);
+    if (meta != null && mounted) _open(kind, meta);
   }
 
   /// The upload extension for each kind's import.
@@ -83,16 +94,24 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     final meta =
         await ref.read(documentsListProvider(kind).notifier).import(File(path));
     if (meta != null && mounted) {
-      _open(meta);
+      _open(kind, meta);
     } else if (mounted) {
       _snack('Could not import that .${_importExt(kind)} file.', error: true);
     }
   }
 
-  Future<String?> _promptName(DocKind kind) {
+  Future<String?> _promptName(DocKind kind) async {
     final ctrl = TextEditingController(
       text: kind == DocKind.sheets ? 'Untitled sheet' : 'Untitled doc',
     );
+    try {
+      return await _showNameDialog(kind, ctrl);
+    } finally {
+      ctrl.dispose();
+    }
+  }
+
+  Future<String?> _showNameDialog(DocKind kind, TextEditingController ctrl) {
     return LzDialog.show<String>(
       context,
       title: 'New ${kind == DocKind.sheets ? "sheet" : "doc"}',
@@ -194,7 +213,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
                   DocumentsListView(
                     key: ValueKey(k),
                     kind: k,
-                    onOpen: _open,
+                    onOpen: (meta) => _open(k, meta),
                     onCreate: _create,
                   ),
               ],

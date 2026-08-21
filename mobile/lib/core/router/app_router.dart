@@ -220,6 +220,12 @@ final routerProvider = Provider<GoRouter>((ref) {
             ],
           ),
           StatefulShellBranch(
+            // The document editors push themselves with `Navigator.of(context)`,
+            // which resolves to THIS branch's navigator — not the root one. So
+            // the root `observers: [routeObserver]` above never sees them and
+            // their `didPopNext` (fresh-on-return-from-a-sub-screen) never
+            // fired. The branch needs its own registration.
+            observers: [routeObserver],
             routes: [
               GoRoute(
                 path: '/documents',

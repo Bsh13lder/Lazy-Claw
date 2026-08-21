@@ -93,19 +93,28 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen>
     // it isn't stale and the caller didn't force the network; otherwise fetch
     // and overwrite the cache with the new bytes + updated_at below.
     if (cache != null && !forceNetwork) {
-      final cached = await cache.getDoc(DocKind.pdf.api, _pdfId);
-      final cbytes = cached?.bytes;
-      if (cbytes != null &&
-          cbytes.isNotEmpty &&
-          !isServerNewer(cached?.updatedAt, serverUpdatedAt)) {
-        if (!mounted) return;
-        _renderBytes(cbytes);
-        _renderedUpdatedAt = cached?.updatedAt ?? serverUpdatedAt;
-        setState(() {
-          _loading = false;
-          _error = null;
-        });
-        return;
+      // The read AND the render both go inside the try: `_load` runs from a
+      // post-frame callback, so a SQLite lock or a corrupt cached blob throwing
+      // here would leave `_loading` true forever — the infinite shimmer, which
+      // on the dark theme reads as a black screen. Either failure degrades to
+      // the network path below.
+      try {
+        final cached = await cache.getDoc(DocKind.pdf.api, _pdfId);
+        final cbytes = cached?.bytes;
+        if (cbytes != null &&
+            cbytes.isNotEmpty &&
+            !isServerNewer(cached?.updatedAt, serverUpdatedAt)) {
+          await _renderBytes(cbytes);
+          if (!mounted) return;
+          _renderedUpdatedAt = cached?.updatedAt ?? serverUpdatedAt;
+          setState(() {
+            _loading = false;
+            _error = null;
+          });
+          return;
+        }
+      } catch (_) {
+        // Cache miss / unreadable cached bytes — refetch from the server.
       }
     }
     setState(() {
@@ -115,8 +124,8 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen>
     try {
       final repo = ref.read(documentsRepositoryProvider);
       final bytes = await repo.getPdfBytes(_pdfId);
+      await _renderBytes(bytes);
       if (!mounted) return;
-      _renderBytes(bytes);
       _renderedUpdatedAt = serverUpdatedAt ?? _renderedUpdatedAt;
       setState(() => _loading = false);
       try {
@@ -141,12 +150,24 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen>
     }
   }
 
-  void _renderBytes(List<int> bytes) {
-    final doc = PdfDocument.openData(Uint8List.fromList(bytes));
+  /// Open [bytes] with pdfium and hand the document to the view controller.
+  ///
+  /// AWAITS the open rather than passing the pending future straight to the
+  /// controller: a blob pdfium can't parse (a truncated download, an HTML error
+  /// page, a server-side generate that produced garbage) used to reject inside
+  /// the controller where nothing observed it, leaving `PdfViewPinch` painting
+  /// nothing over the near-black background — a silent black screen. Now the
+  /// failure propagates to `_load`'s catch and becomes a real message.
+  Future<void> _renderBytes(List<int> bytes) async {
+    final doc = await PdfDocument.openData(Uint8List.fromList(bytes));
+    if (!mounted) {
+      await doc.close();
+      return;
+    }
     if (_controller == null) {
-      _controller = PdfControllerPinch(document: doc);
+      _controller = PdfControllerPinch(document: Future<PdfDocument>.value(doc));
     } else {
-      _controller!.loadDocument(doc);
+      _controller!.loadDocument(Future<PdfDocument>.value(doc));
     }
   }
 

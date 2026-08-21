@@ -280,7 +280,15 @@ class SheetEditorBody extends StatelessWidget {
     if (loading) return LzSkeleton.list(count: 5);
     if (error != null) return LzErrorState(message: error!, onRetry: onRetry);
     final s = sheet;
-    if (s == null) return const SizedBox.shrink();
+    // No sheet, not loading, no error — previously `SizedBox.shrink()`, i.e. a
+    // featureless near-black screen with no message and no way out. Always give
+    // the user something to act on.
+    if (s == null) {
+      return LzErrorState(
+        message: 'Could not open this sheet. Pull to retry.',
+        onRetry: onRetry,
+      );
+    }
     return Column(
       children: [
         if (conflict != null)

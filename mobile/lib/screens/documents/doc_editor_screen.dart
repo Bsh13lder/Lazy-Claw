@@ -84,10 +84,13 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     try {
       final repo = ref.read(documentsRepositoryProvider);
       final detail = await repo.getPayload(DocKind.docs, widget.id);
+      // Parse before mutating state — a throw here must leave the document the
+      // user is looking at exactly as it was.
+      final delta = deltaFromUniver(detail.payload);
       if (!mounted) return;
       _basePayload = detail.payload;
       _baseUpdatedAt = detail.updatedAt;
-      _installController(deltaFromUniver(detail.payload));
+      _installController(delta);
       setState(() { _loading = false; _error = null; });
       await _cachePayload(detail.payload, detail.name);
     } catch (_) {
@@ -95,30 +98,44 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     }
   }
 
-  Future<void> _load() async {
-    final cache = ref.read(documentCacheDaoProvider);
-    // 1. Paint the cached copy instantly (no spinner) if we have one.
-    CachedDoc? cached;
-    if (cache != null) {
-      // A cache read can THROW on a transient SQLite lock (foreground app +
-      // background sync share one DB). An escaped exception would abort `_load`
-      // with `_loading` still true → the editor sits on the infinite shimmer
-      // skeleton forever (a black, stuck screen). Degrade to the network path.
-      try {
-        cached = await cache.getDoc(DocKind.docs.api, widget.id);
-      } catch (_) {
-        cached = null;
-      }
-      if (cached != null && mounted) {
-        _basePayload = cached.payload;
-        _installController(deltaFromUniver(cached.payload));
-        setState(() {
-          _loading = false;
-          _error = null;
-        });
-      }
+  /// Read + parse the on-device cached copy, or null when there is nothing
+  /// usable. Returns the payload paired with its Quill delta so the caller
+  /// installs both together or neither.
+  ///
+  /// Null on three counts, all of which must fall through to the network: no
+  /// cached row; a row carrying no payload (metadata-only — what an import or a
+  /// snapshot-less `/changes` pull writes, which decodes to `{}` and would
+  /// otherwise paint as a valid empty document); or a read/parse that throws (a
+  /// transient SQLite lock — the foreground app and the background sync share
+  /// one DB). The parse is INSIDE the try on purpose: `_load` runs from a
+  /// post-frame callback, so an escaping throw would leave `_loading` true and
+  /// strand the editor on the infinite shimmer skeleton.
+  Future<({Map<String, dynamic> payload, Delta delta})?> _readCache(
+    DocumentCacheDao? cache,
+  ) async {
+    if (cache == null) return null;
+    try {
+      final cached = await cache.getDoc(DocKind.docs.api, widget.id);
+      if (cached == null || !cached.hasPayload) return null;
+      final payload = cached.payload;
+      return (payload: payload, delta: deltaFromUniver(payload));
+    } catch (_) {
+      return null;
     }
-    if (cached == null && mounted) {
+  }
+
+  Future<void> _load() async {
+    // 1. Paint the cached copy instantly (no spinner) if we have a usable one.
+    final cached = await _readCache(ref.read(documentCacheDaoProvider));
+    if (!mounted) return;
+    if (cached != null) {
+      _basePayload = cached.payload;
+      _installController(cached.delta);
+      setState(() {
+        _loading = false;
+        _error = null;
+      });
+    } else {
       setState(() {
         _loading = true;
         _error = null;
@@ -128,10 +145,15 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     try {
       final repo = ref.read(documentsRepositoryProvider);
       final detail = await repo.getPayload(DocKind.docs, widget.id);
+      // Build the delta BEFORE touching any state, so a parse failure lands in
+      // the catch below with `_basePayload` untouched — assigning it first made
+      // the catch's `_basePayload.isEmpty` guard permanently false, which is how
+      // a throw here used to leave the editor stuck on the skeleton.
+      final delta = deltaFromUniver(detail.payload);
       if (!mounted) return;
       _basePayload = detail.payload;
       _baseUpdatedAt = detail.updatedAt;
-      _installController(deltaFromUniver(detail.payload));
+      _installController(delta);
       setState(() {
         _loading = false;
         _error = null;
@@ -141,9 +163,8 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
       if (!mounted) return;
       // Keep showing the cached copy when offline; only error on a cold miss.
       // ALWAYS clear `_loading` here so a network failure can never strand the
-      // editor on the infinite skeleton. `_basePayload` stays empty until a
-      // cache hit or the network read installs content.
-      if (cached == null && _basePayload.isEmpty) {
+      // editor on the infinite skeleton.
+      if (_controller == null) {
         setState(() {
           _error = 'Could not open this document. Pull to retry.';
           _loading = false;
@@ -387,7 +408,14 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     if (_loading) return LzSkeleton.list(count: 5);
     if (_error != null) return LzErrorState(message: _error!, onRetry: _load);
     final controller = _controller;
-    if (controller == null) return const SizedBox.shrink();
+    // No controller, not loading, no error — previously `SizedBox.shrink()`,
+    // i.e. a featureless near-black screen with no message and no way out.
+    if (controller == null) {
+      return LzErrorState(
+        message: 'Could not open this document. Pull to retry.',
+        onRetry: _load,
+      );
+    }
     return Column(
       children: [
         // ── Conflict banner ──────────────────────────────────────────────────

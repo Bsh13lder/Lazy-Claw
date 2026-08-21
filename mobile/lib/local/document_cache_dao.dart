@@ -67,6 +67,16 @@ class CachedDoc {
   final String? baseUpdatedAt;
   final String? lastSyncedAt;
 
+  /// Whether this row actually carries a snapshot.
+  ///
+  /// A row can exist with `payload = NULL` — that is what an import writes, and
+  /// what a `/changes` pull writes for a metadata-only delta (always, for PDFs).
+  /// [payload] maps that to `const {}`, which parses into a document with no
+  /// content, so callers that paint the cached copy MUST check this first and
+  /// treat a payload-less row as a cache MISS. Rendering `{}` as if it were a
+  /// real document is what stranded editors on a silently blank screen.
+  bool get hasPayload => payloadJson != null && payloadJson!.isNotEmpty;
+
   /// Decoded Univer snapshot (sheets/docs). Empty map when not a payload doc or
   /// the stored JSON is malformed.
   Map<String, dynamic> get payload {

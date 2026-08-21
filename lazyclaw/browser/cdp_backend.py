@@ -1341,7 +1341,7 @@ class CDPBackend:
             for t in chrome_tabs
         ]
 
-    async def switch_tab(self, tab_id: str, *, focus: bool = True) -> None:
+    async def switch_tab(self, tab_id: str, *, focus: bool = False) -> None:
         chrome_tabs = await list_chrome_tabs(self._port, host=self._tab_list_host())
         target = next((t for t in chrome_tabs if t.id == tab_id), None)
         if not target:
@@ -1820,14 +1820,16 @@ class CDPBackend:
     # ------------------------------------------------------------------
 
     async def new_tab(
-        self, url: str = "about:blank", *, background: bool = False
+        self, url: str = "about:blank", *, background: bool = True
     ) -> str:
         """Create a new browser tab via CDP Target domain. Returns targetId.
 
-        ``background=True`` sets Chromium's ``Target.createTarget`` background
-        flag so the new tab opens WITHOUT being brought to the foreground —
-        passive watchers use this for their dedicated parked tab so it never
-        steals the user's visible screen ("jumping on screen").
+        ``background=True`` (the DEFAULT — automation must never steal the
+        user's visible screen, 2026-08-21 policy) sets Chromium's
+        ``Target.createTarget`` background flag so the new tab opens
+        WITHOUT being brought to the foreground. Foregrounding is opt-in
+        (``background=False``) for user-facing flows only — today that is
+        just the OAuth login tab the user must interact with.
         """
         conn = await self._ensure_connected()
         params: dict = {"url": url}

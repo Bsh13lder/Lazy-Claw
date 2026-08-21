@@ -552,7 +552,7 @@ class BrowserUseBackend:
             ))
         return out
 
-    async def switch_tab(self, tab_id: str, *, focus: bool = True) -> None:
+    async def switch_tab(self, tab_id: str, *, focus: bool = False) -> None:
         async with self._connect_lock:
             if self._client is None or self._client.ws is None:
                 await self._connect()
@@ -567,7 +567,7 @@ class BrowserUseBackend:
         self._emit("action", action="switch_tab", target=tab_id)
 
     async def new_tab(
-        self, url: str = "about:blank", *, background: bool = False
+        self, url: str = "about:blank", *, background: bool = True
     ) -> str:
         async with self._connect_lock:
             if self._client is None or self._client.ws is None:

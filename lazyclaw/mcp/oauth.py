@@ -216,7 +216,9 @@ async def _open_browser_tab(
             )
 
     backend = CDPBackend(port=port, profile_dir=profile_dir)
-    target_id = await backend.new_tab(url)
+    # The ONE legitimate foreground tab: the user must see and interact
+    # with the OAuth consent page (automation otherwise never foregrounds).
+    target_id = await backend.new_tab(url, background=False)
     logger.info("OAuth: opened browser tab to %s", urlparse(url).netloc)
     return backend, target_id
 

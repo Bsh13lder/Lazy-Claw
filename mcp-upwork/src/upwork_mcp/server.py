@@ -56,12 +56,39 @@ mcp = FastMCP(
 )
 
 
+# ── Whole-tool serialization ─────────────────────────────────────────
+# 2026-08-20 22:00 incident: `search_jobs` (gig pipeline) and
+# `get_messages` (message-watch cron) ran concurrently on the ONE shared
+# Brave tab. `_NAV_LOCK` in browser/client.py serializes only the
+# navigation inside `safe_goto` — the scrape after it runs unlocked, so
+# the search re-navigated the tab mid-extract and get_messages scraped
+# the job-SEARCH page. This lock makes each tool call's whole
+# navigate+settle+scrape span atomic. Tools never call each other, so it
+# cannot deadlock; Upwork's CDN dominates wall time, so serialization
+# costs nothing real. EVERY `@mcp.tool()` below must be immediately
+# followed by `@serialized` (CI-gated in test_tool_serialization.py).
+_TOOL_LOCK = asyncio.Lock()
+
+
+def serialized(fn):
+    """Run the decorated tool body under the module-wide tool lock."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        async with _TOOL_LOCK:
+            return await fn(*args, **kwargs)
+
+    return wrapper
+
+
 # ============================================================================
 # Job Tools
 # ============================================================================
 
 
 @mcp.tool()
+@serialized
 async def upwork_search_jobs(
     query: Annotated[
         str,
@@ -148,6 +175,7 @@ async def upwork_search_jobs(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_job_details(
     job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")]
 ) -> dict:
@@ -166,6 +194,7 @@ async def upwork_get_job_details(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_my_profile() -> dict:
     """Get your Upwork freelancer profile information.
 
@@ -176,6 +205,7 @@ async def upwork_get_my_profile() -> dict:
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_connects_balance() -> dict:
     """Get current Upwork Connects balance.
 
@@ -185,6 +215,7 @@ async def upwork_get_connects_balance() -> dict:
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_profile_stats() -> dict:
     """Get profile statistics including earnings and work history.
 
@@ -199,6 +230,7 @@ async def upwork_get_profile_stats() -> dict:
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_proposals(
     status: Annotated[
         str, Field(description="Filter by status: active, submitted, archived, or all")
@@ -219,6 +251,7 @@ async def upwork_get_proposals(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_proposal_details(
     proposal_url: Annotated[str, Field(description="URL to the proposal")]
 ) -> dict:
@@ -230,6 +263,7 @@ async def upwork_get_proposal_details(
 
 
 @mcp.tool()
+@serialized
 async def upwork_submit_proposal(
     job_url: Annotated[str, Field(description="Full Upwork job URL")],
     cover_letter: Annotated[str, Field(description="Cover letter content")],
@@ -287,6 +321,7 @@ async def upwork_submit_proposal(
 
 
 @mcp.tool()
+@serialized
 async def upwork_withdraw_proposal(
     proposal_url: Annotated[str, Field(description="URL to the proposal to withdraw, e.g. https://www.upwork.com/nx/proposals/<id>")],
     reason: Annotated[
@@ -314,6 +349,7 @@ async def upwork_withdraw_proposal(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_messages(
     room_id: Annotated[str | None, Field(description="Specific chat room ID or URL")] = None,
     unread_only: Annotated[bool, Field(description="Only show unread messages")] = False,
@@ -335,6 +371,7 @@ async def upwork_get_messages(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_conversation(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     limit: Annotated[
@@ -366,6 +403,7 @@ async def upwork_get_conversation(
 
 
 @mcp.tool()
+@serialized
 async def upwork_send_message(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     message: Annotated[str, Field(description="Message content to send")],
@@ -396,6 +434,7 @@ async def upwork_send_message(
 
 
 @mcp.tool()
+@serialized
 async def upwork_edit_message(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     message_index: Annotated[
@@ -444,6 +483,7 @@ async def upwork_edit_message(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_unread_count() -> dict:
     """Get count of unread messages.
 
@@ -458,6 +498,7 @@ async def upwork_get_unread_count() -> dict:
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_contracts(
     status: Annotated[str, Field(description="Filter by status: active, ended, or all")] = "active",
     limit: Annotated[
@@ -478,6 +519,7 @@ async def upwork_get_contracts(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_contract_details(
     contract_url: Annotated[str, Field(description="URL to the contract")]
 ) -> dict:
@@ -489,6 +531,7 @@ async def upwork_get_contract_details(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_work_diary(
     contract_url: Annotated[str, Field(description="URL to the contract")],
     week_offset: Annotated[int, Field(description="0 for current week, 1 for last week, etc.")] = 0,
@@ -511,6 +554,7 @@ async def upwork_get_work_diary(
 
 
 @mcp.tool()
+@serialized
 async def upwork_get_offers(
     status: Annotated[
         str,
@@ -544,6 +588,7 @@ async def upwork_get_offers(
 
 
 @mcp.tool()
+@serialized
 async def upwork_accept_offer(
     offer_url: Annotated[
         str,
@@ -586,6 +631,7 @@ async def upwork_accept_offer(
 
 
 @mcp.tool()
+@serialized
 async def upwork_decline_offer(
     offer_url: Annotated[
         str, Field(description="Full Upwork offer URL (from upwork_get_offers)."),
@@ -631,6 +677,7 @@ async def upwork_decline_offer(
 
 
 @mcp.tool()
+@serialized
 async def upwork_submit_milestone(
     contract_url: Annotated[
         str,
@@ -715,6 +762,7 @@ async def upwork_submit_milestone(
 
 
 @mcp.tool()
+@serialized
 async def upwork_check_session() -> dict:
     """Check if the current Upwork session is valid.
 
@@ -733,6 +781,7 @@ async def upwork_check_session() -> dict:
 
 
 @mcp.tool()
+@serialized
 async def upwork_close_session() -> dict:
     """Close browser session and cleanup resources.
 

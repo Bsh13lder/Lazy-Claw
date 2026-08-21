@@ -14,6 +14,12 @@ hardening wave"; commits 4237726..9d74e03 + SDK retry on main):
 - [x] Mobile v1.33.6→1.33.9: WS rewire on gateway change, zombie-spinner sweep, scrollable tables
 - [x] SOUL.md: 17-type routing table, MCP ownership, weather=inline web_search
 
+## Learning loop — remaining follow-ups (2026-08-21 audit; hot-path/pollution fixes SHIPPED 15ac8f2)
+- [ ] Telegram template "✅ Accept" button is a no-op: sets active_templates flag nothing executes — wire actual template execution or remove the button (watcher.py:136 promise broken)
+- [ ] Lesson-influence telemetry: nothing measures whether an injected exemplar ever changes a tool call — add a counter (exemplar injected → same-args call within turn) before investing further in recall quality
+- [ ] Dead code sweep: teams/executor.py (zero callers), path_compiler replay fns, recall_known_bad_shapes half — delete or wire
+- [ ] site_memory unwritten types (login_flow/navigation/form_map/...) — either build the writers (the stated login/CF purpose) or trim MEMORY_TYPES
+
 ## Specialist routing dead-ends — cross-roster gap backlog (2026-08-19)
 Fallout of the mcp-whatsapp restart incident (fixed same day: `_wants_mcp_mgmt`
 specialist-first exemption, system_specialist restart trio, compiled

@@ -236,6 +236,19 @@ def as_grid(snap: dict[str, Any], sheet: int | str = 0) -> list[list[Any]]:
 
 # ───────────────────────── cell write (immutable) ───────────────────
 
+#: ``ICellData`` keys that describe the cell's CONTENT and are therefore
+#: replaced wholesale by a value/formula write. Everything else on the cell —
+#: ``s`` (style id or inline style) and ``custom`` (plugin/user data) — is
+#: presentation or metadata and survives.
+#:
+#: ``p`` and ``t`` are dropped deliberately rather than preserved: Univer
+#: renders ``p`` (rich text) INSTEAD of ``v``, so keeping a stale ``p`` would
+#: make the new value invisible; and a stale ``t`` (``CellValueType``) would
+#: mislabel it — dropping it lets Univer re-infer. ``si``/``ref``/``xf``
+#: describe the shared/array formula being replaced.
+_VALUE_SHAPED_KEYS = ("v", "f", "t", "p", "si", "ref", "xf")
+
+
 def _apply_cell(
     sheet_obj: dict[str, Any],
     row: int,
@@ -258,7 +271,14 @@ def _apply_cell(
                 cell_data.pop(r_key)
         return
 
-    cell: dict[str, Any] = {}
+    # Start from the PREVIOUS cell so its formatting survives the write, then
+    # strip the value-shaped keys. Rebuilding from ``{}`` here used to wipe the
+    # style a user had applied in the web editor on every agent edit.
+    prev = (cell_data.get(r_key) or {}).get(c_key) or {}
+    cell: dict[str, Any] = copy.deepcopy(prev)
+    for stale in _VALUE_SHAPED_KEYS:
+        cell.pop(stale, None)
+
     if formula is not None:
         f = formula if formula.startswith("=") else f"={formula}"
         cell["f"] = f

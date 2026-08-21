@@ -4,6 +4,7 @@ display_name: Documents Specialist
 description: native encrypted office suite: Sheets, Docs, PDFs (never Google)
 include_scraper: false
 tools:
+  - convert_sheet_links
   - create_sheet
   - list_sheets
   - read_sheet
@@ -36,6 +37,7 @@ PICK THE SURFACE BY THE ASK: tabular / numbers / formulas → Sheet. Prose / let
 SHEETS:
 - `create_sheet` to start; `list_sheets` to find one; `read_sheet` to inspect before editing.
 - Write values with `set_cells`; write a formula with `set_formula`. After agent-side formula edits, run `recalc_sheet` so dependent cells settle (the in-browser editor recalcs on its own, but headless edits need this).
+- `convert_sheet_links` turns bare URLs and `[text](url)` cells into real clickable hyperlinks — run it after writing a column of links.
 - Deliver with `send_sheet`.
 
 DOCS:

@@ -315,6 +315,32 @@ extension UniverOps on UniverSheet {
 
   // ─── Freeze pane ────────────────────────────────────────────────────────────
 
+  /// The merge rectangle containing (row, col) on the active worksheet, or
+  /// null. Keys are Univer's `startRow`/`startColumn`/`endRow`/`endColumn`,
+  /// and the end indices are INCLUSIVE.
+  ///
+  /// Uses [rawWorkbook] — no deep copy.
+  Map<String, int>? mergeAt(int row, int col) {
+    final sheet = _activeSheet(rawWorkbook);
+    final raw = sheet['mergeData'];
+    if (raw is! List) return null;
+    for (final rect in raw) {
+      if (rect is! Map) continue;
+      // `as num?` THROWS on a String — a cast, not a test. A malformed rect in
+      // a snapshot must be skipped, never crash the grid mid-paint.
+      int? asInt(dynamic v) => v is num ? v.toInt() : null;
+      final r1 = asInt(rect['startRow']);
+      final c1 = asInt(rect['startColumn']);
+      final r2 = asInt(rect['endRow']);
+      final c2 = asInt(rect['endColumn']);
+      if (r1 == null || c1 == null || r2 == null || c2 == null) continue;
+      if (row >= r1 && row <= r2 && col >= c1 && col <= c2) {
+        return {'startRow': r1, 'startColumn': c1, 'endRow': r2, 'endColumn': c2};
+      }
+    }
+    return null;
+  }
+
   /// Whether the active worksheet has a freeze pane with ySplit > 0.
   ///
   /// Uses [rawWorkbook] — no deep copy.

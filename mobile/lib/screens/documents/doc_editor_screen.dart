@@ -404,6 +404,46 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
     );
   }
 
+  /// Token-driven overrides for flutter_quill's default text styles.
+  ///
+  /// Only the pieces whose colour or weight would otherwise come from Material
+  /// rather than [AppText]/[AppColors]: body text, the three heading levels,
+  /// links, and the placeholder.
+  DefaultStyles _quillStyles() {
+    DefaultTextBlockStyle block(TextStyle style, {double top = 8, double bottom = 0}) =>
+        DefaultTextBlockStyle(
+          style,
+          HorizontalSpacing.zero,
+          VerticalSpacing(top, bottom),
+          const VerticalSpacing(0, 0),
+          null,
+        );
+
+    return DefaultStyles(
+      paragraph: block(AppText.body.copyWith(color: AppColors.textPrimary)),
+      h1: block(
+        AppText.headline.copyWith(color: AppColors.textPrimary),
+        top: AppSpacing.lg,
+      ),
+      h2: block(
+        AppText.titleL.copyWith(color: AppColors.textPrimary),
+        top: AppSpacing.md,
+      ),
+      h3: block(
+        AppText.title.copyWith(color: AppColors.textPrimary),
+        top: AppSpacing.md,
+      ),
+      placeHolder: block(
+        AppText.body.copyWith(color: AppColors.textMuted),
+      ),
+      link: AppText.body.copyWith(
+        color: AppColors.accent,
+        decoration: TextDecoration.underline,
+        decorationColor: AppColors.accent,
+      ),
+    );
+  }
+
   Widget _buildBody() {
     if (_loading) return LzSkeleton.list(count: 5);
     if (_error != null) return LzErrorState(message: _error!, onRetry: _load);
@@ -452,8 +492,14 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen>
             child: QuillEditor.basic(
               controller: controller,
               focusNode: _editorFocus,
-              config: const QuillEditorConfig(
-                placeholder: 'Start writing… use the toolbar for headings & lists',
+              config: QuillEditorConfig(
+                placeholder:
+                    'Start writing… use the toolbar for headings & lists',
+                // flutter_quill's DefaultStyles are derived from the ambient
+                // Material theme, NOT from our token kit — so headings and
+                // links came out in Material's own colours on a #171717 page.
+                // Every screen consumes only the kit; this editor has to too.
+                customStyles: _quillStyles(),
               ),
             ),
           ),

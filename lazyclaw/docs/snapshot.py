@@ -400,9 +400,13 @@ def append_paragraph_with_runs(
 #   list    → bullet : {listType: PresetListType string, listId, nestingLevel}
 #             — i-document-data.d.ts:482-485 (BULLET_LIST / ORDER_LIST)
 #   run     → textRuns[].ts : IStyleBase {bl:1, it:1, ul:{s:1}} — i-style-data.d.ts:168
+#   align   → paragraphStyle.horizontalAlign : HorizontalAlign — the SAME enum
+#             the sheet cell styles use (LEFT=1, CENTER=2, RIGHT=3, JUSTIFY=4)
 _HEADING_NAMED_STYLE = {1: 4, 2: 5, 3: 6}
 _NAMED_STYLE_HEADING = {4: 1, 5: 2, 6: 3}
 _LIST_TYPE = {"bullet": "BULLET_LIST", "number": "ORDER_LIST"}
+_ALIGNMENT = {"left": 1, "center": 2, "centre": 2, "right": 3, "justify": 4}
+_ALIGNMENT_NAME = {1: "left", 2: "center", 3: "right", 4: "justify"}
 
 
 def _run_style(run: dict[str, Any]) -> dict[str, Any]:
@@ -505,6 +509,16 @@ def build_body_with_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:
             }
         else:
             prev_list_kind = None
+
+        # Paragraph alignment rides in the SAME `paragraphStyle` object a
+        # heading uses, so it must be merged in rather than assigned — writing
+        # it as a fresh dict would drop the heading's namedStyleType and demote
+        # every centred heading to body text.
+        align = _ALIGNMENT.get(str(block.get("align") or "").lower())
+        if align is not None:
+            style = meta.setdefault("paragraphStyle", {})
+            style["horizontalAlign"] = align
+
         para_meta.append(meta)
         cursor += 1
 
@@ -557,6 +571,44 @@ def _block_type_from_meta(meta: Any) -> tuple[str, int]:
         if named in _NAMED_STYLE_HEADING:
             return "heading", _NAMED_STYLE_HEADING[named]
     return "paragraph", 0
+
+
+def _alignment_from_meta(meta: Any) -> str | None:
+    """A paragraph's alignment name, or ``None`` when it uses the default."""
+    if not isinstance(meta, dict):
+        return None
+    ps = meta.get("paragraphStyle")
+    if not isinstance(ps, dict):
+        return None
+    align = ps.get("horizontalAlign")
+    return _ALIGNMENT_NAME.get(align) if isinstance(align, int) else None
+
+
+def replace_block(
+    snap: dict[str, Any], index: int, block: dict[str, Any]
+) -> dict[str, Any]:
+    """Return a NEW snapshot with block ``index`` swapped for ``block``.
+
+    The targeted mid-document edit. Without it the only ways to change a
+    document were "append at the end" and "replace the whole body", so
+    "make the third paragraph bold" meant rewriting everything — and any
+    formatting the model didn't bother to re-emit was silently lost.
+
+    Raises ``IndexError`` for an out-of-range index so a bad plan fails loudly
+    instead of appending in the wrong place.
+    """
+    blocks = get_blocks(snap)
+    if not blocks:
+        raise IndexError("document has no blocks to edit")
+    if index < 0 or index >= len(blocks):
+        raise IndexError(
+            f"block {index} is out of range (document has {len(blocks)})"
+        )
+    updated = list(blocks)
+    updated[index] = block
+    out = copy.deepcopy(snap)
+    out["body"] = build_body_with_blocks(updated)
+    return out
 
 
 def get_blocks(snap: dict[str, Any]) -> list[dict[str, Any]]:
@@ -630,7 +682,13 @@ def get_blocks(snap: dict[str, Any]) -> list[dict[str, Any]]:
 
         meta = paras_meta[p_idx] if p_idx < len(paras_meta) else {}
         btype, level = _block_type_from_meta(meta)
-        blocks.append({"type": btype, "level": level, "runs": runs or [{"text": ""}]})
+        block: dict[str, Any] = {
+            "type": btype, "level": level, "runs": runs or [{"text": ""}],
+        }
+        align = _alignment_from_meta(meta)
+        if align:
+            block["align"] = align
+        blocks.append(block)
     return blocks
 
 

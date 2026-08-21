@@ -90,3 +90,88 @@ async def test_apply_rejects_empty_plan(cfg):
     ctx = await ai_edit.load(cfg, "u1", did)
     with pytest.raises(ValueError):
         await ai_edit.apply(cfg, "u1", did, ctx, {"paragraphs": []})
+
+
+# ───────────── targeted edit + alignment (2026-08-21) ────────────────
+
+
+async def test_edit_mode_replaces_one_block_and_leaves_the_rest(cfg):
+    """"Make the third paragraph bold" without rewriting the document."""
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    body = D.build_body_with_blocks([
+        {"type": "heading", "level": 1, "runs": [{"text": "Title"}]},
+        {"type": "paragraph", "level": 0, "runs": [{"text": "first"}]},
+        {"type": "paragraph", "level": 0, "runs": [{"text": "second"}]},
+    ])
+    ctx = {**ctx, "payload": {**ctx["payload"], "body": body}}
+
+    out = await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+        "mode": "edit",
+        "index": 2,
+        "blocks": [{"type": "paragraph", "text": "**rewritten**"}],
+    })
+
+    blocks = D.get_blocks(out["snapshot"])
+    assert len(blocks) == 3, "editing one block must not add or drop blocks"
+    assert blocks[0]["type"] == "heading", "the heading survived untouched"
+    assert blocks[1]["runs"][0]["text"] == "first"
+    assert blocks[2]["runs"][0]["text"] == "rewritten"
+    assert blocks[2]["runs"][0].get("bold") is True
+
+
+async def test_edit_mode_rejects_an_out_of_range_index(cfg):
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    with pytest.raises(IndexError):
+        await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+            "mode": "edit", "index": 99,
+            "blocks": [{"type": "paragraph", "text": "x"}],
+        })
+
+
+async def test_edit_mode_without_an_index_is_a_clear_error(cfg):
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    with pytest.raises(ValueError, match="index"):
+        await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+            "mode": "edit", "blocks": [{"type": "paragraph", "text": "x"}],
+        })
+
+
+async def test_alignment_round_trips_through_the_snapshot(cfg):
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    out = await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+        "blocks": [
+            {"type": "heading", "level": 1, "text": "Centred", "align": "center"},
+            {"type": "paragraph", "text": "Right", "align": "right"},
+            {"type": "paragraph", "text": "Default"},
+        ],
+    })
+    blocks = D.get_blocks(out["snapshot"])
+    assert blocks[0]["align"] == "center"
+    assert blocks[1]["align"] == "right"
+    assert "align" not in blocks[2]
+
+
+async def test_alignment_does_not_clobber_a_headings_level(cfg):
+    """Both ride in `paragraphStyle` — assigning instead of merging would
+    demote every centred heading to body text."""
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    out = await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+        "blocks": [{"type": "heading", "level": 2, "text": "T", "align": "center"}],
+    })
+    block = D.get_blocks(out["snapshot"])[0]
+    assert block["type"] == "heading" and block["level"] == 2
+    assert block["align"] == "center"
+
+
+async def test_a_bogus_alignment_is_ignored_not_fatal(cfg):
+    row = await create_doc(cfg, "u1", "Notes")
+    ctx = await ai_edit.load(cfg, "u1", row["id"])
+    out = await ai_edit.apply(cfg, "u1", row["id"], ctx, {
+        "blocks": [{"type": "paragraph", "text": "x", "align": "diagonal"}],
+    })
+    assert "align" not in D.get_blocks(out["snapshot"])[0]

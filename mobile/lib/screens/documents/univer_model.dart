@@ -255,31 +255,53 @@ extension UniverSheetModel on UniverSheet {
   ///
   /// The cell's `s` field is either a string id (look up in workbook `styles`
   /// registry) or an inline map. Returns an empty map for missing/unknown.
+  /// Dereference a Univer `s` field: an inline style map, or a string id into
+  /// the workbook `styles` registry. Empty map when absent or unresolvable.
+  Map<String, dynamic> _deref(Map<String, dynamic> wb, dynamic s) {
+    if (s == null) return const <String, dynamic>{};
+    if (s is Map) return _sm(s);
+    final registered = _sm(wb['styles'])[s.toString()];
+    if (registered == null) return const <String, dynamic>{};
+    return _sm(registered);
+  }
+
   Map<String, dynamic> _rawStyleDict(Map<String, dynamic> wb, int row, int col) {
     final sheet = _activeSheet(wb);
     final cellData = _sm(sheet['cellData']);
     final cell = _sm(_sm(cellData[row.toString()])[col.toString()]);
-    final s = cell['s'];
-    if (s == null) return <String, dynamic>{};
-    if (s is Map) {
-      return _sm(s);
-    }
-    // String id → registry lookup
-    final styles = _sm(wb['styles']);
-    final registered = styles[s.toString()];
-    if (registered == null) return <String, dynamic>{};
-    return _sm(registered);
+    return _deref(wb, cell['s']);
   }
 
-  /// Resolve style view for cell (row, col).
+  /// Resolve style view for cell (row, col), following Univer's CASCADE.
+  ///
+  /// Precedence, most specific first: the cell's own `s` → its row's
+  /// `rowData[r].s` → its column's `columnData[c].s` → the worksheet's
+  /// `defaultStyle` → the workbook's `defaultStyle`.
+  ///
+  /// Reading only the cell level (which is all this used to do) meant a sheet
+  /// formatted BY COLUMN — the natural way to format a table, and what the web
+  /// editor's toolbar produces when you select a column header — rendered
+  /// completely unstyled on the phone.
   ///
   /// Uses [rawWorkbook] — no deep copy. Callers must not mutate the returned
   /// [CellStyleView] (it is already an immutable value type).
   CellStyleView resolveStyle(int row, int col) {
     final wb = rawWorkbook;
-    final d = _rawStyleDict(wb, row, col);
-    if (d.isEmpty) return CellStyleView.empty;
-    return _viewFromDict(d);
+    final sheet = _activeSheet(wb);
+
+    // Least specific first, so each later layer overwrites the earlier one.
+    final merged = <String, dynamic>{};
+    for (final layer in [
+      _deref(wb, wb['defaultStyle']),
+      _deref(wb, sheet['defaultStyle']),
+      _deref(wb, _sm(_sm(sheet['columnData'])[col.toString()])['s']),
+      _deref(wb, _sm(_sm(sheet['rowData'])[row.toString()])['s']),
+      _rawStyleDict(wb, row, col),
+    ]) {
+      if (layer.isNotEmpty) merged.addAll(layer);
+    }
+    if (merged.isEmpty) return CellStyleView.empty;
+    return _viewFromDict(merged);
   }
 
   /// Apply a style [patch] (Univer style dict fragment) to every cell in

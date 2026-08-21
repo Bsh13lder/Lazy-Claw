@@ -33,7 +33,11 @@ import 'package:flutter/material.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import 'sheet_link_ui.dart'
-    show kDefaultColW, resolveCurrentColWidth, resolveCurrentRowHeight;
+    show
+        autoFitColWidth,
+        kDefaultColW,
+        resolveCurrentColWidth,
+        resolveCurrentRowHeight;
 import 'sheet_selection.dart';
 import 'univer_links.dart';
 import 'univer_model.dart';
@@ -104,6 +108,15 @@ class SheetEditorGrid extends StatefulWidget {
 }
 
 class _SheetEditorGridState extends State<SheetEditorGrid> {
+  @override
+  void didUpdateWidget(SheetEditorGrid old) {
+    super.didUpdateWidget(old);
+    // Content-derived column widths are memoised per sheet identity. Every
+    // mutator returns a NEW UniverSheet, so an identity change means the cells
+    // changed and the measurements are stale.
+    if (!identical(old.sheet, widget.sheet)) _measuredW.clear();
+  }
+
   static const double _gutterW = 44;
   static const double _minColW = 56;
   static const double _maxColW = 320;
@@ -160,6 +173,22 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     return fit.clamp(88.0, 160.0);
   }
 
+  /// Content-derived width for a column with NO stored `columnData[c].w`.
+  ///
+  /// A sheet arriving from an older agent write, an xlsx import, or the web
+  /// editor carries no widths at all, and [_defaultColW] then gives every
+  /// column the same 88px — so on a phone anything longer than a word is
+  /// ellipsised. Measuring the column's own content instead is what makes such
+  /// a sheet readable on arrival without the user reaching for the auto-fit
+  /// action. Memoised per build pass: [autoFitColWidth] runs a real
+  /// [TextPainter] over the column, which is far too costly per cell.
+  final Map<int, double> _measuredW = {};
+
+  double _measuredColW(int c) => _measuredW.putIfAbsent(
+        c,
+        () => autoFitColWidth(widget.sheet, c, rows: widget.rows),
+      );
+
   /// Width of column [c]: the stored `columnData[c].w` when present, else the
   /// computed default. A live resize preview overrides for the dragged column.
   double _colWidth(int c) {
@@ -168,10 +197,19 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     }
     final stored = resolveCurrentColWidth(widget.sheet, c);
     // resolveCurrentColWidth returns the Univer default (88) when unset — treat
-    // that sentinel as "use the viewport-fit default" so narrow sheets still
-    // fill the width, but honour any explicit stored width verbatim.
+    // that sentinel as "derive a width" and honour any explicit stored width
+    // verbatim. With nothing stored, size to the column's own content and fall
+    // back to the viewport fit only for an empty column, so a wide text column
+    // and a narrow number column don't both come out at 88.
     if (stored == kDefaultColW && !_hasStoredColWidth(c)) {
-      return _defaultColW;
+      // Implicit sizing may only WIDEN a column past the viewport-fit default,
+      // never narrow it: the fit keeps columns tappable, and shrinking one the
+      // user never asked to shrink is a worse surprise than a little slack.
+      // The explicit auto-fit action (and the agent's skill) still tighten.
+      final measured = _measuredColW(c);
+      return measured > _defaultColW
+          ? measured.clamp(_minColW, _maxColW)
+          : _defaultColW;
     }
     return stored.clamp(_minColW, _maxColW);
   }
@@ -573,7 +611,7 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
     return Row(
       children: [
         _rowGutter(r),
-        for (var c = 0; c < widget.cols; c++) _cell(r, c),
+        for (var c = 0; c < widget.cols; c++) _cellOrMerge(r, c),
       ],
     );
   }
@@ -634,8 +672,48 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
 
   // ── Cell ─────────────────────────────────────────────────────────────────────
 
-  Widget _cell(int r, int c) {
-    final colW = _colWidth(c);
+  /// A text colour that stays legible on [background].
+  ///
+  /// Plain relative-luminance split rather than a full WCAG contrast search —
+  /// the only job is "don't put near-white text on a white fill", and the two
+  /// candidates are the theme's own ink colours so the result still looks like
+  /// the rest of the app.
+  static Color _readableOn(Color background) =>
+      background.computeLuminance() > 0.5
+          ? AppColors.bgBase
+          : AppColors.textPrimary;
+
+  /// Render one grid position, honouring merges.
+  ///
+  /// A merged block is drawn by giving its TOP-LEFT cell the combined width of
+  /// the columns it spans and collapsing the covered cells to zero width. The
+  /// row stays a fixed-width [Row], so its total width is unchanged and every
+  /// other row's columns still line up — no restructuring of the grid needed.
+  ///
+  /// Only horizontal spanning is drawn; a merge covering several ROWS still
+  /// paints its text in the top row's band. Vertical spans are rare from the
+  /// agent (title banners are horizontal) and doing them properly would mean
+  /// abandoning the per-row [Row] layout.
+  Widget _cellOrMerge(int r, int c) {
+    final rect = widget.sheet.mergeAt(r, c);
+    if (rect == null) return _cell(r, c);
+    final isAnchor = rect['startRow'] == r && rect['startColumn'] == c;
+    if (!isAnchor) {
+      // Covered: the anchor already paints this ground.
+      if (rect['startColumn']! < c) return const SizedBox.shrink();
+      // First column of a lower row in a multi-row merge — draw it plainly so
+      // the block doesn't leave a hole.
+      return _cell(r, c);
+    }
+    var span = 0.0;
+    for (var i = rect['startColumn']!; i <= rect['endColumn']! && i < widget.cols; i++) {
+      span += _colWidth(i);
+    }
+    return _cell(r, c, widthOverride: span);
+  }
+
+  Widget _cell(int r, int c, {double? widthOverride}) {
+    final colW = widthOverride ?? _colWidth(c);
     final rowH = _rowHeight(r);
     final sel = widget.sel;
     final inRange = sel != null && sel.range.contains(r, c);
@@ -689,11 +767,23 @@ class _SheetEditorGridState extends State<SheetEditorGrid> {
 
     final hasLink = widget.sheet.linkAt(r, c) != null;
 
-    final textColor = hasLink
-        ? AppColors.accent
-        : style.color != null
-            ? (parseHex(style.color!) ?? AppColors.textPrimary)
-            : AppColors.textPrimary;
+    // Contrast rule. The app is dark (#171717 cells, #ECECEC text) but a
+    // snapshot carries whatever colours it was authored with — usually for
+    // white paper. Honour both when both are given; when only ONE is set,
+    // derive the other from its luminance instead of pairing an authored
+    // colour with our theme default. Without this, a sheet written for print
+    // (`cl: #000000`) renders black-on-near-black, and an agent filling a cell
+    // white leaves near-white text on it — invisible either way.
+    final Color textColor;
+    if (hasLink) {
+      textColor = AppColors.accent;
+    } else if (style.color != null) {
+      textColor = parseHex(style.color!) ?? AppColors.textPrimary;
+    } else if (style.bgColor != null) {
+      textColor = _readableOn(bgColor);
+    } else {
+      textColor = AppColors.textPrimary;
+    }
 
     Alignment alignment;
     switch (style.hAlign) {

@@ -31,7 +31,9 @@ pywhispercpp>=1.2.0
 imageio-ffmpeg>=0.4.9
 # Claude Agent SDK — MODE_CLAUDE "sdk" transport. Mirrored from
 # pyproject.toml so Docker layer-cache picks it up before pip install -e.
-claude-agent-sdk>=0.1.81
+# PINNED — see pyproject.toml. A ">=" floor let a rebuild jump to a
+# breaking major and took the brain down (2026-08-21).
+claude-agent-sdk==0.2.143
 # sqlite-vec — vec0 virtual table for LazyBrain semantic search. Mirrored
 # from pyproject.toml so Docker layer-cache picks it up before pip
 # install -e. Graceful fallback when extension can't load.

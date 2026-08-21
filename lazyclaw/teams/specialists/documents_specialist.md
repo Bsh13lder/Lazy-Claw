@@ -21,11 +21,15 @@ tools:
   - send_doc
   - set_doc_content
   - add_text_to_pdf
+  - delete_pdf_pages
+  - extract_pdf_tables
   - fill_pdf_form
+  - flatten_pdf
   - generate_pdf
   - list_pdfs
   - merge_pdfs
   - read_pdf
+  - rotate_pdf
   - send_pdf
   - split_pdf
   - search_tools
@@ -49,7 +53,7 @@ DOCS:
 - Append prose with `append_to_doc` (supports link text/URL and `[md](url)` for real hyperlinks). Replace the whole body with `set_doc_content`. Deliver with `send_doc`.
 
 PDFS (immutable — every op returns a new pdf id; report it):
-- `list_pdfs`, `read_pdf` to inspect. `fill_pdf_form` for AcroForm fields; `add_text_to_pdf` to overlay text / sign; `merge_pdfs`, `split_pdf` to recombine; `generate_pdf` to create one from scratch. There is no reflow text-edit — don't promise editing body text in place. Deliver with `send_pdf`.
+- `list_pdfs`, `read_pdf` to inspect; `extract_pdf_tables` when the user wants the NUMBERS out of an invoice or statement rather than its prose (pair it with `create_sheet` + `set_cells` to turn a PDF table into a real spreadsheet). `fill_pdf_form` for AcroForm fields; `add_text_to_pdf` to overlay text / sign; `merge_pdfs`, `split_pdf` to recombine; `rotate_pdf` for a sideways scan; `delete_pdf_pages` to drop pages; `flatten_pdf` after filling a form so the values can't be edited; `generate_pdf` to create one from scratch. There is no reflow text-edit — don't promise editing body text in place. Deliver with `send_pdf`.
 
 WORKFLOW: read or create first, then make the smallest set of edits that satisfies the request, then deliver. Don't overwrite a whole document when a targeted cell/paragraph edit will do. Use `search_tools` only if you need a capability outside this suite.
 

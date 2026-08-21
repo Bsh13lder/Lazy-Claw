@@ -29,11 +29,13 @@ from lazyclaw.docs.store import get_doc, save_doc
 from lazyclaw.llm.providers.base import LLMMessage
 
 _BLOCK_TYPES = ("heading", "paragraph", "bullet", "number")
+_ALIGNMENTS = ("left", "center", "centre", "right", "justify")
 
 # Used in the system prompt and as a contract reference for tests.
 PLAN_SHAPE = (
-    '{"mode": "append"|"replace", "blocks": [ '
+    '{"mode": "append"|"replace"|"edit", "index": 0, "blocks": [ '
     '{"type": "heading"|"paragraph"|"bullet"|"number", "level": 1, '
+    '"align": "left"|"center"|"right", '
     '"text": "content with **bold**, *italic*, [link](https://…)"} ]}'
 )
 
@@ -44,8 +46,12 @@ _SYSTEM = (
     f"{PLAN_SHAPE}\n"
     "Rules:\n"
     "- mode 'append' adds the blocks at the end; 'replace' replaces the whole "
-    "document body. Default to 'append' unless the user clearly wants a full "
-    "rewrite.\n"
+    "document body; 'edit' replaces the ONE existing block at 0-based 'index' "
+    "with blocks[0]. Prefer 'edit' for a change to a specific paragraph — "
+    "'replace' rewrites everything and loses formatting you did not re-emit. "
+    "Default to 'append' unless the user clearly wants a full rewrite.\n"
+    "- 'align' ('left'|'center'|'right') sets a block's paragraph alignment; "
+    "omit it for the default.\n"
     "- Use 'number' for an ORDERED sequence of steps, 'bullet' for an unordered "
     "list, 'heading' (level 1-3) for section titles, 'paragraph' for prose.\n"
     "- Put inline emphasis in the text with **bold**, *italic*, and links as "
@@ -114,9 +120,15 @@ def _normalize_blocks(items: Any) -> list[dict[str, Any]]:
                     if isinstance(it.get("runs"), list)
                     else runs_from_inline(str(it.get("text", "")))
                 )
-                out.append(
-                    {"type": btype, "level": int(it.get("level") or 0), "runs": runs}
-                )
+                block: dict[str, Any] = {
+                    "type": btype,
+                    "level": int(it.get("level") or 0),
+                    "runs": runs,
+                }
+                align = it.get("align")
+                if isinstance(align, str) and align.strip().lower() in _ALIGNMENTS:
+                    block["align"] = align.strip().lower()
+                out.append(block)
             elif isinstance(it.get("runs"), list):  # legacy {"runs": [...]}
                 out.append(
                     {"type": "paragraph", "level": 0, "runs": _normalize_runs(it["runs"])}
@@ -156,12 +168,22 @@ async def apply(
     blocks = _plan_blocks(plan)
     if not blocks:
         raise ValueError("plan needs a non-empty 'blocks' (or 'paragraphs') list")
-    mode = "replace" if plan.get("mode") == "replace" else "append"
+    raw_mode = str(plan.get("mode") or "").lower()
+    mode = raw_mode if raw_mode in ("replace", "edit") else "append"
 
     snap = ctx["payload"]
     if mode == "replace":
         updated = {**snap, "body": D.build_body_with_blocks(blocks)}
         verb = "Replaced the document with"
+    elif mode == "edit":
+        # Targeted single-block edit — "make the third paragraph bold" without
+        # rewriting (and silently reformatting) the whole document.
+        try:
+            index = int(plan.get("index"))
+        except (TypeError, ValueError):
+            raise ValueError("mode 'edit' needs a 0-based 'index'") from None
+        updated = D.replace_block(snap, index, blocks[0])
+        verb = f"Rewrote block {index} as"
     else:
         updated = D.append_blocks(snap, blocks)
         verb = "Added"

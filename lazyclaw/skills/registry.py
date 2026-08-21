@@ -303,6 +303,17 @@ class SkillRegistry:
         self.register(GeneratePdfSkill(config=config))
         self.register(SendPdfSkill(config=config))
 
+        # Page surgery + table extraction — ops.py has carried these all along,
+        # but no skill wrapped them, so the agent could never call them.
+        from lazyclaw.skills.builtin.pdf_pages import (
+            DeletePdfPagesSkill, ExtractPdfTablesSkill, FlattenPdfSkill,
+            RotatePdfSkill,
+        )
+        self.register(RotatePdfSkill(config=config))
+        self.register(DeletePdfPagesSkill(config=config))
+        self.register(FlattenPdfSkill(config=config))
+        self.register(ExtractPdfTablesSkill(config=config))
+
         # Progress tracking — pulse check-ins via templates (Tier 2 of
         # the progress-tracking system). Templates store
         # questions + buttons + cadence; the heartbeat fires them on

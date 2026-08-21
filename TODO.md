@@ -14,6 +14,10 @@ hardening wave"; commits 4237726..9d74e03 + SDK retry on main):
 - [x] Mobile v1.33.6→1.33.9: WS rewire on gateway change, zombie-spinner sweep, scrollable tables
 - [x] SOUL.md: 17-type routing table, MCP ownership, weather=inline web_search
 
+## Host-Brave CDP bridge — topology drift (found 2026-08-21 zombie-tab incident)
+- [ ] cdp-forwarder.py expects Brave on 127.0.0.1:9223 (forwards *:9222→9223) but bridge.env says BRAVE_CDP_PORT=9222 — Brave binds loopback:9222 and Docker's host-gateway reaches it DIRECTLY, so the forwarder is dead weight forwarding to a port nothing listens on. Works by accident; reconcile bridge.env↔forwarder (either restore 9223 or retire the forwarder) before it bites
+- [ ] Zombie-tab guard: one hung renderer (Upwork Messages tab) stalls EVERY playwright connect_over_cdp at paused-attach while raw CDP works — mcp-upwork could detect connect timeouts and auto-close unresponsive page targets (raw Target.closeTarget) before retrying; diagnosis recipe lives in memory
+
 ## Learning loop — remaining follow-ups (2026-08-21 audit; hot-path/pollution fixes SHIPPED 15ac8f2)
 - [ ] Telegram template "✅ Accept" button is a no-op: sets active_templates flag nothing executes — wire actual template execution or remove the button (watcher.py:136 promise broken)
 - [ ] Lesson-influence telemetry: nothing measures whether an injected exemplar ever changes a tool call — add a counter (exemplar injected → same-args call within turn) before investing further in recall quality

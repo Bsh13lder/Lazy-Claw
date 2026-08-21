@@ -38,7 +38,14 @@ from uuid import uuid4
 DEFAULT_ROWS = 1000
 DEFAULT_COLS = 20
 
+#: Upper bounds used to close an open-ended range (``A:A`` / ``2:2``). Excel's
+#: real limits; callers clamp to the sheet's own used bounds.
+MAX_ROW_INDEX = 1_048_575
+MAX_COL_INDEX = 16_383
+
 _A1_RE = re.compile(r"^\$?([A-Za-z]+)\$?([0-9]+)$")
+_COL_ONLY_RE = re.compile(r"^\$?([A-Za-z]+)$")
+_ROW_ONLY_RE = re.compile(r"^\$?([0-9]+)$")
 
 
 # ───────────────────────── A1 ⇄ (row, col) ──────────────────────────
@@ -75,7 +82,63 @@ def a1_to_rc(ref: str) -> tuple[int, int]:
     m = _A1_RE.match(ref.strip())
     if not m:
         raise ValueError(f"invalid A1 reference: {ref!r}")
-    return int(m.group(2)) - 1, letter_to_col(m.group(1))
+    row = int(m.group(2)) - 1
+    if row < 0:
+        raise ValueError(f"A1 row numbers are 1-based, got {ref!r}")
+    return row, letter_to_col(m.group(1))
+
+
+def _endpoint(part: str, *, is_end: bool) -> tuple[int, int]:
+    """One side of a range → ``(row, col)``.
+
+    An open axis (the whole-column ``A:A`` and whole-row ``2:2`` forms) closes
+    at 0 for the start endpoint and at the sheet maximum for the end one. ``$``
+    markers are ignored: absolute vs relative is a formula concern, and a range
+    address means the same cells either way.
+    """
+    part = part.strip()
+    m = _A1_RE.match(part)
+    if m:
+        return int(m.group(2)) - 1, letter_to_col(m.group(1))
+    m = _COL_ONLY_RE.match(part)
+    if m:
+        return (MAX_ROW_INDEX if is_end else 0), letter_to_col(m.group(1))
+    m = _ROW_ONLY_RE.match(part)
+    if m:
+        row = int(m.group(1)) - 1
+        if row < 0:
+            raise ValueError(f"row numbers are 1-based: {part!r}")
+        return row, (MAX_COL_INDEX if is_end else 0)
+    raise ValueError(f"invalid range endpoint: {part!r}")
+
+
+def parse_range(ref: str) -> tuple[int, int, int, int]:
+    """A1 range → 0-based, END-INCLUSIVE ``(r1, c1, r2, c2)``, normalised.
+
+    Accepts a single cell (``"B3"`` → a 1×1 range), a rectangle
+    (``"A1:C5"``), the absolute forms (``"$A$1:$C$5"``), a whole column
+    (``"A:A"``, ``"B:D"``) and a whole row (``"2:2"``, ``"2:4"``). Endpoints
+    given in any order come back normalised so ``r1 <= r2`` and ``c1 <= c2``.
+
+    Open-ended forms close against :data:`MAX_ROW_INDEX` /
+    :data:`MAX_COL_INDEX`; callers that iterate MUST clamp to
+    :func:`used_bounds` rather than walking a million rows.
+
+    Callers taking a range from outside (a skill parameter, an LLM edit plan)
+    must coerce to ``str`` first — validation of untrusted shapes belongs at
+    that boundary, not in this pure helper.
+    """
+    parts = ref.strip().split(":")
+    if len(parts) == 1:
+        row, col = a1_to_rc(parts[0])
+        return row, col, row, col
+    if len(parts) != 2:
+        raise ValueError(f"invalid range: {ref!r}")
+    r1, c1 = _endpoint(parts[0], is_end=False)
+    r2, c2 = _endpoint(parts[1], is_end=True)
+    lo_r, hi_r = (r1, r2) if r1 <= r2 else (r2, r1)
+    lo_c, hi_c = (c1, c2) if c1 <= c2 else (c2, c1)
+    return lo_r, lo_c, hi_r, hi_c
 
 
 # ───────────────────────── value coercion ───────────────────────────
@@ -163,6 +226,11 @@ def _resolve_sheet_id(snap: dict[str, Any], sheet: int | str = 0) -> str:
     raise KeyError(f"no sheet named or id'd {sheet!r}")
 
 
+#: Public alias — ``styles`` and ``geometry`` resolve worksheets too, and they
+#: shouldn't reach into a private. Same function, no behaviour change.
+resolve_sheet_id = _resolve_sheet_id
+
+
 def sheet_names(snap: dict[str, Any]) -> list[str]:
     """Worksheet names in tab order."""
     sheets = snap.get("sheets") or {}
@@ -181,6 +249,20 @@ def get_cell(
     sid = _resolve_sheet_id(snap, sheet)
     cell_data = snap["sheets"][sid].get("cellData") or {}
     return (cell_data.get(str(row)) or {}).get(str(col))
+
+
+def has_content(cell: dict[str, Any] | None) -> bool:
+    """Whether ``cell`` holds a VALUE or a FORMULA — i.e. content, not just
+    presentation.
+
+    A cell carrying only ``s`` (a style) or ``custom`` is formatting, and must
+    not count towards the used range: otherwise formatting an empty header row
+    or a far-off cell would grow phantom rows and columns in
+    :func:`used_bounds`, :func:`as_grid`, ``read_sheet`` and the CSV export.
+    """
+    if not cell:
+        return False
+    return cell.get("v") is not None or bool(cell.get("f"))
 
 
 def cell_display(cell: dict[str, Any] | None) -> Any:
@@ -214,7 +296,10 @@ def used_bounds(snap: dict[str, Any], sheet: int | str = 0) -> tuple[int, int]:
     Returns ``(-1, -1)`` for an empty sheet.
     """
     max_r = max_c = -1
-    for r, c, _ in iter_cells(snap, sheet):
+    for r, c, cell in iter_cells(snap, sheet):
+        # Style-only cells are formatting, not content — see `has_content`.
+        if not has_content(cell):
+            continue
         max_r = max(max_r, r)
         max_c = max(max_c, c)
     return max_r, max_c
@@ -230,6 +315,10 @@ def as_grid(snap: dict[str, Any], sheet: int | str = 0) -> list[list[Any]]:
         return []
     grid: list[list[Any]] = [["" for _ in range(max_c + 1)] for _ in range(max_r + 1)]
     for r, c, cell in iter_cells(snap, sheet):
+        # Style-only cells don't extend `used_bounds`, so they can sit OUTSIDE
+        # the grid we just sized — skip them rather than index past the end.
+        if not has_content(cell):
+            continue
         grid[r][c] = cell_display(cell)
     return grid
 

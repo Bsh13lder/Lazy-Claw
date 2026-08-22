@@ -295,6 +295,10 @@ def _build_bundled_env_overlay(
     Re-runs the same opt-in checks as ``connect_and_register_bundled_mcps``
     so that env values (especially the per-process internal token) stay
     fresh across gateway restarts and don't need a DB migration.
+
+    Freshly computed keys OVERWRITE whatever the stored row holds:
+    registration is skip-if-exists, so a row written by an older install
+    (or by the host venv before the move into Docker) never heals itself.
     """
     info = BUNDLED_MCPS.get(mcp_name)
     if not info:
@@ -312,7 +316,45 @@ def _build_bundled_env_overlay(
         overlay["LAZYCLAW_GATEWAY_URL"] = gateway_url
         overlay["LAZYCLAW_INTERNAL_TOKEN"] = get_internal_token()
 
+    if info.get("inject_user_context"):
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
+        overlay["LAZYCLAW_USER_ID"] = user_id
+        overlay["LAZYCLAW_BROWSER_PROFILE_DIR"] = str(
+            resolve_profile_dir(config, user_id),
+        )
+        cdp_port_env = os.environ.get("LAZYCLAW_CDP_PORT")
+        if cdp_port_env:
+            overlay["LAZYCLAW_CDP_PORT"] = cdp_port_env
+        # In Docker the MCP can't launch its own Chrome (no binary in the
+        # slim image) — point it at the user's host Brave.
+        try:
+            from lazyclaw.browser.host_bridge import is_docker_runtime
+            if is_docker_runtime():
+                overlay["LAZYCLAW_CDP_HOST"] = "host.docker.internal"
+        except ImportError:
+            pass
+
     return overlay
+
+
+def _canonical_bundled_config(name: str, server_cfg: dict) -> dict:
+    """Re-derive the launch command of a bundled module MCP. Returns a new dict.
+
+    A stored row keeps the ``sys.executable`` of whichever install registered
+    it, and registration is skip-if-exists — so a row can carry a dead
+    interpreter path (observed in prod: a host-venv python recorded before
+    the move into Docker, absent inside the container). Only ``module``
+    entries are healed; npx / bin / remote entries and names we don't ship
+    resolve their own executable and pass through untouched.
+    """
+    info = BUNDLED_MCPS.get(name)
+    if not info or "module" not in info:
+        return dict(server_cfg)
+    return {
+        **server_cfg,
+        "command": sys.executable,
+        "args": ["-m", info["module"], *info.get("extra_args", [])],
+    }
 
 
 async def install_bundled_mcp(name: str) -> tuple[bool, str]:
@@ -753,13 +795,17 @@ async def connect_server(
     if server_id in _active_clients:
         await disconnect_server(user_id, server_id)
 
-    # Apply bundled-MCP env overlays at CONNECT time, not register time.
-    # The internal-bridge token is per-process (rotates on restart) so we
-    # don't persist it in the encrypted config row; we re-derive it here.
-    server_cfg = dict(server["config"])
-    server_cfg["env"] = _build_bundled_env_overlay(
-        config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
-    )
+    # Refresh the derivable parts of a bundled MCP's launch config at CONNECT
+    # time, not register time: registration is skip-if-exists, so a stored row
+    # keeps whatever the install that first wrote it computed (a dead
+    # interpreter path, a stale/absent per-user env) forever.
+    server_cfg = _canonical_bundled_config(server["name"], server["config"])
+    server_cfg = {
+        **server_cfg,
+        "env": _build_bundled_env_overlay(
+            config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
+        ),
+    }
 
     client = MCPClient(
         server_id=server_id,

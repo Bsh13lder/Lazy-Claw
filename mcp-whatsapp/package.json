@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test tests/test_media.js tests/test_lock.js"
+    "test": "node --test \"tests/*.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

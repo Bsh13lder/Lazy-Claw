@@ -47,6 +47,31 @@ const {
   canonicalChatJid,
 } = require("./media.js");
 
+const {
+  extractPhone,
+  normalizeJid,
+  isGroupJid: isGroupJidOf,
+  mergeContact,
+  displayName,
+  fromBaileysContact,
+  fromBaileysChat,
+  packContact,
+  buildLidMap,
+  migrateLegacyContact,
+} = require("./contacts.js");
+
+/**
+ * Apply a partial contact patch without destroying better data already known.
+ * Every contact write goes through here — a bare `contacts.set()` would let a
+ * pushName-only event erase an already-synced saved name.
+ */
+function upsertContact(jid, patch) {
+  if (!jid) return null;
+  const merged = mergeContact(contacts.get(jid), patch);
+  contacts.set(jid, merged);
+  return merged;
+}
+
 const LOG_PATH = path.join(DATA_DIR, "whatsapp-mcp.log");
 const log = (msg) => {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -209,7 +234,11 @@ function toMuteNumber(val) {
 
 function saveContacts() {
   try {
-    const obj = Object.fromEntries(contacts);
+    // packContact() drops the derived `name` and every empty field — writing
+    // the full record grew this file 2.5x (346K → 850K at 5.7k contacts) and it
+    // is rewritten on every contact event.
+    const obj = {};
+    for (const [jid, c] of contacts) obj[jid] = packContact(c);
     fs.writeFileSync(CONTACTS_FILE, JSON.stringify(obj));
   } catch (_) {}
 }
@@ -260,9 +289,11 @@ function loadContacts() {
     if (fs.existsSync(CONTACTS_FILE)) {
       const obj = JSON.parse(fs.readFileSync(CONTACTS_FILE, "utf8"));
       for (const [jid, c] of Object.entries(obj)) {
-        // Normalize phone: only real phone numbers (@s.whatsapp.net), not LID numbers
-        c.phone = extractPhone(jid);
-        contacts.set(jid, c);
+        // Records written before the provenance split carry a single, ambiguous
+        // `name`. migrateLegacyContact() parks it in `legacyName` — still shown,
+        // so nothing visibly changes, but ranked below a real saved name so the
+        // critical_unblock_low resync can upgrade it on connect.
+        contacts.set(jid, migrateLegacyContact(c, jid));
       }
       log(`Loaded ${contacts.size} contacts from cache`);
       _buildLidMap();
@@ -290,25 +321,20 @@ function loadMessages() {
 // LID ↔ Phone mapping
 // ---------------------------------------------------------------------------
 
-/** Build LID↔phone map from contacts that share the same name. */
+/**
+ * Rebuild the LID↔phone maps in place.
+ *
+ * buildLidMap() prefers the authoritative pair WhatsApp supplies on each
+ * contactAction and only falls back to the legacy same-name guess for records
+ * that predate it. The maps are module-level and shared, so they are refilled
+ * rather than reassigned.
+ */
 function _buildLidMap() {
-  // Group contacts by name
-  const byName = new Map(); // name → [jid, ...]
-  for (const [jid, c] of contacts) {
-    const name = (c.name || c.notify || "").toLowerCase().trim();
-    if (!name) continue;
-    if (!byName.has(name)) byName.set(name, []);
-    byName.get(name).push(jid);
-  }
-  // For groups with exactly 1 phone + 1 lid, link them
-  for (const [, jids] of byName) {
-    const phones = jids.filter((j) => j.endsWith("@s.whatsapp.net"));
-    const lids = jids.filter((j) => j.endsWith("@lid"));
-    if (phones.length === 1 && lids.length === 1) {
-      lidToPhone.set(lids[0], phones[0]);
-      phoneToLid.set(phones[0], lids[0]);
-    }
-  }
+  const { lidToPhone: nextLid, phoneToLid: nextPhone } = buildLidMap(contacts);
+  lidToPhone.clear();
+  phoneToLid.clear();
+  for (const [k, v] of nextLid) lidToPhone.set(k, v);
+  for (const [k, v] of nextPhone) phoneToLid.set(k, v);
   if (lidToPhone.size > 0) {
     log(`LID map: ${lidToPhone.size} linked pairs`);
   }
@@ -586,24 +612,20 @@ async function startWhatsApp(force = false) {
           let hydrated = 0;
           let participantsAdded = 0;
           for (const [gjid, meta] of Object.entries(allGroups || {})) {
-            const existing = contacts.get(gjid) || { phone: null, notify: "" };
-            if (meta?.subject) existing.name = meta.subject;
-            contacts.set(gjid, existing);
+            upsertContact(gjid, { subject: meta?.subject || "" });
             hydrated++;
 
             for (const p of meta?.participants || []) {
               const pjid = p.id;
               if (!pjid) continue;
-              if (!contacts.has(pjid)) {
-                contacts.set(pjid, {
-                  name: p.notify || p.name || "",
-                  notify: p.notify || "",
-                  phone: extractPhone(pjid),
-                });
-                participantsAdded++;
-              } else if (!contacts.get(pjid).name && (p.notify || p.name)) {
-                contacts.get(pjid).name = p.notify || p.name;
-              }
+              if (!contacts.has(pjid)) participantsAdded++;
+              // A participant's own display name is pushName-quality, and the
+              // roster also carries the LID↔phone pair for LID-addressed members.
+              upsertContact(pjid, {
+                notify: p.notify || p.name || "",
+                phone: extractPhone(p.jid || pjid),
+                lid: p.lid || (pjid.endsWith("@lid") ? pjid : null),
+              });
             }
 
             const muteVal = toMuteNumber(meta?.muteEndTime ?? meta?.announceMuteEndTime ?? null);
@@ -628,11 +650,21 @@ async function startWhatsApp(force = false) {
           if (groupsToResolve > 0) log(`Fallback: resolving ${groupsToResolve} group names lazily`);
         }
 
-        // Force app-state resync so mutes applied on the phone arrive here.
-        // regular_high carries per-chat mute state; events flow through chats.update.
+        // Force app-state resync so state applied on the phone arrives here.
+        //   regular_high         per-chat mute state → chats.update
+        //   critical_unblock_low contactAction → contacts.upsert carrying BOTH the
+        //                        name you saved (contactAction.fullName) and the
+        //                        authoritative lid↔jid pair (contactAction.lidJid).
+        //
+        // Omitting critical_unblock_low was why saved names never appeared: the
+        // only source of `Contact.name` is this collection, so every contact fell
+        // through to the sender's own pushName, and LID↔phone had to be guessed.
         try {
-          await sock.resyncAppState(["regular_high", "regular_low", "critical_block"], false);
-          log("App state resync complete (mute state refreshed)");
+          await sock.resyncAppState(
+            ["critical_block", "critical_unblock_low", "regular_high", "regular_low"],
+            false,
+          );
+          log("App state resync complete (saved names + mute state refreshed)");
         } catch (e) {
           log(`resyncAppState failed: ${e.message}`);
         }
@@ -696,30 +728,15 @@ async function startWhatsApp(force = false) {
       }
     }
     for (const c of (event.contacts || [])) {
-      const cJid = c.jid || c.id || "";
-      contacts.set(c.id, {
-        name: c.name || c.verifiedName || c.notify || "",
-        notify: c.notify || "",
-        phone: extractPhone(cJid),
-      });
+      upsertContact(c.id, fromBaileysContact(c));
     }
     // Also extract contacts from chats + track mute status
     for (const chat of (event.chats || [])) {
-      if (!contacts.has(chat.id)) {
-        const isGroupChat = chat.id.endsWith("@g.us");
-        contacts.set(chat.id, {
-          // For groups: use chat.name only (don't fallback to phone/JID extraction)
-          name: isGroupChat ? (chat.name || "") : (chat.name || extractPhone(chat.id) || chat.id.split("@")[0]),
-          notify: "",
-          phone: extractPhone(chat.id),
-        });
-        // Trigger group name fetch if we have no name
-        if (isGroupChat && !chat.name) {
-          _resolveGroupName(chat.id);
-        }
-      } else if (chat.name && !contacts.get(chat.id).name) {
-        // Update existing contact that has no name yet (e.g. group first seen via messages.upsert)
-        contacts.get(chat.id).name = chat.name;
+      const known = contacts.has(chat.id);
+      upsertContact(chat.id, fromBaileysChat(chat));
+      // Groups arriving without a subject need an explicit fetch.
+      if (!known && isGroupJidOf(chat.id) && !chat.name) {
+        _resolveGroupName(chat.id);
       }
       // Track mute — Baileys protobuf field is "muteEndTime" (uint64)
       // Also check all known mute field variants for safety
@@ -744,46 +761,42 @@ async function startWhatsApp(force = false) {
     }
   });
 
-  // Incremental contact updates
+  // Incremental contact updates.
+  // After the critical_unblock_low resync this is also where saved names arrive:
+  // Baileys turns each contactAction into a contacts.upsert carrying
+  // { id, name: fullName, lid: lidJid, jid } (chat-utils.js:650).
   sock.ev.on("contacts.upsert", (newContacts) => {
+    let named = 0;
     for (const c of newContacts) {
-      contacts.set(c.id, {
-        name: c.name || c.verifiedName || c.notify || "",
-        notify: c.notify || "",
-        phone: extractPhone(c.id),
-      });
+      const patch = fromBaileysContact(c);
+      if (patch.savedName) named++;
+      // Stored under c.id only. The lid↔phone pair travels on the record, so
+      // _buildLidMap() links the two and _allJids() reaches this name from the
+      // LID side — mirroring it under a second key would only duplicate the
+      // person in whatsapp_search.
+      upsertContact(c.id, patch);
     }
-    log(`Contacts upsert: ${contacts.size} total`);
+    log(`Contacts upsert: ${newContacts.length} in (${named} with saved names), ${contacts.size} total`);
     saveContacts();
     _buildLidMap();
   });
 
   sock.ev.on("contacts.update", (updates) => {
     for (const u of updates) {
-      const existing = contacts.get(u.id) || { phone: extractPhone(u.id) };
-      if (u.name) existing.name = u.name;
-      if (u.notify) existing.notify = u.notify;
-      contacts.set(u.id, existing);
+      upsertContact(u.id, fromBaileysContact(u));
     }
     saveContacts();
+    _buildLidMap();
   });
 
   // Track chats for list_chats
   sock.ev.on("chats.upsert", (chats) => {
     for (const chat of chats) {
       const jid = chat.id;
-      if (!contacts.has(jid)) {
-        const isGroupChat = jid.endsWith("@g.us");
-        contacts.set(jid, {
-          name: isGroupChat ? (chat.name || "") : (chat.name || extractPhone(jid) || jid.split("@")[0]),
-          phone: extractPhone(jid),
-        });
-        if (isGroupChat && !chat.name) {
-          _resolveGroupName(jid);
-        }
-      } else if (chat.name && !contacts.get(jid).name) {
-        // Update existing contact that has no name yet
-        contacts.get(jid).name = chat.name;
+      const known = contacts.has(jid);
+      upsertContact(jid, fromBaileysChat(chat));
+      if (!known && isGroupJidOf(jid) && !chat.name) {
+        _resolveGroupName(jid);
       }
       const rawUpsertMute = chat.muteEndTime ?? chat.muteExpiration ?? chat.mute ?? null;
       const chatMuteVal = toMuteNumber(rawUpsertMute);
@@ -802,7 +815,7 @@ async function startWhatsApp(force = false) {
       if (!u.id) continue;
       // Update name if provided
       if (u.name && contacts.has(u.id)) {
-        contacts.get(u.id).name = u.name;
+        upsertContact(u.id, fromBaileysChat(u));
       }
       // Update mute status — check all known Baileys mute field names
       // App state sync uses muteEndTime, some versions use muteExpiration
@@ -833,30 +846,19 @@ async function startWhatsApp(force = false) {
       const jid = msg.key.remoteJid;
       if (!jid || jid === "status@broadcast") continue;
 
-      // Update contact info — NEVER overwrite group names with a participant's pushName
+      // A sender's pushName is theirs, never the group's — for groups it only
+      // ever triggers a subject fetch. For DMs it lands in `notify`, which
+      // displayName() ranks below any saved name, so it can no longer squat in
+      // the slot the real saved name needs.
       const isGroupJid = jid.endsWith("@g.us");
-      if (!contacts.has(jid)) {
-        if (isGroupJid) {
-          // For groups: don't use pushName (that's the sender, not the group)
-          // Trigger lazy fetch instead
-          contacts.set(jid, {
-            name: "",
-            notify: "",
-            phone: null,
-          });
+      const known = contacts.has(jid);
+      if (isGroupJid) {
+        if (!known) {
+          upsertContact(jid, {});
           _resolveGroupName(jid);
-        } else {
-          contacts.set(jid, {
-            name: msg.pushName || extractPhone(jid) || jid.split("@")[0],
-            notify: msg.pushName || "",
-            phone: extractPhone(jid),
-          });
         }
-      } else if (msg.pushName && !isGroupJid) {
-        // Only update name from pushName for direct chats, never for groups
-        const c = contacts.get(jid);
-        if (!c.name || c.name === c.phone) c.name = msg.pushName;
-        c.notify = msg.pushName;
+      } else {
+        upsertContact(jid, { notify: msg.pushName || "", phone: extractPhone(jid) });
       }
 
       // Store message for later reading
@@ -897,19 +899,9 @@ async function startWhatsApp(force = false) {
       // fires for new messages — historical ones never update the contact map.
       const isDmJid = jid.endsWith("@s.whatsapp.net");
       if (isDmJid && msg.pushName && !msg.key.fromMe) {
-        const existing = contacts.get(jid);
-        const phone = extractPhone(jid);
-        const needsName = !existing || !existing.name || existing.name === existing.phone || existing.name === phone;
-        if (needsName) {
-          contacts.set(jid, {
-            name: msg.pushName,
-            notify: msg.pushName,
-            phone: phone,
-          });
-          dmNamesLearned++;
-        } else if (existing && !existing.notify) {
-          existing.notify = msg.pushName;
-        }
+        const hadName = Boolean(contacts.get(jid)?.name);
+        upsertContact(jid, { notify: msg.pushName, phone: extractPhone(jid) });
+        if (!hadName) dmNamesLearned++;
       }
     }
     // Trim all chats after history sync
@@ -956,9 +948,7 @@ function _resolveGroupName(jid) {
   _pendingGroupFetches.add(jid);
   sock.groupMetadata(jid).then((meta) => {
     if (meta && meta.subject) {
-      const existing = contacts.get(jid) || { phone: null, notify: "" };
-      existing.name = meta.subject;
-      contacts.set(jid, existing);
+      upsertContact(jid, { subject: meta.subject });
       saveContacts();
       log(`Resolved group name: ${jid} → "${meta.subject}"`);
     }
@@ -974,17 +964,13 @@ function _resolveGroupName(jid) {
 function _resolveContactName(jid) {
   if (!jid || !jid.endsWith("@s.whatsapp.net")) return;
   const existing = contacts.get(jid);
-  const phone = extractPhone(jid);
-  if (existing && existing.name && existing.name !== existing.phone && existing.name !== phone) return;
+  if (existing && (existing.savedName || existing.externalName || existing.verifiedName || existing.notify)) return;
   const msgs = messageStore.get(jid);
   if (!msgs || msgs.length === 0) return;
   for (const m of msgs) {
     if (m.key?.fromMe) continue;
     if (m.pushName) {
-      const next = existing || { phone, notify: "" };
-      next.name = m.pushName;
-      if (!next.notify) next.notify = m.pushName;
-      contacts.set(jid, next);
+      upsertContact(jid, { notify: m.pushName, phone: extractPhone(jid) });
       saveContacts();
       log(`Resolved DM name from cache: ${jid} → "${m.pushName}"`);
       return;
@@ -1008,39 +994,33 @@ function formatJid(phone) {
   return phone.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
 }
 
-/** Extract phone number from JID. Returns "+NNNN" for phone JIDs, null for LID/group. */
-function extractPhone(jid) {
-  if (!jid || !jid.endsWith("@s.whatsapp.net")) return null;
-  const num = jid.split("@")[0].split(":")[0];
-  return num ? "+" + num : null;
-}
+// extractPhone / normalizeJid now live in ./contacts.js — imported at the top.
 
-/** Normalize a JID — strip group suffix (:NN) for direct messages. */
-function normalizeJid(jid) {
-  if (!jid) return jid;
-  // "15551234567:18@s.whatsapp.net" → "15551234567@s.whatsapp.net"
-  // Group JIDs (@g.us) are left untouched
-  if (jid.includes("@s.whatsapp.net")) {
-    const phone = jid.split("@")[0].split(":")[0];
-    return phone + "@s.whatsapp.net";
-  }
-  return jid;
-}
-
-/** Look up a display name for a JID, walking @lid ↔ @s.whatsapp.net variants. */
+/**
+ * Look up a display name for a JID, walking @lid ↔ @s.whatsapp.net variants.
+ *
+ * Returns "" when nothing better than the JID itself is known; callers supply
+ * their own phone/JID fallback. displayName() applies the source precedence
+ * (saved name > unified store > verified > pushName), so a variant that only
+ * knows a pushName no longer beats a variant that knows the saved name.
+ */
 function _displayNameForJid(jid) {
   if (!jid) return "";
-  for (const variant of _allJids(jid)) {
-    const c = contacts.get(variant);
-    if (c && (c.name || c.notify)) return c.name || c.notify;
-  }
-  // Last resort: try normalized form
+  const variants = _allJids(jid);
   const norm = normalizeJid(jid);
-  if (norm !== jid) {
-    const c = contacts.get(norm);
-    if (c && (c.name || c.notify)) return c.name || c.notify;
+  if (norm !== jid && !variants.includes(norm)) variants.push(norm);
+
+  let weak = "";
+  for (const variant of variants) {
+    const c = contacts.get(variant);
+    if (!c) continue;
+    if (c.savedName || c.externalName || c.verifiedName) {
+      return displayName(c, variant);
+    }
+    if (!weak && c.notify) weak = c.notify;
+    if (!weak && isGroupJidOf(variant) && c.subject) weak = c.subject;
   }
-  return "";
+  return weak;
 }
 
 /**
@@ -1203,13 +1183,11 @@ function _formatMsg(msg) {
   if (isGroup && !contacts.get(jid)?.name) {
     _resolveGroupName(jid);
   }
-  // Trigger lazy DM name fetch when the cached name is still the phone fallback
-  if (!isGroup && jid.endsWith("@s.whatsapp.net")) {
-    const dmc = contacts.get(jid);
-    const phoneStr = extractPhone(jid);
-    if (!dmc || !dmc.name || dmc.name === dmc.phone || dmc.name === phoneStr) {
-      _resolveContactName(jid);
-    }
+  // Trigger lazy DM name fetch when nothing but the phone fallback is known.
+  // `.name` is derived from the named sources only, so an empty one means no
+  // name of any provenance has arrived yet.
+  if (!isGroup && jid.endsWith("@s.whatsapp.net") && !contacts.get(jid)?.name) {
+    _resolveContactName(jid);
   }
 
   // Check if this chat is muted on WhatsApp
@@ -1820,7 +1798,19 @@ function _mergeContactMatches(cacheRows, unifiedRows, query) {
     return "";
   };
 
+  // Collapse cache rows first: one person is often present under BOTH their
+  // @lid and their @s.whatsapp.net JID, which listed them twice. Prefer the row
+  // that carries a phone number — it is the more useful handle to act on.
+  const byCanonical = new Map();
   for (const r of cacheRows) {
+    const key = canonicalChatJid(r.jid || "", lidToPhone) || r.jid || "";
+    const prev = byCanonical.get(key);
+    if (!prev || (!prev.phone && r.phone) || (!prev.name && r.name)) {
+      byCanonical.set(key, prev ? { ...prev, ...r, name: r.name || prev.name, phone: r.phone || prev.phone } : r);
+    }
+  }
+
+  for (const r of byCanonical.values()) {
     const p = phoneOf(r);
     if (p) seenPhones.add(p);
     if (r.jid) seenJids.add(normalizeJid(r.jid));

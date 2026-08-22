@@ -14,7 +14,11 @@ Apache/MIT/BSD/MPL) — the string checks below explicitly avoid matching
 from __future__ import annotations
 
 import re
+import tomllib
 from importlib.metadata import distributions
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Distribution names that are outright banned regardless of what their
 # metadata claims (research-verified 2026-08-15).
@@ -28,6 +32,8 @@ _BANNED_DISTRIBUTIONS = {
     "pymupdf",        # AGPL (documents suite rule)
     "borb",           # AGPL
     "browser-use-core",  # license-less closed binary wheels
+    "aioimaplib",     # GPL-3.0 — was declared-but-unused by mcp-email; the
+                      # code has always used stdlib imaplib via to_thread
 }
 
 # License-string patterns that poison an MIT project. Word-boundary trick:
@@ -42,11 +48,13 @@ _POISON_PATTERNS = [
 
 
 # Pre-existing offenders — KNOWN, decision pending, do NOT add to this list
-# without a documented decision. Found by this gate on 2026-08-15:
-#   aioimaplib (GPL-3.0) — dependency of mcp-email (mcp-email/pyproject.toml).
-#   A GPL runtime dep in a distributed MIT repo needs replacing (stdlib
-#   imaplib wrapper or a permissive async IMAP lib) or a licensing decision.
-_KNOWN_PREEXISTING = {"aioimaplib"}
+# without a documented decision.
+#
+# 2026-08-22: emptied. The sole entry, aioimaplib (GPL-3.0), turned out to be
+# declared by mcp-email but never imported — the server has always used stdlib
+# imaplib via asyncio.to_thread. Removing the declaration cost nothing and took
+# GPL-3.0 out of the shipped Docker image, so it is now simply banned.
+_KNOWN_PREEXISTING: set[str] = set()
 
 
 def _license_strings(dist) -> list[str]:
@@ -75,6 +83,41 @@ def test_no_banned_distributions_installed():
         f"Banned (copyleft/closed) distributions installed: {hits} — "
         f"these poison the MIT license. Remove them and find a "
         f"permissive alternative (see CLAUDE.md License discipline)."
+    )
+
+
+def test_no_banned_distributions_declared_in_any_pyproject():
+    """Catch a poisoned dep at PR time, not "whenever someone's venv has it".
+
+    ``test_no_poison_license_metadata`` inspects INSTALLED packages, so it is
+    blind on a machine that never installed the offender — and it is the
+    *declaration* that ships: the Dockerfile runs ``pip install ./mcp-email``,
+    which pulled GPL-3.0 ``aioimaplib`` into every production image even though
+    no module ever imported it.
+    """
+    offenders = []
+    for pyproject in sorted(_REPO_ROOT.glob("**/pyproject.toml")):
+        parts = set(pyproject.parts)
+        if parts & {"node_modules", ".venv", "build", ".git", "site-packages"}:
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        project = data.get("project") or {}
+        declared = list(project.get("dependencies") or [])
+        for group in (project.get("optional-dependencies") or {}).values():
+            declared.extend(group)
+        for spec in declared:
+            # "aioimaplib>=1.1.0" / "pkg[extra] == 1.0" → "aioimaplib"
+            name = re.split(r"[<>=!~\[\s;]", str(spec), maxsplit=1)[0].strip().lower()
+            if name in _BANNED_DISTRIBUTIONS:
+                rel = pyproject.relative_to(_REPO_ROOT)
+                offenders.append(f"{rel}: {spec}")
+    assert not offenders, (
+        "Banned (copyleft/closed) packages declared as dependencies:\n  "
+        + "\n  ".join(offenders)
+        + "\nThese ship in the Docker image and poison the MIT license."
     )
 
 

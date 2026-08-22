@@ -11,5 +11,7 @@ license = {text = "MIT"}
 dependencies = [
     "mcp>=1.0.0",
     "aiosmtplib>=3.0.0",
-    "aioimaplib>=1.1.0",
+    # IMAP uses the stdlib `imaplib` (PSF, permissive) via asyncio.to_thread —
+    # deliberately NOT aioimaplib, which is GPL-3.0 and would poison this MIT
+    # project the moment the Docker image ships it. See tests/test_license_gate.py.
 ]

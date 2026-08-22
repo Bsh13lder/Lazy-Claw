@@ -107,7 +107,7 @@ Credentials persisted in `data/email_configs.json` (or `~/.lazyclaw/email_config
 4. **No attachment support** -- Can't read or send attachments. Major gap for a production email tool.
 5. **Gmail IMAP quota risk** -- Rapid-fire IMAP operations can hit Gmail's rate limits (15 connections/account, 250 operations/minute). No rate limiting implemented.
 6. **aiosmtplib connection test** -- The setup function tests SMTP but not IMAP. A bad IMAP password would pass setup and fail on first read.
-7. **aioimaplib listed but unused** -- pyproject.toml lists `aioimaplib` as a dependency but the code uses stdlib `imaplib` with `asyncio.to_thread()`. Wasted dependency.
+7. ~~**aioimaplib listed but unused**~~ -- FIXED 2026-08-22. It was worse than wasted: aioimaplib is GPL-3.0 and `pip install ./mcp-email` in the Dockerfile shipped it in every production image of an MIT project. Declaration removed; the code always used stdlib `imaplib` with `asyncio.to_thread()`.
 
 ### Public vs Private Recommendation: PUBLIC
 
@@ -121,7 +121,7 @@ Credentials persisted in `data/email_configs.json` (or `~/.lazyclaw/email_config
 
 **Before release**:
 - Encrypt stored credentials via vault
-- Remove unused `aioimaplib` dependency
+- ~~Remove unused `aioimaplib` dependency~~ (done 2026-08-22 — it was GPL-3.0)
 - Add attachment support (at minimum reading)
 - Add IMAP connection test during setup
 - Add rate limiting for Gmail

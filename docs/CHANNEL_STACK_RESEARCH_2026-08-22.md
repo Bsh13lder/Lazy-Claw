@@ -9,7 +9,7 @@
 
 | Concern | Verdict |
 |---|---|
-| **Email license** | You were right — but it's **IMAP, not SMTP**. `aioimaplib` is **GPL-3.0**. `aiosmtplib` is MIT and fine. Swap `aioimaplib` → **`imap-tools` (Apache-2.0)**. ~1 day of work. |
+| **Email license** | You were right — but it's **IMAP, not SMTP**. `aioimaplib` is **GPL-3.0**. `aiosmtplib` is MIT and fine. **RESOLVED 2026-08-22:** it was declared but never imported — the server has always used stdlib `imaplib` (PSF) via `asyncio.to_thread`. Deleting one line removed GPL-3.0 from the shipped image. No `imap-tools` migration needed. |
 | **WhatsApp missing names** | **Root-caused, not a mystery.** Saved address-book names live in WhatsApp's `critical_unblock_low` app-state collection. `index.js:634` resyncs `regular_high`, `regular_low`, `critical_block` — it never asks for `critical_unblock_low`. So `Contact.name` is always empty and you fall through to `notify` (the name *they* chose) or the raw JID. |
 | **WhatsApp missing numbers** | LID migration. `extractPhone()` returns `null` for anything not `@s.whatsapp.net` (`index.js:1013`), and every `@lid` contact hits that. Baileys 7 hands you `Contact.lid` + `Contact.phoneNumber` directly; your code reads `c.jid`, a field **that does not exist** on the type (`index.js:699`), so it silently falls back to `c.id`. |
 | **WhatsApp fragility** | You're on Baileys `^6.7.16`; latest is **7.0.0-rc14**, which added a real `LIDMappingStore`. Your hand-rolled "two contacts share a name ⇒ same person" heuristic (`_buildLidMap`, `index.js:295`) is a guess that 7.x makes unnecessary. |
@@ -277,7 +277,7 @@ Ordered by value-per-effort. Sizes are rough.
 | 1 | Add `"critical_unblock_low"` to both `resyncAppState` calls (`index.js:634`, `:937`) | **1 line** | Saved contact names start arriving. Direct fix for your complaint. |
 | 2 | Read `c.lid` / `c.phoneNumber` instead of the nonexistent `c.jid` (`index.js:699`) | ~10 lines | Restores phone numbers wherever WhatsApp provides them. |
 | 3 | Make `fetchUnifiedContacts()` tier-0 in `_displayNameForJid()` (`index.js:1031`) | ~30 lines | Your own address book beats anything WhatsApp does or doesn't sync. Survives LID entirely. |
-| 4 | Replace `aioimaplib` with `imap-tools` in `mcp-email` | ~1 day | Removes GPL-3.0 from an MIT project. Non-negotiable before any public release. |
+| 4 | ~~Replace `aioimaplib` with `imap-tools`~~ — **DONE 2026-08-22**, and it was a one-line delete: the dep was declared but never imported. Gate extended to scan declared deps in every `pyproject.toml`, not just installed ones. | done | GPL-3.0 no longer ships in the Docker image. |
 
 ### Next — LazyClaw, removes the fragility
 

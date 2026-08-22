@@ -171,6 +171,27 @@ def test_overlay_removes_stale_cdp_port_when_env_unset(monkeypatch) -> None:
     assert env["FOO"] == "bar"
 
 
+def test_overlay_leaves_cdp_host_alone_when_docker_check_unavailable(monkeypatch) -> None:
+    """No docker check = no knowledge, so the stored value must survive.
+
+    ``docker=True`` here is the point: if the import had succeeded the key
+    would have been rewritten to ``host.docker.internal``, so an untouched
+    ``stale.example`` can only mean the ImportError branch ran.
+    """
+    _stub_user_context(monkeypatch, docker=True, profile_dir="/profiles/u1")
+    # None in sys.modules makes ``from ... import ...`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "lazyclaw.browser.host_bridge", None)
+    cfg = Config(port=18789)
+    env = _build_bundled_env_overlay(
+        cfg, "u1", "mcp-apihunter",
+        existing_env={"LAZYCLAW_CDP_HOST": "stale.example"},
+    )
+    assert env["LAZYCLAW_CDP_HOST"] == "stale.example"
+    # The rest of the user-context block still ran.
+    assert env["LAZYCLAW_USER_ID"] == "u1"
+    assert env["LAZYCLAW_BROWSER_PROFILE_DIR"] == "/profiles/u1"
+
+
 def test_overlay_skips_user_context_for_non_optin_mcps(monkeypatch) -> None:
     _stub_user_context(monkeypatch, docker=True)
     cfg = Config(port=18789)

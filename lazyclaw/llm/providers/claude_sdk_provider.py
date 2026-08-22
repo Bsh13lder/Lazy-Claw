@@ -784,6 +784,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
 
                 elif isinstance(msg, ResultMessage):
                     usage_raw = msg.usage
+                    if msg.total_cost_usd is None:
+                        logger.debug(
+                            "Claude SDK: cost telemetry missing from "
+                            "ResultMessage (session=%s) — cost reported as $0",
+                            getattr(msg, "session_id", "?"),
+                        )
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id
@@ -1104,6 +1110,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
                             ))
                 elif isinstance(msg, ResultMessage):
                     usage_raw = msg.usage
+                    if msg.total_cost_usd is None:
+                        logger.debug(
+                            "Claude SDK stream: cost telemetry missing from "
+                            "ResultMessage (session=%s) — cost reported as $0",
+                            getattr(msg, "session_id", "?"),
+                        )
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id

@@ -2628,6 +2628,34 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return _id_result.output
 
+        # ── NL ask-conversation trigger ───────────────────────────────────
+        # "ask Alice on WhatsApp if she's coming" → resolve contact →
+        # start autonomous conversation task.  The on/via <channel> anchor
+        # in the regex prevents false-triggers on plain chat messages.
+        # Never raises — start_ask_conversation always returns a string.
+        try:
+            from lazyclaw.runtime.instant_dispatch import (
+                match_ask_conversation,
+                start_ask_conversation,
+            )
+            _ask_match = match_ask_conversation(message)
+            if _ask_match is not None:
+                _ask_reply = await start_ask_conversation(
+                    self.config, user_id, _ask_match,
+                )
+                await cb.on_event(AgentEvent(
+                    INSTANT_COMMAND,
+                    _ask_reply,
+                    {"path": "ask_conversation", "channel": _ask_match["channel"]},
+                ))
+                await cb.on_event(AgentEvent("done", "Response ready", {}))
+                return _ask_reply
+        except Exception:
+            logger.debug(
+                "ask_conversation hook raised; continuing to brain path",
+                exc_info=True,
+            )
+
         # ── Plan-mode fix-task gate ──────────────────────────────────────
         # Intercepted before the compound splitter so the user gets one
         # coherent plan dialogue instead of N independent sub-task plans.

@@ -86,6 +86,11 @@ Brain = thin router; work is delegated via `agent(agent_type, task, run_in_backg
 ### Browser (`browser/`)
 CDP-only (no Playwright). Brave > Chrome > Chromium auto-detect; shared per-user profiles (`browser_profiles/{user_id}/`, optional per-account slugs) so one login serves all tools. Semantic accessibility-tree snapshots instead of screenshots. Event bus is UI-only — **browser events never enter LLM context**. Checkpoints block before risky actions (submit/pay/book/delete/sign/send). Cloudflare-protected sites (Upwork, LinkedIn) must go through the signed-in host Brave via `cdp_port` — fresh headless fails fingerprinting silently.
 
+### Unified comms (`comms/`)
+`thread_store` (`channel_threads`) + `ChannelGateway` — one channel-agnostic read/send façade over the per-channel MCP tools, exposed at `/api/inbox/*`; thread bodies are always read LIVE. Tool lookup is **exact-match first, MCP base-name second** (native primacy). Reads return a typed `ReadResult` so a dead channel never renders as "no messages yet". WhatsApp is full; email/Instagram fall back to the single configured account; Telegram is notify-only (Bot API can't read DMs).
+
+Two AI paths, deliberately separate: **inbox "Ask AI"** (`conversation_runner.py`) replies in an EXISTING thread — one grounded turn that reads the thread FIRST, no approval gate; **autonomous conversations** (`autonomous_conversation.py` + `conversation_store.py` + `approvals.py`) run outbound "ask X on `<channel>`" (NL trigger in `instant_dispatch`) through `drafting → awaiting_approval → running → done`, gated on ONE first-message approval, then driven by the heartbeat. Encrypted `conversation_tasks`.
+
 ### Memory
 5 layers merged in `runtime/context_builder.py`: live messages → sliding window → daily summary → weekly rollup → long-term encrypted facts. LazyBrain is the single home for knowledge (encrypted notes, wikilinks, graph, semantic search). **Memory isolation:** never bridge `~/.claude/plans/*` or `~/.claude/projects/*` into lazybrain — a past mirror leaked cross-project session content.
 

@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from lazyclaw.comms.models import VALID_COMMS_CHANNELS
+
 logger = logging.getLogger(__name__)
 
 
@@ -248,3 +250,140 @@ async def try_instant_dispatch(
         "[dispatch] instant_dispatch MISS — no route matched, falling back to brain path",
     )
     return None
+
+
+# ---------------------------------------------------------------------------
+# NL "ask <who> on <channel> <goal>" → autonomous conversation task
+# ---------------------------------------------------------------------------
+
+# The trigger channels are EXACTLY the channels ChannelGateway can actually
+# read AND send on — derived from VALID_COMMS_CHANNELS so the two can never
+# drift apart. Telegram is deliberately excluded there (it's the control
+# channel: the Bot API can't read arbitrary contact DMs), so "ask X on
+# telegram …" falls through to the brain instead of creating a conversation
+# that could only ever fail at its first send.
+_ASK_RE = re.compile(
+    r"\bask\s+(?P<who>[A-Za-z0-9 ._-]+?)\s+(?:on|via|through)\s+"
+    r"(?P<channel>" + "|".join(VALID_COMMS_CHANNELS) + r")\b[,:]?\s+(?P<goal>.+)",
+    re.IGNORECASE,
+)
+
+# Maps channel name → handle key in ContactRecord.handles (and fallback helper).
+# Note: "whatsapp" is NOT listed here because _extract_handle has an early-return
+# for whatsapp that calls record.whatsapp_jid() directly.
+_CHANNEL_HANDLE_KEY: dict[str, str] = {
+    "email": "email",
+    "instagram": "instagram",
+}
+
+# Pronouns and generic nouns that are never valid contact names. If the regex
+# captures one of these as ``who``, the "ask" pattern matched a phrase like
+# "ask me on whatsapp to remind John" or "ask them via email about it" — not a
+# real conversation target. Returning None lets the brain handle it normally.
+_ASK_WHO_DENYLIST = frozenset({
+    "me", "them", "us", "you", "it", "him", "her",
+    "someone", "anyone", "somebody", "anybody",
+})
+
+
+def match_ask_conversation(text: str) -> dict | None:
+    """Detect 'ask <who> on <channel> <goal>' → conversation task params.
+
+    Returns a dict with keys ``who``, ``channel`` (lowercased), ``goal``,
+    or None if the text doesn't match the pattern.  The ``on/via <channel>``
+    anchor prevents false-triggers on plain chat messages.
+
+    Returns None when ``who`` is a pronoun/non-name (e.g. "me", "them") to
+    avoid triggering a bogus conversation against a non-contact.
+    """
+    m = _ASK_RE.search(text or "")
+    if not m:
+        return None
+    who = m.group("who").strip()
+    if who.lower() in _ASK_WHO_DENYLIST:
+        return None
+    return {
+        "who": who,
+        "channel": m.group("channel").lower(),
+        "goal": m.group("goal").strip(),
+    }
+
+
+def _extract_handle(record, channel: str) -> str | None:
+    """Extract the best channel handle from a ContactRecord for the given channel."""
+    if channel == "whatsapp":
+        return record.whatsapp_jid()
+    key = _CHANNEL_HANDLE_KEY.get(channel)
+    if key is None:
+        return None
+    val = record.handles.get(key)
+    if not val:
+        return None
+    # handles may store a list (e.g. email: [...]) or a scalar string
+    if isinstance(val, list):
+        return val[0] if val else None
+    return str(val)
+
+
+async def start_ask_conversation(config, user_id: str, match: dict) -> str:
+    """Resolve contact + start an autonomous conversation for an ask-trigger match.
+
+    ``match`` is the dict returned by :func:`match_ask_conversation`.
+
+    Returns a short user-facing confirmation string.  Never raises — any
+    failure (contact not found, autonomous_conversation import error, etc.) is
+    caught and surfaced as a human-readable error string so the caller can
+    return it directly rather than falling through to the brain.
+    """
+    who: str = match["who"]
+    channel: str = match["channel"]
+    goal: str = match["goal"]
+
+    # Resolve the contact handle via the unified contact store.
+    contact_handle: str = who  # graceful fallback: raw name string
+    try:
+        from lazyclaw.contacts.store import find_contact as _find_contact
+
+        matches = await _find_contact(config, user_id, who, limit=1)
+        if matches:
+            resolved = _extract_handle(matches[0], channel)
+            if resolved:
+                contact_handle = resolved
+            else:
+                # Contact found but no handle for this channel; use canonical name.
+                contact_handle = matches[0].name_canonical or who
+    except Exception:
+        logger.warning(
+            "start_ask_conversation: find_contact failed for %r — using raw name",
+            who, exc_info=True,
+        )
+
+    # Import autonomous_conversation lazily to avoid import-order surprises.
+    try:
+        from lazyclaw.comms import autonomous_conversation
+    except ImportError:
+        logger.warning("start_ask_conversation: autonomous_conversation not importable")
+        return (
+            f"Sorry, the conversation runner isn't available yet. "
+            f"I can't start the conversation with {who} on {channel} right now."
+        )
+
+    try:
+        await autonomous_conversation.start(
+            config,
+            user_id,
+            channel=channel,
+            contact=contact_handle,
+            goal=goal,
+        )
+    except Exception:
+        logger.exception(
+            "start_ask_conversation: autonomous_conversation.start raised for who=%r channel=%r",
+            who, channel,
+        )
+        return (
+            f"Something went wrong scheduling the conversation with {who} on {channel}. "
+            f"Please try again or start it manually."
+        )
+
+    return f"On it — I'll ask {who} on {channel} and report back."

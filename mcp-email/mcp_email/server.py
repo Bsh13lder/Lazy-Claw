@@ -103,6 +103,37 @@ _load_configs()
 
 
 # ---------------------------------------------------------------------------
+# Account resolver
+# ---------------------------------------------------------------------------
+
+def _resolve_account(addr: str | None) -> str | None:
+    """Resolve an email account address with single-account fallback.
+
+    - If ``addr`` is a non-empty string and is in ``_configs``: return it.
+    - If ``addr`` is non-empty but NOT in ``_configs``: return None (unknown
+      account — caller should surface a clear "not configured" error).
+    - If ``addr`` is empty/None: fall back to the sole configured account
+      when exactly one is configured, else None.
+    """
+    if addr:
+        return addr if addr in _configs else None
+    # No account specified → use the sole configured account, if exactly one.
+    return next(iter(_configs)) if len(_configs) == 1 else None
+
+
+def _account_error(requested: str | None) -> str:
+    """Return a human-readable error string when account resolution fails."""
+    if not requested:
+        if not _configs:
+            return "No email account configured. Use email_setup first."
+        return (
+            "Multiple email accounts configured — please specify the 'email' sender. "
+            f"Accounts: {', '.join(_configs)}"
+        )
+    return f"Account {requested} not configured. Use email_setup first."
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
 
@@ -163,13 +194,20 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="email_send",
-            description="Send an email from a configured account.",
+            description=(
+                "Send an email from a configured account. "
+                "If only one account is configured, 'email' (sender) may be omitted."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "email": {
                         "type": "string",
-                        "description": "Sender email (must be configured via email_setup)",
+                        "description": (
+                            "Sender email address (must be configured via email_setup). "
+                            "May be omitted when exactly one account is configured."
+                        ),
+                        "default": "",
                     },
                     "to": {
                         "type": "string",
@@ -197,21 +235,26 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                 },
-                "required": ["email", "to", "subject", "body"],
+                "required": ["to", "subject", "body"],
             },
         ),
         Tool(
             name="email_read",
             description=(
                 "Read recent emails from a configured account via IMAP. "
-                "For bulk operations (organize, cleanup), set unread_only=false and limit=50+."
+                "For bulk operations (organize, cleanup), set unread_only=false and limit=50+. "
+                "If only one account is configured, 'email' may be omitted."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "email": {
                         "type": "string",
-                        "description": "Email account to read from",
+                        "description": (
+                            "Email account to read from. "
+                            "May be omitted when exactly one account is configured."
+                        ),
+                        "default": "",
                     },
                     "folder": {
                         "type": "string",
@@ -229,7 +272,7 @@ async def list_tools() -> list[Tool]:
                         "default": True,
                     },
                 },
-                "required": ["email"],
+                "required": [],
             },
         ),
         Tool(
@@ -237,14 +280,19 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Search emails by query string via IMAP SEARCH. "
                 "For bulk operations (organize, cleanup), use limit=50 or higher. "
-                "Default limit=10 is for quick lookups only."
+                "Default limit=10 is for quick lookups only. "
+                "If only one account is configured, 'email' may be omitted."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "email": {
                         "type": "string",
-                        "description": "Email account to search",
+                        "description": (
+                            "Email account to search. "
+                            "May be omitted when exactly one account is configured."
+                        ),
+                        "default": "",
                     },
                     "query": {
                         "type": "string",
@@ -261,7 +309,7 @@ async def list_tools() -> list[Tool]:
                         "default": 10,
                     },
                 },
-                "required": ["email", "query"],
+                "required": ["query"],
             },
         ),
         Tool(
@@ -544,10 +592,10 @@ async def _handle_status(args: dict) -> str:
 
 
 async def _handle_send(args: dict) -> str:
-    addr = args["email"]
-    cfg = _configs.get(addr)
-    if not cfg:
-        return f"Account {addr} not configured. Use email_setup first."
+    addr = _resolve_account(args.get("email") or None)
+    if addr is None:
+        return _account_error(args.get("email") or None)
+    cfg = _configs[addr]
 
     to = args["to"]
     subject = args["subject"]
@@ -594,10 +642,10 @@ async def _handle_send(args: dict) -> str:
 
 
 async def _handle_read(args: dict) -> str:
-    addr = args["email"]
-    cfg = _configs.get(addr)
-    if not cfg:
-        return f"Account {addr} not configured. Use email_setup first."
+    addr = _resolve_account(args.get("email") or None)
+    if addr is None:
+        return _account_error(args.get("email") or None)
+    cfg = _configs[addr]
 
     folder = args.get("folder", "INBOX")
     limit = args.get("limit", 10)
@@ -610,10 +658,10 @@ async def _handle_read(args: dict) -> str:
 
 
 async def _handle_search(args: dict) -> str:
-    addr = args["email"]
-    cfg = _configs.get(addr)
-    if not cfg:
-        return f"Account {addr} not configured. Use email_setup first."
+    addr = _resolve_account(args.get("email") or None)
+    if addr is None:
+        return _account_error(args.get("email") or None)
+    cfg = _configs[addr]
 
     query = args["query"]
     folder = args.get("folder", "INBOX")

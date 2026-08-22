@@ -23,6 +23,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -540,3 +541,37 @@ async def delete_channel_instruction(
         )
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": removed}
+
+
+# ── Autonomous conversations (outbound "ask X on <channel>") ──────────────────
+# NOTE: these approve/deny an OUTBOUND conversation started by the NL
+# ask-trigger (comms/autonomous_conversation.py), not the inbox "Ask AI"
+# button above — that one is a single grounded turn with no approval gate.
+
+
+def _conversation_deps():
+    """Build a minimal deps object for on_approval (only registry is used by the send path)."""
+    return SimpleNamespace(registry=_get_registry(), eco_router=None, permission_checker=None)
+
+
+@router.post("/conversations/{conversation_id}/approve")
+async def approve_conversation(
+    conversation_id: str,
+    approved: bool = Query(True),
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Approve or deny a first-message approval for an autonomous conversation.
+
+    ``approved=true`` (default): sends the drafted opener and transitions to 'running'.
+    ``approved=false``: aborts the conversation.
+
+    Returns ``{"success": true, "approved": <bool>}``.
+    """
+    from lazyclaw.comms import autonomous_conversation, conversation_store
+    conv = await conversation_store.get_conversation(config, user.id, conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    deps = _conversation_deps()
+    await autonomous_conversation.on_approval(config, deps, conv, approved)
+    return {"success": True, "approved": approved}

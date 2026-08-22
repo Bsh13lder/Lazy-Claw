@@ -13,11 +13,59 @@ from lazyclaw.runtime.tool_result import ToolResult
 
 McpCall = Callable[[str, dict], Awaitable[dict]]
 
-# channel -> (read_tool, send_tool, send_recipient_key, send_text_key)
-_DISPATCH = {
-    "whatsapp": ("whatsapp_read", "whatsapp_send", "to", "message"),
-    "email": ("email_search", "email_send", "to", "body"),
-    "instagram": ("instagram_read_dms", "instagram_send_dm", "to_username", "message"),
+# channel -> (read_tool, send_tool, send_recipient_key, send_text_key, extra_send_args, extra_read_args)
+#
+# extra_send_args / extra_read_args are static kwargs merged into every call.
+# They supply required params the thin gateway can't derive from the caller
+# (e.g. Instagram's "username" = the logged-in account, email's sender "email"
+# and a default "subject").  The MCP servers fill in auth details from their
+# own configuration when the param names the configured account identity.
+#
+# Per-channel status (see gateway.py docstring):
+#   whatsapp  — WORKS          (to + message / contact + limit)
+#   email     — WORKS-WITH-DEFAULTS (sender email="" → server uses the single
+#               configured account when omitted or empty; subject defaults to
+#               "(no subject)" for v1 thin sends; search uses query=contact)
+#   instagram — WORKS-WITH-DEFAULTS (username="" → server uses the configured
+#               account; read maps contact → unread_only=False + no username
+#               filter; send maps to_username + message)
+#
+# Telegram is intentionally absent: the bot can't read arbitrary contact DMs
+# and is handled separately via TelegramNotifier.
+_DISPATCH: dict[str, tuple[str, str, str, str, dict, dict]] = {
+    "whatsapp": (
+        "whatsapp_read",
+        "whatsapp_send",
+        "to",
+        "message",
+        {},                         # no extra send args
+        {},                         # no extra read args (contact + limit passed dynamically)
+    ),
+    "email": (
+        "email_search",
+        "email_send",
+        "to",
+        "body",
+        # email_send requires "email" (sender account) + "subject".
+        # Passing email="" lets the server fall back to its single configured
+        # account; "(no subject)" is an acceptable v1 default.
+        {"email": "", "subject": "(no subject)"},
+        # email_search requires "email" (account) + "query".
+        # contact name is passed as "query" dynamically; email="" → server default.
+        {"email": ""},
+    ),
+    "instagram": (
+        "instagram_read_dms",
+        "instagram_send_dm",
+        "to_username",
+        "message",
+        # instagram_send_dm requires "username" (your logged-in account).
+        # Passing username="" lets the server use its configured account.
+        {"username": ""},
+        # instagram_read_dms requires "username" (your logged-in account).
+        # Passing username="" → server default; unread_only=False to see all threads.
+        {"username": "", "unread_only": False},
+    ),
 }
 
 # channel -> media download tool (message bytes by id). Channels without an
@@ -25,6 +73,31 @@ _DISPATCH = {
 _MEDIA_DOWNLOAD = {
     "whatsapp": "whatsapp_download_media",
 }
+
+
+# Substrings (case-insensitive) that indicate an MCP tool returned an error
+# string rather than a real success payload.  Used in build_gateway._call to
+# prevent wrapping error text as {"status": "sent"}.
+_ERROR_MARKERS: tuple[str, ...] = (
+    "not configured",
+    "no session",
+    "setup first",
+    "failed",
+    "could not",
+    "error",
+)
+
+
+def _looks_like_error(text: str) -> bool:
+    """Return True when a plain string result looks like a failure message.
+
+    Matches any of ``_ERROR_MARKERS`` case-insensitively.  Used to stop
+    error strings from being wrapped as ``{"status": "sent", "raw": text}``,
+    which would cause ``ChannelGateway.send`` to report ``ok=True`` for a
+    no-op send (the silent failure mode described in comms ADR).
+    """
+    lower = text.lower()
+    return any(marker in lower for marker in _ERROR_MARKERS)
 
 
 def _parse_messages(result: object) -> list[Msg]:
@@ -69,9 +142,14 @@ class ChannelGateway:
         spec = _DISPATCH.get(channel)
         if not spec:
             return ReadResult(ok=True)
-        read_tool = spec[0]
+        read_tool, _, _, _, _, extra_read = spec
+        # extra_read supplies the per-channel account params the thin gateway
+        # can't derive (email's "email", instagram's "username") — without them
+        # those MCP servers raise KeyError and the read fails. Caller-derived
+        # keys go last so they always win over the static defaults.
+        args = {**extra_read, "contact": contact, "limit": limit}
         try:
-            result = await self._call(read_tool, {"contact": contact, "limit": limit})
+            result = await self._call(read_tool, args)
         except Exception as e:  # surface as typed failure, never raise
             return ReadResult(ok=False, error=str(e))
         # The _call adapter (and some MCP tools) report failures as an error
@@ -104,9 +182,10 @@ class ChannelGateway:
         spec = _DISPATCH.get(channel)
         if not spec:
             return SendResult(ok=False, error=f"unsupported channel: {channel}")
-        _, send_tool, rcpt_key, text_key = spec
+        _, send_tool, rcpt_key, text_key, extra_send, _ = spec
+        args = {**extra_send, rcpt_key: contact, text_key: text}
         try:
-            result = await self._call(send_tool, {rcpt_key: contact, text_key: text})
+            result = await self._call(send_tool, args)
         except Exception as e:  # surface as typed failure, never raise
             return SendResult(ok=False, error=str(e))
         if not isinstance(result, dict):
@@ -149,6 +228,15 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
         skill = registry.get(tool_name)   # returns BaseSkill | None
         result: str | ToolResult = await skill.execute(user_id, args)
 
+    Resolution order is EXACT-MATCH FIRST, then MCP base-name — native
+    primacy. An MCP server that happens to expose a tool with the same base
+    name must never shadow the native skill (see the native-primacy tool
+    collision: a bridged MCP tool won the lookup and hung the loop).
+
+    If both return None the call returns a clean error dict so ChannelGateway
+    surfaces ``SendResult(ok=False)`` / ``ReadResult(ok=False)`` rather than
+    raising.
+
     BaseSkill.execute returns a JSON string or ToolResult; this adapter
     normalises the result to a dict so ChannelGateway's .get("status") /
     .get("messages") calls work correctly.
@@ -180,6 +268,10 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
             parsed = json.loads(text)
             return parsed if isinstance(parsed, dict) else {"status": "sent", "raw": text}
         except Exception:
+            # Plain non-JSON string — detect known error patterns before
+            # wrapping as a success so callers don't get a false ok=True.
+            if _looks_like_error(text):
+                return {"status": "error", "error": text}
             return {"status": "sent", "raw": text}
 
     return ChannelGateway(mcp_call=_call)

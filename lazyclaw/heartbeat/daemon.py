@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import tempfile
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from lazyclaw.runtime.browser_turn_lock import (
     live_browser_guard,
 )
 from lazyclaw.notifications.dispatch import deliver
+from lazyclaw.comms import autonomous_conversation, conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +247,9 @@ class HeartbeatDaemon:
         telegram_push=None,
         notifier_factory=None,
         team_lead=None,
+        registry=None,
+        eco_router=None,
+        permission_checker=None,
     ) -> None:
         self._config = config
         self._lane_queue = lane_queue
@@ -259,6 +264,13 @@ class HeartbeatDaemon:
         # the ``background_tasks`` table and kills Chrome out from under
         # an explore subagent that's mid-scrape.
         self._team_lead = team_lead
+        # Runtime deps for autonomous_conversation.step (injected at construction
+        # by app.py / cli.py where these objects exist).  All three default to
+        # None so existing callers and tests that don't pass them keep working;
+        # _conversation_deps uses them when present.
+        self._registry = registry
+        self._eco_router = eco_router
+        self._permission_checker = permission_checker
         self._task: asyncio.Task | None = None
         # In-memory record of "we already seeded today's journal for this user".
         # Resets on restart (idempotent re-seed via tag lookup is cheap).
@@ -498,6 +510,12 @@ class HeartbeatDaemon:
             await self._sweep_eod_summary()
         except Exception:
             logger.debug("EOD summary sweep failed", exc_info=True)
+
+        # Advance any autonomous channel conversations that are due.
+        try:
+            await self._check_conversations()
+        except Exception:
+            logger.debug("conversation tick sweep failed", exc_info=True)
 
         # Awake mode reconcile — re-assert caffeinate + pmset if they drifted
         # (container restart, post-nap wake, etc.). Cheap HTTP probe; fails
@@ -3006,6 +3024,33 @@ class HeartbeatDaemon:
             logger.info("Persistent browser running (CDP port %d)", port)
         else:
             logger.warning("Failed to launch persistent browser")
+
+    def _conversation_deps(self, user_id: str):
+        """Build a SimpleNamespace of runtime deps for autonomous_conversation.step.
+
+        Returns the real registry/eco_router/permission_checker when the daemon
+        was constructed with them (production path — see cli.py / cli_tui.py).
+        Falls back to None for all three in test/minimal setups so the runner's
+        existing ``if deps.registry is None`` guards short-circuit cleanly.
+        """
+        return types.SimpleNamespace(
+            registry=self._registry,
+            eco_router=self._eco_router,
+            permission_checker=self._permission_checker,
+        )
+
+    async def _check_conversations(self) -> None:
+        """Advance every due autonomous conversation by one step."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        due = await conversation_store.list_due(self._config, now_iso)
+        for conv in due:
+            try:
+                deps = self._conversation_deps(conv["user_id"])
+                await autonomous_conversation.step(self._config, deps, conv)
+            except Exception:
+                logger.exception(
+                    "conversation step failed for %s", conv.get("id")
+                )
 
     async def _load_heartbeat_md(self) -> str:
         """Load the HEARTBEAT.md personality file content."""

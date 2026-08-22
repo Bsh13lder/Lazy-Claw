@@ -45,7 +45,7 @@ RUN set -eux; \
 # - lsof: ram_monitor.py port checks
 # - patch: workspace-mcp local patch step below
 # - VNC stack (xvfb / x11vnc / websockify / novnc): share_browser_control remote takeover
-# - tesseract-ocr (+eng): browser `ocr` action fallback — Apple Vision never
+# - tesseract-ocr (+eng/spa/ita): browser `ocr` action fallback — Apple Vision never
 #   exists inside the Linux container, so without the binary the whole OCR
 #   ladder is dead (2026-07-31 upwork task burned its budget partly on this)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -57,6 +57,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         novnc \
         tesseract-ocr \
         tesseract-ocr-eng \
+        tesseract-ocr-spa \
+        tesseract-ocr-ita \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

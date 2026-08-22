@@ -199,17 +199,53 @@ async def wait_for_page_ready(conn, timeout: float = 5.0) -> bool:
         return False
 
 
+# How many times to reload the page before falling back to a widget click.
+_CF_MAX_RELOADS = 2
+
+
+async def _current_challenge_state(conn) -> bool:
+    """True if the page still LOOKS like a Cloudflare interstitial right now."""
+    try:
+        result = await conn.send(
+            "Runtime.evaluate",
+            {
+                "expression": "document.title + ' ' + "
+                "(document.body?.innerText?.substring(0, 300) || '')"
+            },
+        )
+        text = result.get("result", {}).get("value", "")
+    except Exception:
+        return False
+    return any(p in text for p in CLOUDFLARE_PATTERNS)
+
+
+async def _reload_and_settle(conn, settle: float = 3.0) -> None:
+    """Reload the page and give Cloudflare's JS time to auto-clear.
+
+    A signed-in browser (the host Brave carrying its ``cf_clearance`` cookie)
+    almost always passes the "Just a moment" interstitial on its own within a
+    few seconds — or on a plain reload — with NO widget interaction. This is far
+    more reliable than hunting for a Turnstile checkbox buried in an iframe.
+    """
+    try:
+        await conn.send("Page.reload", {"ignoreCache": False})
+    except Exception:
+        logger.debug("Page.reload failed during Cloudflare recovery", exc_info=True)
+    await asyncio.sleep(settle)
+
+
 async def detect_and_solve_cloudflare(conn, timeout: float = 20.0) -> bool:
-    """Detect Cloudflare challenge and attempt to solve via touch click.
+    """Detect a Cloudflare interstitial and clear it — wait+reload first.
 
     Flow:
-    1. Check if page is a Cloudflare challenge
-    2. Find the verify checkbox/button
-    3. Touch-click it (simulates touchscreen tap)
-    4. Wait for challenge to resolve
-    5. Return True if page loaded past Cloudflare
+    1. Check if the page is a Cloudflare challenge.
+    2. PRIMARY: wait ~3s (let CF's JS auto-pass with the browser's clearance
+       cookie), re-check, and reload up to ``_CF_MAX_RELOADS`` times.
+    3. FALLBACK: only if reloads don't clear it, try the interactive Turnstile
+       checkbox touch-click (the older behaviour).
+    4. Return True if the page loaded past Cloudflare.
 
-    Returns False if not a challenge or couldn't solve it.
+    Returns False if it never cleared.
     """
     # Check if this is actually a Cloudflare page
     try:
@@ -226,9 +262,31 @@ async def detect_and_solve_cloudflare(conn, timeout: float = 20.0) -> bool:
     if not is_challenge:
         return True  # Not a challenge — page is fine
 
-    logger.info("Cloudflare challenge detected, attempting auto-solve...")
+    logger.info("Cloudflare challenge detected — trying wait+reload first...")
 
-    # Wait a moment for Turnstile widget to render
+    # PRIMARY: wait + reload. Give CF's JS a few seconds to auto-clear with the
+    # browser's clearance cookie; if it's still up, reload and wait again. Most
+    # signed-in-Brave interstitials clear here without ever touching a widget.
+    for attempt in range(_CF_MAX_RELOADS):
+        await asyncio.sleep(random.uniform(2.5, 3.5))
+        if not await _current_challenge_state(conn):
+            logger.info(
+                "Cloudflare cleared via wait/reload (attempt %d)", attempt + 1
+            )
+            return True
+        logger.info(
+            "Cloudflare still present — reloading (%d/%d)",
+            attempt + 1, _CF_MAX_RELOADS,
+        )
+        await _reload_and_settle(conn)
+
+    if not await _current_challenge_state(conn):
+        logger.info("Cloudflare cleared after final reload")
+        return True
+
+    # FALLBACK: the interactive Turnstile checkbox click, for the rarer pages
+    # that genuinely need an explicit tap.
+    logger.info("Cloudflare persisted after reloads — trying widget click...")
     await asyncio.sleep(random.uniform(1.5, 2.5))
 
     # Try to find and click the challenge element

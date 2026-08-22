@@ -47,7 +47,17 @@ async def _resolve_doc_id(
     if len(exact) == 1:
         return exact[0]["id"], None
     if len(exact) > 1:
-        return None, f"Multiple docs named '{ref}' — use the doc id."
+        # List candidate ids so the caller can retry with a concrete id instead
+        # of repeating the ambiguous name-based call forever (stuck loop).
+        opts = "; ".join(
+            f"id={r['id']}"
+            + (f" (updated {r['updated_at']})" if r.get("updated_at") else "")
+            for r in exact
+        )
+        return None, (
+            f"Multiple docs named '{ref}'. Retry with ONE of these ids as the "
+            f"doc reference — {opts}"
+        )
     subs = [r for r in rows if low in r["name"].lower()]
     if len(subs) == 1:
         return subs[0]["id"], None
@@ -95,9 +105,19 @@ class CreateDocSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.docs.store import create_doc
+        from lazyclaw.docs.store import create_doc, list_docs
 
         name = (params.get("name") or "Untitled doc").strip() or "Untitled doc"
+        # Idempotent create: reuse an existing live doc of the same name rather
+        # than spawning a silent duplicate (same class as the 2026-07-06 sheets
+        # duplicate incident — duplicate names cause name-ambiguity stuck loops).
+        for d in await list_docs(self._config, user_id):
+            if d["name"].strip().lower() == name.lower():
+                return (
+                    f"A doc named **{d['name']}** already exists (id `{d['id']}`) "
+                    f"— reusing it instead of creating a duplicate. Append with "
+                    f"append_to_doc, or choose a different name to force a new doc."
+                )
         row = await create_doc(self._config, user_id, name)
         return f"Created doc **{row['name']}** (id `{row['id']}`)."
 

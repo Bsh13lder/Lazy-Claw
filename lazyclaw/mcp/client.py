@@ -534,7 +534,10 @@ class MCPClient:
             or os.path.realpath(command) == os.path.realpath(sys.executable)
         )
         # If stored command is a python interpreter that no longer exists
-        # (e.g. registered on macOS, now running in Docker), use current one
+        # (e.g. registered on macOS, now running in Docker), use current one.
+        # Pairs with manager._canonical_bundled_config, which runs earlier (at
+        # connect) and also covers a stale command that still EXISTS — this
+        # one only fires when the path is gone.
         if not is_current_python and base_cmd.startswith("python") and not os.path.isfile(command):
             command = sys.executable
             is_current_python = True

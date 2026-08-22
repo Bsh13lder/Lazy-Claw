@@ -295,6 +295,12 @@ def _build_bundled_env_overlay(
     Re-runs the same opt-in checks as ``connect_and_register_bundled_mcps``
     so that env values (especially the per-process internal token) stay
     fresh across gateway restarts and don't need a DB migration.
+
+    The overlay is AUTHORITATIVE for the keys it derives: registration is
+    skip-if-exists, so a row written by an older install (or by the host venv
+    before the move into Docker) never heals itself. Fresh values overwrite
+    stored ones, and a derived key that no longer applies is removed rather
+    than inherited.
     """
     info = BUNDLED_MCPS.get(mcp_name)
     if not info:
@@ -312,7 +318,80 @@ def _build_bundled_env_overlay(
         overlay["LAZYCLAW_GATEWAY_URL"] = gateway_url
         overlay["LAZYCLAW_INTERNAL_TOKEN"] = get_internal_token()
 
+    if info.get("inject_user_context"):
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
+        overlay["LAZYCLAW_USER_ID"] = user_id
+        overlay["LAZYCLAW_BROWSER_PROFILE_DIR"] = str(
+            resolve_profile_dir(config, user_id),
+        )
+        # The parent process env is the only authority on the port — a stored
+        # row can carry one recorded by a different install.
+        cdp_port_env = os.environ.get("LAZYCLAW_CDP_PORT")
+        if cdp_port_env:
+            overlay["LAZYCLAW_CDP_PORT"] = cdp_port_env
+        else:
+            overlay.pop("LAZYCLAW_CDP_PORT", None)
+        # In Docker the MCP can't launch its own Chrome (no binary in the
+        # slim image) — point it at the user's host Brave. Outside Docker that
+        # hostname doesn't resolve, so a row registered in a container must
+        # lose it. If the check itself is unavailable we know nothing and
+        # leave whatever the row holds.
+        try:
+            from lazyclaw.browser.host_bridge import is_docker_runtime
+        except ImportError:
+            pass
+        else:
+            if is_docker_runtime():
+                overlay["LAZYCLAW_CDP_HOST"] = "host.docker.internal"
+            else:
+                overlay.pop("LAZYCLAW_CDP_HOST", None)
+
     return overlay
+
+
+def _canonical_bundled_config(name: str, server_cfg: dict) -> dict:
+    """Re-derive the launch command of a bundled module MCP. Returns a new dict.
+
+    A stored row keeps whatever the install that first wrote it computed, and
+    registration is skip-if-exists, so it never heals itself. Half of that is
+    already covered downstream: ``MCPClient._create_stdio_ctx`` (client.py)
+    swaps in the current interpreter when the stored ``python*`` command no
+    longer EXISTS. What it can't catch is a stale command that still exists —
+    a recreated host venv, or the base interpreter behind one — which passes
+    its allowlist and then dies on ``No module named ...`` because that
+    interpreter has none of our packages. That, plus pinning the module
+    identity of the args, is what this adds.
+
+    Only a row that already claims ``-m <bundled module>`` is ours: an MCP a
+    user added under a bundled name (say their own 'n8n') keeps its command.
+    npx / bin / node / remote entries and names we don't ship pass through.
+    """
+    info = BUNDLED_MCPS.get(name)
+    args = server_cfg.get("args") or []
+    if not info or "module" not in info or args[:2] != ["-m", info["module"]]:
+        return dict(server_cfg)
+    return {
+        **server_cfg,
+        "command": sys.executable,
+        "args": ["-m", info["module"], *info.get("extra_args", [])],
+    }
+
+
+def _describe_config_drift(stored: dict, healed: dict) -> str:
+    """Key-level summary of what connect-time healing changed ('' if nothing).
+
+    Key names only — env values carry user ids and filesystem paths.
+    """
+    parts = [k for k in ("command", "args") if stored.get(k) != healed.get(k)]
+    stored_env = stored.get("env") or {}
+    healed_env = healed.get("env") or {}
+    set_keys = sorted(k for k, v in healed_env.items() if stored_env.get(k) != v)
+    dropped_keys = sorted(k for k in stored_env if k not in healed_env)
+    if set_keys:
+        parts.append(f"env set {set_keys}")
+    if dropped_keys:
+        parts.append(f"env dropped {dropped_keys}")
+    return ", ".join(parts)
 
 
 async def install_bundled_mcp(name: str) -> tuple[bool, str]:
@@ -753,13 +832,28 @@ async def connect_server(
     if server_id in _active_clients:
         await disconnect_server(user_id, server_id)
 
-    # Apply bundled-MCP env overlays at CONNECT time, not register time.
-    # The internal-bridge token is per-process (rotates on restart) so we
-    # don't persist it in the encrypted config row; we re-derive it here.
-    server_cfg = dict(server["config"])
-    server_cfg["env"] = _build_bundled_env_overlay(
-        config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
-    )
+    # Refresh the derivable parts of a bundled MCP's launch config at CONNECT
+    # time, not register time: registration is skip-if-exists, so a stored row
+    # keeps whatever the install that first wrote it computed (a stale
+    # interpreter path, a stale/absent per-user env) forever.
+    server_cfg = _canonical_bundled_config(server["name"], server["config"])
+    server_cfg = {
+        **server_cfg,
+        "env": _build_bundled_env_overlay(
+            config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
+        ),
+    }
+    # The DB row and the UI keep showing the pre-refresh values, so without
+    # this line "why does the UI disagree with the running process?" costs a
+    # debugging session. Not always drift: it also fires for the per-process
+    # contact-bridge token, which is deliberately never stored.
+    drift = _describe_config_drift(server["config"], server_cfg)
+    if drift:
+        logger.info(
+            "Connect-time refresh overrode the stored row for %s (%s): %s — "
+            "the DB row and UI still show the old values",
+            server["name"], server_id, drift,
+        )
 
     client = MCPClient(
         server_id=server_id,

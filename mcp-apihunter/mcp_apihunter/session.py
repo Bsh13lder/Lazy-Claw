@@ -12,6 +12,7 @@ browser — unit tests inject a `StaticSessionProvider` with canned cookies.
 from __future__ import annotations
 
 import json
+import socket
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlparse
@@ -57,13 +58,31 @@ def _domain_matches(cookie_domain: str, want: str) -> bool:
     return want == cd or want.endswith("." + cd)
 
 
+def _resolve_dial_host(host: str) -> str:
+    """DNS-resolve ``host`` to the address we should actually dial.
+
+    Chromium's DevTools HTTP server answers 500 to any ``Host:`` header that
+    is not an IP address or ``localhost``, so a name like
+    ``host.docker.internal`` has to be dialed by its resolved IP. A literal IP
+    resolves to itself, so no special-casing is needed. On resolution failure
+    we dial the raw host — a wrong-but-honest attempt beats not trying.
+    """
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
 class CdpSessionProvider:
     """Reads live cookies from the running browser via CDP.
 
     Uses the browser-level DevTools endpoint (`Storage.getCookies`) so no page
-    target is required. The websocket URL the browser reports may name
-    127.0.0.1/localhost even when we reached it through host.docker.internal,
-    so its host:port is rewritten to the endpoint we actually dialed.
+    target is required. The configured host is DNS-resolved on every
+    `resolve()` call (see `_resolve_dial_host`) — lazily, so a bridge that
+    moves or comes back up is picked up without restarting the process. The
+    websocket URL the browser reports may name 127.0.0.1/localhost even when
+    we reached it through host.docker.internal, so its host:port is rewritten
+    to the endpoint we actually dialed.
     """
 
     def __init__(self, host: str, port: int, timeout: float = 10.0) -> None:
@@ -72,7 +91,8 @@ class CdpSessionProvider:
         self._timeout = timeout
 
     async def resolve(self, cookie_domain: str) -> ResolvedSession:
-        ws_url = await self._browser_ws_url()
+        dial_host = _resolve_dial_host(self._host)
+        ws_url = await self._browser_ws_url(dial_host)
         cookies = await self._get_cookies(ws_url)
         scoped = {
             c["name"]: c["value"]
@@ -86,8 +106,8 @@ class CdpSessionProvider:
             )
         return ResolvedSession(cookies=scoped, csrf_token=None)
 
-    async def _browser_ws_url(self) -> str:
-        info_url = f"http://{self._host}:{self._port}/json/version"
+    async def _browser_ws_url(self, dial_host: str) -> str:
+        info_url = f"http://{dial_host}:{self._port}/json/version"
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.get(info_url)
@@ -95,14 +115,15 @@ class CdpSessionProvider:
                 data = resp.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             raise SessionUnavailable(
-                f"CDP endpoint {self._host}:{self._port} unreachable: {exc}"
+                f"CDP endpoint {dial_host}:{self._port} unreachable: {exc}"
             ) from exc
         raw = data.get("webSocketDebuggerUrl")
         if not raw:
             raise SessionUnavailable("CDP endpoint returned no webSocketDebuggerUrl")
         parsed = urlparse(raw)
-        # Rewrite host:port to the endpoint we can actually dial.
-        return parsed._replace(netloc=f"{self._host}:{self._port}").geturl()
+        # Rewrite host:port to the endpoint we can actually dial — the ws
+        # handshake carries a Host header too, so it needs the same IP.
+        return parsed._replace(netloc=f"{dial_host}:{self._port}").geturl()
 
     async def _get_cookies(self, ws_url: str) -> list[dict]:
         # Imported lazily so the package imports even where websockets isn't

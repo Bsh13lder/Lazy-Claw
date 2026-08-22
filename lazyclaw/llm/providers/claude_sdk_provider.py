@@ -1288,9 +1288,19 @@ class ClaudeSDKProvider(BaseLLMProvider):
         #
         # Also wipes ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL because
         # both can hijack auth or point at a non-Anthropic endpoint.
+        # ANTHROPIC_API_TOKEN + CLAUDE_API_KEY are alternate names some
+        # shells/tools set — strip those too for full belt-and-braces.
+        #
+        # Per-call dict — NOT module-level. Concurrent chat() calls each
+        # build their own; the SDK merges these on top of os.environ
+        # before spawning the claude subprocess. Adding keys here is
+        # safe; reading from os.environ at this point would lose the
+        # per-call override race vs other concurrent provider paths.
         env = {
             "ANTHROPIC_API_KEY": "",
             "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_API_TOKEN": "",
+            "CLAUDE_API_KEY": "",
             "ANTHROPIC_BASE_URL": "",
         }
 

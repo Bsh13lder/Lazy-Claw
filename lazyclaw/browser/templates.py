@@ -29,6 +29,12 @@ from lazyclaw.db.connection import db_session
 logger = logging.getLogger(__name__)
 
 ENCRYPTED_FIELDS = frozenset({"system_prompt", "playbook"})
+# Fields stored as encrypted JSON: serialised to a string, then run
+# through ``encrypt`` before insert; ``decrypt_field`` returns the
+# original value unchanged for legacy plain-JSON rows, so migration is
+# transparent. ``checkpoints`` stays plaintext — it's just step labels
+# ("Pick date" / "Confirm booking") with zero PII.
+ENCRYPTED_JSON_FIELDS = frozenset({"setup_urls"})
 
 TEMPLATE_COLUMNS = [
     "id", "user_id", "name", "icon",
@@ -58,7 +64,13 @@ def _row_to_dict(row, key: bytes) -> dict:
         v = row[i]
         if col in ENCRYPTED_FIELDS:
             v = decrypt_field(v, key)
-        elif col in ("setup_urls", "checkpoints"):
+        elif col in ENCRYPTED_JSON_FIELDS:
+            plain = decrypt_field(v, key) if v else None
+            try:
+                v = json.loads(plain) if plain else []
+            except (json.JSONDecodeError, TypeError):
+                v = []
+        elif col == "checkpoints":
             try:
                 v = json.loads(v) if v else []
             except (json.JSONDecodeError, TypeError):
@@ -199,7 +211,7 @@ async def create_template(
             (
                 tpl_id, user_id, name.strip(), icon,
                 _encrypt(system_prompt, key),
-                json.dumps(setup_urls or []),
+                _encrypt(json.dumps(setup_urls or []), key),
                 json.dumps(checkpoints or []),
                 _encrypt(playbook, key),
                 page_reader_mode,
@@ -273,7 +285,9 @@ async def update_template(
             continue
         if col in ENCRYPTED_FIELDS:
             val = _encrypt(val, key) if val is not None else None
-        elif col in ("setup_urls", "checkpoints"):
+        elif col in ENCRYPTED_JSON_FIELDS:
+            val = _encrypt(json.dumps(val or []), key) if val is not None else None
+        elif col == "checkpoints":
             val = json.dumps(val or [])
         sets.append(f"{col} = ?")
         values.append(val)

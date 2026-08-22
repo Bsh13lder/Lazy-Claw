@@ -54,7 +54,7 @@ _SPLIT_PREFIXES = (
 )
 
 
-def _split_merged_skill(value: str) -> list[str]:
+def _split_merged_skill(value: str, *, depth: int = 0) -> list[str]:
     """Best-effort split of a merged-span skill string into chip parts.
 
     Upwork's search-keyword highlighter wraps the matched word in
@@ -73,6 +73,10 @@ def _split_merged_skill(value: str) -> list[str]:
     """
     if not value:
         return []
+    if depth > 10:
+        # Recursion guard: real merged-span chains are <=3 deep. >10 means
+        # pathological input — return as-is rather than blow the stack.
+        return [value]
     if value.lower() in _CAMELCASE_SKILL_ALLOWLIST:
         return [value]
     for prefix in _SPLIT_PREFIXES:
@@ -83,7 +87,7 @@ def _split_merged_skill(value: str) -> list[str]:
         ):
             # Recurse on the suffix in case 3+ chips merged
             # ("PythonAutomationMake.comAPI").
-            return [prefix] + _split_merged_skill(value[len(prefix):])
+            return [prefix] + _split_merged_skill(value[len(prefix):], depth=depth + 1)
     return [value]
 
 

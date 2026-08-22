@@ -37,7 +37,6 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict] | d
 
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Navigate to contracts page
     url = "https://www.upwork.com/nx/wm/contracts"
@@ -46,7 +45,9 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict] | d
     elif params.status == "ended":
         url += "?status=closed"
 
-    await page.goto(url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient + prefers
+    # an existing on-upwork.com tab so cookies pass the JS challenge.
+    page = await browser.safe_goto(url)
 
     contracts = []
 
@@ -141,9 +142,9 @@ async def get_contract_details(contract_url: str) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto(contract_url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient.
+    page = await browser.safe_goto(contract_url)
 
     details = {"url": contract_url}
 
@@ -247,12 +248,12 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Navigate to work diary
     # The exact URL structure may vary
     diary_url = contract_url.replace("/contracts/", "/work-diary/")
-    await page.goto(diary_url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient.
+    page = await browser.safe_goto(diary_url)
 
     diary = {"contract_url": contract_url, "days": []}
 

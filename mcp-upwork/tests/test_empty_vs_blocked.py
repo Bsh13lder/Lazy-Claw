@@ -287,9 +287,13 @@ async def test_get_contracts_selector_timeout_returns_structured_dict():
 async def test_get_contracts_login_redirect_diagnosis():
     from upwork_mcp.tools.contracts import ContractsParams, get_contracts
 
-    page = FakePage(
-        redirect_to="https://www.upwork.com/ab/account-security/login"
-    )
+    # get_contracts navigates via browser.safe_goto (serialized on
+    # _NAV_LOCK + Cloudflare-resilient), which the fake stubs out — so
+    # express the post-redirect state as the page's url, the same way the
+    # other safe_goto-based sites do (search_jobs, get_messages,
+    # get_connects_balance). The old `redirect_to=` hook only fired
+    # through the raw page.goto() this tool no longer calls.
+    page = FakePage(url="https://www.upwork.com/ab/account-security/login")
     with patch(
         "upwork_mcp.tools.contracts.get_browser",
         return_value=_fake_browser(page),

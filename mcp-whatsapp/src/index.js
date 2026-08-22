@@ -60,6 +60,8 @@ const {
   migrateLegacyContact,
 } = require("./contacts.js");
 
+const { runSavedNameBackfill } = require("./app_state.js");
+
 /**
  * Apply a partial contact patch without destroying better data already known.
  * Every contact write goes through here — a bare `contacts.set()` would let a
@@ -505,6 +507,14 @@ async function startWhatsApp(force = false) {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
   } = require("@whiskeysockets/baileys");
+
+  // Must run BEFORE loadAuthState() reads the stored sync versions: clearing
+  // the critical_unblock_low version is what makes the resync below return a
+  // full snapshot of contactActions instead of "nothing new since v16".
+  const backfill = runSavedNameBackfill(AUTH_DIR);
+  if (backfill.backfill) {
+    log("Saved-name backfill: cleared critical_unblock_low version — next resync pulls a full contact snapshot");
+  }
 
   const { state, saveCreds } = await loadAuthState();
   const { version } = await fetchLatestBaileysVersion();

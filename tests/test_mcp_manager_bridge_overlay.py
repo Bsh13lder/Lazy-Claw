@@ -147,12 +147,38 @@ def test_overlay_omits_cdp_host_outside_docker(monkeypatch) -> None:
     assert "LAZYCLAW_CDP_HOST" not in env
 
 
+def test_overlay_removes_stale_cdp_host_outside_docker(monkeypatch) -> None:
+    """A row registered inside Docker must not keep pointing at the host bridge."""
+    _stub_user_context(monkeypatch, docker=False)
+    cfg = Config(port=18789)
+    existing = {"LAZYCLAW_CDP_HOST": "host.docker.internal", "FOO": "bar"}
+    env = _build_bundled_env_overlay(cfg, "u1", "mcp-apihunter", existing_env=existing)
+    assert "LAZYCLAW_CDP_HOST" not in env
+    assert env["FOO"] == "bar"
+    # The caller's dict is never touched.
+    assert existing["LAZYCLAW_CDP_HOST"] == "host.docker.internal"
+
+
+def test_overlay_removes_stale_cdp_port_when_env_unset(monkeypatch) -> None:
+    """The parent process env is the only authority on the CDP port."""
+    _stub_user_context(monkeypatch, docker=False)  # also clears LAZYCLAW_CDP_PORT
+    cfg = Config(port=18789)
+    env = _build_bundled_env_overlay(
+        cfg, "u1", "mcp-upwork",
+        existing_env={"LAZYCLAW_CDP_PORT": "9333", "FOO": "bar"},
+    )
+    assert "LAZYCLAW_CDP_PORT" not in env
+    assert env["FOO"] == "bar"
+
+
 def test_overlay_skips_user_context_for_non_optin_mcps(monkeypatch) -> None:
     _stub_user_context(monkeypatch, docker=True)
     cfg = Config(port=18789)
-    # mcp-email doesn't opt in to inject_user_context.
-    env = _build_bundled_env_overlay(cfg, "u1", "mcp-email", existing_env={"FOO": "bar"})
-    assert env == {"FOO": "bar"}
+    # mcp-email doesn't opt in to inject_user_context — nothing is added, and
+    # nothing is removed either.
+    existing = {"FOO": "bar", "LAZYCLAW_CDP_HOST": "host.docker.internal"}
+    env = _build_bundled_env_overlay(cfg, "u1", "mcp-email", existing_env=existing)
+    assert env == existing
 
 
 # -- command healing -----------------------------------------------------------

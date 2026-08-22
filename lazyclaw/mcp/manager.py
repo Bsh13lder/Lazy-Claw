@@ -296,9 +296,11 @@ def _build_bundled_env_overlay(
     so that env values (especially the per-process internal token) stay
     fresh across gateway restarts and don't need a DB migration.
 
-    Freshly computed keys OVERWRITE whatever the stored row holds:
-    registration is skip-if-exists, so a row written by an older install
-    (or by the host venv before the move into Docker) never heals itself.
+    The overlay is AUTHORITATIVE for the keys it derives: registration is
+    skip-if-exists, so a row written by an older install (or by the host venv
+    before the move into Docker) never heals itself. Fresh values overwrite
+    stored ones, and a derived key that no longer applies is removed rather
+    than inherited.
     """
     info = BUNDLED_MCPS.get(mcp_name)
     if not info:
@@ -322,17 +324,27 @@ def _build_bundled_env_overlay(
         overlay["LAZYCLAW_BROWSER_PROFILE_DIR"] = str(
             resolve_profile_dir(config, user_id),
         )
+        # The parent process env is the only authority on the port — a stored
+        # row can carry one recorded by a different install.
         cdp_port_env = os.environ.get("LAZYCLAW_CDP_PORT")
         if cdp_port_env:
             overlay["LAZYCLAW_CDP_PORT"] = cdp_port_env
+        else:
+            overlay.pop("LAZYCLAW_CDP_PORT", None)
         # In Docker the MCP can't launch its own Chrome (no binary in the
-        # slim image) — point it at the user's host Brave.
+        # slim image) — point it at the user's host Brave. Outside Docker that
+        # hostname doesn't resolve, so a row registered in a container must
+        # lose it. If the check itself is unavailable we know nothing and
+        # leave whatever the row holds.
         try:
             from lazyclaw.browser.host_bridge import is_docker_runtime
-            if is_docker_runtime():
-                overlay["LAZYCLAW_CDP_HOST"] = "host.docker.internal"
         except ImportError:
             pass
+        else:
+            if is_docker_runtime():
+                overlay["LAZYCLAW_CDP_HOST"] = "host.docker.internal"
+            else:
+                overlay.pop("LAZYCLAW_CDP_HOST", None)
 
     return overlay
 

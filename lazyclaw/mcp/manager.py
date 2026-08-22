@@ -352,21 +352,46 @@ def _build_bundled_env_overlay(
 def _canonical_bundled_config(name: str, server_cfg: dict) -> dict:
     """Re-derive the launch command of a bundled module MCP. Returns a new dict.
 
-    A stored row keeps the ``sys.executable`` of whichever install registered
-    it, and registration is skip-if-exists — so a row can carry a dead
-    interpreter path (observed in prod: a host-venv python recorded before
-    the move into Docker, absent inside the container). Only ``module``
-    entries are healed; npx / bin / remote entries and names we don't ship
-    resolve their own executable and pass through untouched.
+    A stored row keeps whatever the install that first wrote it computed, and
+    registration is skip-if-exists, so it never heals itself. Half of that is
+    already covered downstream: ``MCPClient._create_stdio_ctx`` (client.py)
+    swaps in the current interpreter when the stored ``python*`` command no
+    longer EXISTS. What it can't catch is a stale command that still exists —
+    a recreated host venv, or the base interpreter behind one — which passes
+    its allowlist and then dies on ``No module named ...`` because that
+    interpreter has none of our packages. That, plus pinning the module
+    identity of the args, is what this adds.
+
+    Only a row that already claims ``-m <bundled module>`` is ours: an MCP a
+    user added under a bundled name (say their own 'n8n') keeps its command.
+    npx / bin / node / remote entries and names we don't ship pass through.
     """
     info = BUNDLED_MCPS.get(name)
-    if not info or "module" not in info:
+    args = server_cfg.get("args") or []
+    if not info or "module" not in info or args[:2] != ["-m", info["module"]]:
         return dict(server_cfg)
     return {
         **server_cfg,
         "command": sys.executable,
         "args": ["-m", info["module"], *info.get("extra_args", [])],
     }
+
+
+def _describe_config_drift(stored: dict, healed: dict) -> str:
+    """Key-level summary of what connect-time healing changed ('' if nothing).
+
+    Key names only — env values carry user ids and filesystem paths.
+    """
+    parts = [k for k in ("command", "args") if stored.get(k) != healed.get(k)]
+    stored_env = stored.get("env") or {}
+    healed_env = healed.get("env") or {}
+    set_keys = sorted(k for k, v in healed_env.items() if stored_env.get(k) != v)
+    dropped_keys = sorted(k for k in stored_env if k not in healed_env)
+    if set_keys:
+        parts.append(f"env set {set_keys}")
+    if dropped_keys:
+        parts.append(f"env dropped {dropped_keys}")
+    return ", ".join(parts)
 
 
 async def install_bundled_mcp(name: str) -> tuple[bool, str]:
@@ -809,7 +834,7 @@ async def connect_server(
 
     # Refresh the derivable parts of a bundled MCP's launch config at CONNECT
     # time, not register time: registration is skip-if-exists, so a stored row
-    # keeps whatever the install that first wrote it computed (a dead
+    # keeps whatever the install that first wrote it computed (a stale
     # interpreter path, a stale/absent per-user env) forever.
     server_cfg = _canonical_bundled_config(server["name"], server["config"])
     server_cfg = {
@@ -818,6 +843,17 @@ async def connect_server(
             config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
         ),
     }
+    # The DB row and the UI keep showing the pre-refresh values, so without
+    # this line "why does the UI disagree with the running process?" costs a
+    # debugging session. Not always drift: it also fires for the per-process
+    # contact-bridge token, which is deliberately never stored.
+    drift = _describe_config_drift(server["config"], server_cfg)
+    if drift:
+        logger.info(
+            "Connect-time refresh overrode the stored row for %s (%s): %s — "
+            "the DB row and UI still show the old values",
+            server["name"], server_id, drift,
+        )
 
     client = MCPClient(
         server_id=server_id,

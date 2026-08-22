@@ -13,11 +13,13 @@ skip-if-exists.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 from lazyclaw.config import Config
 from lazyclaw.gateway.internal_auth import get_internal_token
+from lazyclaw.mcp import manager
 from lazyclaw.mcp.manager import _build_bundled_env_overlay, _canonical_bundled_config
 
 
@@ -38,6 +40,41 @@ def _stub_user_context(
         lambda: docker,
     )
     monkeypatch.delenv("LAZYCLAW_CDP_PORT", raising=False)
+
+
+def _stub_connect(
+    monkeypatch, stored_config: dict, *, name: str = "mcp-apihunter",
+) -> dict:
+    """Point ``connect_server`` at a stored row and a recording fake client.
+
+    No DB and no subprocess: ``get_server`` returns the row verbatim and the
+    fake client captures the config ``connect_server`` hands it.
+    """
+    captured: dict = {}
+
+    class _RecordingClient:
+        def __init__(self, *, server_id, name, transport, config) -> None:
+            captured["config"] = config
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    async def _fake_get_server(config, user_id, server_id):
+        return {
+            "id": server_id,
+            "name": name,
+            "transport": "stdio",
+            "config": stored_config,
+            "enabled": True,
+            "created_at": "2026-08-22T00:00:00",
+            "connected": False,
+        }
+
+    monkeypatch.setattr(manager, "get_server", _fake_get_server)
+    monkeypatch.setattr("lazyclaw.mcp.client.MCPClient", _RecordingClient)
+    # Fresh registry so the test never touches (or leaks into) live clients.
+    monkeypatch.setattr(manager, "_active_clients", {})
+    return captured
 
 
 def test_overlay_injects_bridge_env_for_whatsapp() -> None:
@@ -218,10 +255,24 @@ def test_canonical_config_heals_dead_interpreter_for_module_mcp() -> None:
     assert healed["env"] == {"LAZYCLAW_USER_ID": "u1"}
 
 
-def test_canonical_config_rebuilds_module_args() -> None:
-    stored = {"command": "/dead/python", "args": ["-m", "upwork_mcp_legacy", "--flag"]}
+def test_canonical_config_heals_stale_but_existing_interpreter() -> None:
+    """client.py only rescues a MISSING python path — an existing wrong one is ours."""
+    stored = {"command": sys.base_prefix + "/bin/python3", "args": ["-m", "upwork_mcp"]}
     healed = _canonical_bundled_config("mcp-upwork", stored)
+    assert healed["command"] == sys.executable
     assert healed["args"] == ["-m", "upwork_mcp"]
+
+
+def test_canonical_config_skips_row_that_isnt_the_bundled_module() -> None:
+    """A user-added MCP registered under a bundled name keeps its own command.
+
+    Realistic collision: someone adds their own 'n8n' server. Only rows that
+    already claim ``-m <bundled module>`` are ours to heal.
+    """
+    stored = {"command": "npx", "args": ["-y", "some-other-n8n-server"]}
+    out = _canonical_bundled_config("n8n", stored)
+    assert out == stored
+    assert out is not stored
 
 
 def test_canonical_config_does_not_mutate_input() -> None:
@@ -248,3 +299,67 @@ def test_canonical_config_leaves_unknown_name_unchanged() -> None:
     out = _canonical_bundled_config("some-user-added-mcp", stored)
     assert out == stored
     assert out is not stored
+
+
+# -- connect_server wiring -----------------------------------------------------
+
+
+async def test_connect_server_applies_heal_and_overlay(monkeypatch) -> None:
+    """The contract the whole change exists for: what the subprocess receives."""
+    _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/u1")
+    captured = _stub_connect(
+        monkeypatch,
+        {"command": "/dead/python", "args": ["-m", "mcp_apihunter"], "env": {}},
+    )
+
+    await manager.connect_server(Config(port=18789), "u1", "srv-1")
+
+    assert captured["connected"] is True
+    launched = captured["config"]
+    assert launched["command"] == sys.executable
+    assert launched["env"]["LAZYCLAW_USER_ID"] == "u1"
+    assert launched["env"]["LAZYCLAW_BROWSER_PROFILE_DIR"] == "/profiles/u1"
+
+
+async def test_connect_server_logs_healed_keys_never_values(monkeypatch, caplog) -> None:
+    """The DB/UI still show the stale row — the log is the only breadcrumb.
+
+    Env values carry user ids and filesystem paths, so only key names may be
+    logged.
+    """
+    _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/private-user-dir")
+    _stub_connect(
+        monkeypatch,
+        {"command": "/dead/python", "args": ["-m", "mcp_apihunter"], "env": {}},
+    )
+
+    with caplog.at_level(logging.INFO, logger="lazyclaw.mcp.manager"):
+        await manager.connect_server(Config(port=18789), "u1", "srv-1")
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "command" in logged
+    assert "LAZYCLAW_USER_ID" in logged
+    assert "LAZYCLAW_BROWSER_PROFILE_DIR" in logged
+    assert "/profiles/private-user-dir" not in logged
+    assert sys.executable not in logged
+
+
+async def test_connect_server_stays_quiet_when_nothing_drifted(monkeypatch, caplog) -> None:
+    _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/u1")
+    fresh_env = {
+        "LAZYCLAW_USER_ID": "u1",
+        "LAZYCLAW_BROWSER_PROFILE_DIR": "/profiles/u1",
+    }
+    _stub_connect(
+        monkeypatch,
+        {"command": sys.executable, "args": ["-m", "mcp_apihunter"], "env": fresh_env},
+    )
+
+    with caplog.at_level(logging.INFO, logger="lazyclaw.mcp.manager"):
+        await manager.connect_server(Config(port=18789), "u1", "srv-1")
+
+    # Only the usual "Connected to MCP server" line — no drift line, so a
+    # healthy row can't spam the log on every reconnect.
+    ours = [r for r in caplog.records if r.name == "lazyclaw.mcp.manager"]
+    assert len(ours) == 1
+    assert "Connected to MCP server" in ours[0].getMessage()

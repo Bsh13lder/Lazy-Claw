@@ -208,6 +208,13 @@ def test_browser_specialist_fields():
         "payment",
         "search_tools",
         "google_run_task",
+        "panel_discover",
+        "panel_probe_api",
+        "panel_learn_endpoint",
+        "panel_learn_from_capture",
+        "panel_list_endpoints",
+        "panel_describe",
+        "panel_call",
     )
     assert "PLAN-ACT-VALIDATE" in s.system_prompt
 

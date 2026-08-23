@@ -130,6 +130,48 @@ async def test_promotes_existing_session(tmp_config: Config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_session_is_distinct_from_primary(tmp_config: Config) -> None:
+    primary = await session_resolver.get_primary_session_id(tmp_config, "user-1")
+    background = await session_resolver.get_background_session_id(tmp_config, "user-1")
+    assert background and background != primary
+
+    async with db_session(tmp_config) as db:
+        row = await db.execute(
+            "SELECT is_primary, title FROM agent_chat_sessions WHERE id = ?",
+            (background,),
+        )
+        is_primary, title = await row.fetchone()
+    assert is_primary == 0  # never collides with the primary index
+    assert title == session_resolver.BACKGROUND_SESSION_TITLE
+
+
+@pytest.mark.asyncio
+async def test_background_session_is_idempotent(tmp_config: Config) -> None:
+    first = await session_resolver.get_background_session_id(tmp_config, "user-1")
+    session_resolver.clear_cache()  # force a DB re-read, not just the cache
+    second = await session_resolver.get_background_session_id(tmp_config, "user-1")
+    assert first == second
+
+    async with db_session(tmp_config) as db:
+        row = await db.execute(
+            "SELECT COUNT(*) FROM agent_chat_sessions "
+            "WHERE user_id = ? AND title = ?",
+            ("user-1", session_resolver.BACKGROUND_SESSION_TITLE),
+        )
+        assert (await row.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_background_does_not_become_primary(tmp_config: Config) -> None:
+    # Creating the background session first must NOT let it get promoted to
+    # primary — a cron job must never hijack the shared interactive bucket.
+    background = await session_resolver.get_background_session_id(tmp_config, "user-1")
+    session_resolver.clear_cache()
+    primary = await session_resolver.get_primary_session_id(tmp_config, "user-1")
+    assert primary != background
+
+
+@pytest.mark.asyncio
 async def test_different_users_get_different_primaries(tmp_config: Config) -> None:
     async with db_session(tmp_config) as db:
         await db.execute(

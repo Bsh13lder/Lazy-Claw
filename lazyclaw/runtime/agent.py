@@ -7967,15 +7967,26 @@ class Agent:
         # ── Post-loop: persist + cleanup (guarded by finally) ─────────
         content = ""
         try:
-            # Resolve chat session — channel turns with no explicit session
-            # (Telegram, heartbeat jobs, CLI) belong in the user's PRIMARY
-            # session, the shared cross-channel bucket. Picking "newest
-            # created session" here made channel history drift into whatever
-            # session the web UI spawned last, leaving the primary stale.
+            # Resolve chat session — interactive channel turns with no explicit
+            # session (Telegram, CLI) belong in the user's PRIMARY session, the
+            # shared cross-channel bucket. BUT background turns (cron / heartbeat
+            # / watcher, stamped with a [JOB:…]/[PULSE:…] prefix) go to a
+            # dedicated background session, so an ad-hoc interactive turn can
+            # never poison a recurring monitor's context (2026-08-23 incident).
             if not chat_session_id:
-                from lazyclaw.runtime.session_resolver import get_primary_session_id
+                from lazyclaw.runtime.session_resolver import (
+                    get_background_session_id,
+                    get_primary_session_id,
+                )
 
-                chat_session_id = await get_primary_session_id(self.config, user_id)
+                if message and message.startswith(_BACKGROUND_TURN_PREFIXES):
+                    chat_session_id = await get_background_session_id(
+                        self.config, user_id,
+                    )
+                else:
+                    chat_session_id = await get_primary_session_id(
+                        self.config, user_id,
+                    )
 
             # Store ALL messages (user, assistant, tool calls, tool results) encrypted
             rows = []

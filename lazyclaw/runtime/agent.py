@@ -1729,6 +1729,30 @@ def _is_rate_limit_exception(exc: BaseException) -> bool:
     )
 
 
+def _is_content_policy_exception(exc: BaseException) -> bool:
+    """Check if an exception is a model content-policy refusal.
+
+    Prefers the typed ``ContentPolicyRefusal`` (walking the ``__cause__`` /
+    ``__context__`` chain in case a layer re-wrapped it), with a string-marker
+    fallback so a refusal is still recognised even if it arrived untyped.
+    """
+    try:
+        from lazyclaw.llm.providers.claude_sdk_provider import ContentPolicyRefusal
+    except Exception:  # pragma: no cover - provider import should not fail
+        ContentPolicyRefusal = ()  # type: ignore[assignment]
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if ContentPolicyRefusal and isinstance(cur, ContentPolicyRefusal):
+            return True
+        cur = cur.__cause__ or cur.__context__
+
+    msg = str(exc).lower()
+    return "safeguards flagged" in msg or "cyber-use-case" in msg
+
+
 def _is_timeout_exception(exc: BaseException) -> bool:
     """Check if an LLM provider exception indicates a request TIMEOUT.
 
@@ -4820,7 +4844,9 @@ class Agent:
                         # Never paste raw internals (exception text, provider
                         # JSON) into the user-facing message — emit a friendly
                         # error card instead. Full error stays in the log above.
-                        if _is_rate_limit_exception(exc):
+                        if _is_content_policy_exception(exc):
+                            _user_msg = _render_error("content_policy")
+                        elif _is_rate_limit_exception(exc):
                             _user_msg = _render_error("rate_limit")
                         else:
                             _user_msg = _render_error("brain")
@@ -4957,7 +4983,9 @@ class Agent:
                         await cb.on_event(AgentEvent("stream_done", "", {}))
                         # Same friendly-card treatment as the chat path — no raw
                         # exception text leaks into the user's chat.
-                        if _is_rate_limit_exception(exc):
+                        if _is_content_policy_exception(exc):
+                            _user_msg = _render_error("content_policy")
+                        elif _is_rate_limit_exception(exc):
                             _user_msg = _render_error("rate_limit")
                         else:
                             _user_msg = _render_error("brain")

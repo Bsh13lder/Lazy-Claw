@@ -175,6 +175,13 @@ _ERROR_CARDS = {
         "Retry in a minute, or set a fallback model with /mode so this "
         "re-routes automatically."
     ),
+    "content_policy": (
+        "🛡️ That request was declined by the model's safeguards\n"
+        "It read as a security-sensitive topic. For legitimate automation of "
+        "systems you own or administer, the sanctioned path is Anthropic's "
+        "cyber-use-case exemption (per-org, ~2 business days):\n"
+        "   ↳ https://claude.com/form/cyber-use-case"
+    ),
     "generic": (
         "⚠️ Something went wrong on my end.\n"
         "Try again in a moment.\n"
@@ -185,7 +192,9 @@ _ERROR_CARDS = {
 _STEP_GLYPH = {"done": "✓", "active": "⟳", "pending": "·"}
 
 
-def render_error(kind: Literal["brain", "rate_limit", "generic"]) -> str:
+def render_error(
+    kind: Literal["brain", "rate_limit", "content_policy", "generic"],
+) -> str:
     """Friendly error card. Accepts a closed enum — never raw exception text,
     so leaking internals into chat is structurally impossible."""
     return _ERROR_CARDS.get(kind, _ERROR_CARDS["generic"])

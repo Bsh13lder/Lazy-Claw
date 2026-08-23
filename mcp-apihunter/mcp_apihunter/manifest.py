@@ -112,6 +112,11 @@ class Manifest(BaseModel, frozen=True):
     base_url: str
     cookie_domain: str = ""
     login_url: str = ""
+    # True once the user has confirmed they own/administer this panel. apihunter
+    # only RECORDS a panel after this is set — a code-level, fail-closed
+    # authorization gate (see tools.py). Defaults False so pre-existing
+    # manifests load unchanged.
+    owner_confirmed: bool = False
     endpoints: list[Endpoint] = Field(default_factory=list)
     version: int = 1
 

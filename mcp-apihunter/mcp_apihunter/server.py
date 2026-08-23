@@ -102,8 +102,9 @@ _TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
-                "site": {"type": "string", "description": "Site slug, e.g. 'himap-admin'"},
+                "site": {"type": "string", "description": "Site slug (lowercase, no dots), e.g. 'himap-admin'. The domain goes in base_url."},
                 "base_url": {"type": "string", "description": "Panel origin, e.g. https://himap.co (required on first endpoint)"},
+                "owner_confirmed": {"type": "boolean", "description": "Set true ONLY when the user has confirmed they own/administer this panel. Required to record a NEW site (apihunter records only owned/administered panels)."},
                 "cookie_domain": {"type": "string", "description": "Domain to pull session cookies for (defaults to base_url host)"},
                 "login_url": {"type": "string", "description": "Where to re-login when the session expires"},
                 "name": {"type": "string", "description": "Endpoint slug, e.g. 'post_blog'"},
@@ -136,6 +137,7 @@ _TOOLS = [
             "properties": {
                 "site": {"type": "string"},
                 "base_url": {"type": "string", "description": "Required if the site is new"},
+                "owner_confirmed": {"type": "boolean", "description": "Set true ONLY when the user confirmed they own/administer this panel. Required to record a NEW site."},
                 "cookie_domain": {"type": "string"},
                 "login_url": {"type": "string"},
                 "records": {
@@ -217,13 +219,16 @@ _TOOLS = [
         name="panel_discover",
         description=(
             "Open a panel for endpoint recording: creates the manifest shell "
-            "and returns guidance for mapping the panel via the browser."
+            "and returns guidance for mapping the panel via the browser. "
+            "Recording a NEW panel requires owner_confirmed=true — apihunter "
+            "records only panels the user owns or administers."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "site": {"type": "string"},
                 "base_url": {"type": "string"},
+                "owner_confirmed": {"type": "boolean", "description": "Set true ONLY when the user confirmed they own/administer this panel. Required to open a NEW site for recording."},
                 "cookie_domain": {"type": "string"},
                 "login_url": {"type": "string"},
             },

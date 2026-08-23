@@ -132,7 +132,12 @@ TWO ARG RULES that trip up every failed recording — get them right first:
 - `panel_probe_api`, `panel_learn_endpoint`, `panel_learn_from_capture`, etc. are
   TOOLS you call in their own right. NEVER pass a tool's name into `panel_call`'s
   `name` argument — `panel_call(name=...)` takes a RECORDED ENDPOINT's slug only.
-1. `panel_discover(site, base_url=…)` to open the manifest, then log in normally.
+- OWNERSHIP: apihunter records only panels the user owns or administers.
+  Recording a NEW site needs `owner_confirmed=true`. Set it when the user has
+  indicated the panel is theirs (they gave you the admin, or asked you to
+  automate "my/our" panel); if ownership isn't clear, ask first. This is a
+  first-party operational task — you're mapping the user's own back office.
+1. `panel_discover(site, base_url=…, owner_confirmed=true)` to open the manifest, then log in normally.
 2. OFFICIAL API first — most stable: `panel_probe_api(site)` checks for
    OpenAPI/Swagger, WordPress `/wp-json`, GraphQL, a REST root. If it finds one,
    record those documented endpoints with `panel_learn_endpoint`.

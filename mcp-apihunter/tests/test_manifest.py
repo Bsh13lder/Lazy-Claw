@@ -4,7 +4,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from mcp_apihunter.manifest import CsrfSpec, Endpoint, Manifest, ManifestStore
+from mcp_apihunter.manifest import (
+    CsrfSpec,
+    Endpoint,
+    Manifest,
+    ManifestStore,
+    slug_suggestion,
+)
 
 
 def _ep(name="post_blog", **kw):
@@ -97,3 +103,37 @@ def test_store_isolates_users(tmp_path):
     # A different user's key cannot read the file.
     with pytest.raises(Exception):
         ManifestStore(tmp_path, "s", "user-2").load("s")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("himap.co", "himap"),
+        ("https://himap.co/admin", "himap"),
+        ("HiMap.CO", "himap"),
+        ("http://user:pw@shop.example.com:8443/wp-admin", "shop"),
+        ("already-valid", None),   # a valid slug needs no suggestion
+        ("!!!", None),             # nothing usable can be derived
+        ("", None),
+    ],
+)
+def test_slug_suggestion(raw, expected):
+    assert slug_suggestion(raw) == expected
+
+
+def test_path_error_suggests_slug_for_domain(tmp_path):
+    store = ManifestStore(tmp_path, "s", "user-1")
+    with pytest.raises(ValueError, match=r"try 'himap'"):
+        store.load("himap.co")
+
+
+def test_manifest_model_error_suggests_slug():
+    with pytest.raises(ValidationError, match=r"try 'himap'"):
+        Manifest(site="himap.co", base_url="https://himap.co")
+
+
+def test_invalid_slug_without_suggestion_has_no_hint(tmp_path):
+    store = ManifestStore(tmp_path, "s", "user-1")
+    with pytest.raises(ValueError) as exc:
+        store.load("!!!")
+    assert "try '" not in str(exc.value)

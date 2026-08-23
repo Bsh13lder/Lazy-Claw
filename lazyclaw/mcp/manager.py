@@ -836,6 +836,13 @@ async def connect_server(
     if not server:
         raise ValueError(f"MCP server {server_id} not found for user {user_id}")
 
+    # Refuse a disabled bundled MCP at the single connect choke point, so NO
+    # path (boot favorites, on-demand tool use, watcher reconnect, CLI) can
+    # spawn it — the boot-time `_is_available` guard alone left on-demand
+    # connects able to revive a disabled server from its stale stored row.
+    if BUNDLED_MCPS.get(server["name"], {}).get("disabled"):
+        raise ValueError(f"MCP server {server['name']} is disabled")
+
     # Disconnect existing connection if any
     if server_id in _active_clients:
         await disconnect_server(user_id, server_id)

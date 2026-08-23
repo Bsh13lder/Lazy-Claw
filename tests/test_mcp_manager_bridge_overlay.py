@@ -17,6 +17,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 from lazyclaw.config import Config
 from lazyclaw.gateway.internal_auth import get_internal_token
 from lazyclaw.mcp import manager
@@ -309,7 +311,8 @@ async def test_connect_server_applies_heal_and_overlay(monkeypatch) -> None:
     _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/u1")
     captured = _stub_connect(
         monkeypatch,
-        {"command": "/dead/python", "args": ["-m", "mcp_apihunter"], "env": {}},
+        {"command": "/dead/python", "args": ["-m", "upwork_mcp"], "env": {}},
+        name="mcp-upwork",
     )
 
     await manager.connect_server(Config(port=18789), "u1", "srv-1")
@@ -321,6 +324,22 @@ async def test_connect_server_applies_heal_and_overlay(monkeypatch) -> None:
     assert launched["env"]["LAZYCLAW_BROWSER_PROFILE_DIR"] == "/profiles/u1"
 
 
+async def test_connect_server_refuses_disabled_bundled_mcp(monkeypatch) -> None:
+    """A disabled bundled MCP must never spawn — at ANY connect path."""
+    _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/u1")
+    captured = _stub_connect(
+        monkeypatch,
+        {"command": sys.executable, "args": ["-m", "mcp_apihunter"], "env": {}},
+        name="mcp-apihunter",  # marked disabled in BUNDLED_MCPS
+    )
+
+    with pytest.raises(ValueError, match="disabled"):
+        await manager.connect_server(Config(port=18789), "u1", "srv-1")
+
+    # It never constructed or connected the client.
+    assert "connected" not in captured
+
+
 async def test_connect_server_logs_healed_keys_never_values(monkeypatch, caplog) -> None:
     """The DB/UI still show the stale row — the log is the only breadcrumb.
 
@@ -330,7 +349,8 @@ async def test_connect_server_logs_healed_keys_never_values(monkeypatch, caplog)
     _stub_user_context(monkeypatch, docker=False, profile_dir="/profiles/private-user-dir")
     _stub_connect(
         monkeypatch,
-        {"command": "/dead/python", "args": ["-m", "mcp_apihunter"], "env": {}},
+        {"command": "/dead/python", "args": ["-m", "upwork_mcp"], "env": {}},
+        name="mcp-upwork",
     )
 
     with caplog.at_level(logging.INFO, logger="lazyclaw.mcp.manager"):
@@ -352,7 +372,8 @@ async def test_connect_server_stays_quiet_when_nothing_drifted(monkeypatch, capl
     }
     _stub_connect(
         monkeypatch,
-        {"command": sys.executable, "args": ["-m", "mcp_apihunter"], "env": fresh_env},
+        {"command": sys.executable, "args": ["-m", "upwork_mcp"], "env": fresh_env},
+        name="mcp-upwork",
     )
 
     with caplog.at_level(logging.INFO, logger="lazyclaw.mcp.manager"):

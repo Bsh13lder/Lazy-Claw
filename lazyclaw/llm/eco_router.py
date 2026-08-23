@@ -723,6 +723,7 @@ class EcoRouter:
                     # else (auth, API, tool dispatch) should surface so
                     # we don't mask real bugs by silently dropping to CLI.
                     from lazyclaw.llm.providers.claude_sdk_provider import (
+                        ContentPolicyRefusal,
                         SDKUnavailable,
                     )
                     if isinstance(exc, SDKUnavailable):
@@ -734,6 +735,16 @@ class EcoRouter:
                             messages, user_id, settings=settings, role=role,
                             **kwargs,
                         )
+                    if isinstance(exc, ContentPolicyRefusal):
+                        # A model content-policy refusal — NOT a transport
+                        # issue and NOT retryable on another model (safety is a
+                        # model-family property). Surface it as-is; the runtime
+                        # renders the exemption-path card.
+                        logger.warning(
+                            "[eco] Claude SDK content-policy refusal surfaced "
+                            "to caller (no fallback, no model retry): %s", exc,
+                        )
+                        raise
                     logger.warning(
                         "[eco] Claude SDK error (not SDKUnavailable) surfaced to "
                         "caller: %s: %s", type(exc).__name__, exc,

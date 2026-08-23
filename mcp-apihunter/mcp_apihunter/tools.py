@@ -43,6 +43,25 @@ def _endpoint_from_args(args: dict[str, Any]) -> Endpoint:
     )
 
 
+def _owner_confirmed(args: dict[str, Any]) -> bool:
+    """Strict True check — a security gate must not treat a stray string or
+    number as consent, only an explicit boolean true."""
+    return args.get("owner_confirmed") is True
+
+
+def _needs_owner_confirmation(site: str) -> dict[str, Any]:
+    """Fail-closed response when recording a NEW panel without confirmation."""
+    return {
+        "error": (
+            f"recording panel '{site}' needs owner confirmation — apihunter only "
+            "records panels the user owns or administers. Confirm ownership with "
+            "the user, then re-call with owner_confirmed=true."
+        ),
+        "needs_owner_confirmation": True,
+        "site": site,
+    }
+
+
 class PanelTools:
     """Stateless-per-call operations over a ManifestStore + SessionProvider."""
 
@@ -57,11 +76,14 @@ class PanelTools:
             base_url = args.get("base_url")
             if not base_url:
                 return {"error": f"site '{site}' is new — base_url is required to create it"}
+            if not _owner_confirmed(args):
+                return _needs_owner_confirmation(site)
             manifest = Manifest(
                 site=site,
                 base_url=base_url,
                 cookie_domain=args.get("cookie_domain", ""),
                 login_url=args.get("login_url", ""),
+                owner_confirmed=True,
             )
         endpoint = _endpoint_from_args(args)
         manifest = manifest.with_endpoint(endpoint)
@@ -144,11 +166,14 @@ class PanelTools:
             base_url = args.get("base_url")
             if not base_url:
                 return {"error": f"site '{site}' is new — base_url is required to create it"}
+            if not _owner_confirmed(args):
+                return _needs_owner_confirmation(site)
             manifest = Manifest(
                 site=site,
                 base_url=base_url,
                 cookie_domain=args.get("cookie_domain", ""),
                 login_url=args.get("login_url", ""),
+                owner_confirmed=True,
             )
         skeletons = endpoints_from_capture(records, manifest.base_url)
         for ep in skeletons:
@@ -193,11 +218,14 @@ class PanelTools:
         base_url = args["base_url"]
         manifest = self._store.load(site)
         if manifest is None:
+            if not _owner_confirmed(args):
+                return _needs_owner_confirmation(site)
             manifest = Manifest(
                 site=site,
                 base_url=base_url,
                 cookie_domain=args.get("cookie_domain", "") or cookie_domain_for(base_url),
                 login_url=args.get("login_url", ""),
+                owner_confirmed=True,
             )
             self._store.save(manifest)
         return {

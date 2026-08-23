@@ -125,19 +125,41 @@ clicking), you record its real endpoints once. Tools: `panel_discover`,
 `panel_probe_api`, `panel_learn_endpoint`, `panel_learn_from_capture`,
 `panel_list_endpoints`, `panel_describe`, `panel_call` (names arrive as
 `mcp_<uuid>_panel_*` — find via `search_tools("panel")`).
-1. `panel_discover(site, base_url)` to open the manifest, then log in normally.
+TWO ARG RULES that trip up every failed recording — get them right first:
+- `site` is a SLUG: lowercase letters/digits/hyphens, NO dots, e.g. `himap-admin`.
+  The panel's domain/URL is the base_url arg (`https://himap.co`), NEVER the site.
+  Passing `site="himap.co"` is the #1 mistake — it errors and wastes a turn.
+- `panel_probe_api`, `panel_learn_endpoint`, `panel_learn_from_capture`, etc. are
+  TOOLS you call in their own right. NEVER pass a tool's name into `panel_call`'s
+  `name` argument — `panel_call(name=...)` takes a RECORDED ENDPOINT's slug only.
+- OWNERSHIP: apihunter records only panels the user owns or administers.
+  Recording a NEW site needs `owner_confirmed=true`. Set it when the user has
+  indicated the panel is theirs (they gave you the admin, or asked you to
+  automate "my/our" panel); if ownership isn't clear, ask first. This is a
+  first-party operational task — you're mapping the user's own back office.
+1. `panel_discover(site, base_url=…, owner_confirmed=true)` to open the manifest, then log in normally.
 2. OFFICIAL API first — most stable: `panel_probe_api(site)` checks for
    OpenAPI/Swagger, WordPress `/wp-json`, GraphQL, a REST root. If it finds one,
    record those documented endpoints with `panel_learn_endpoint`.
-3. Otherwise reverse-engineer: perform each target task ONCE in the browser
-   while capturing traffic, then read it with `browser(action='network')`. Feed
-   the whole `records` array to `panel_learn_from_capture(site, records=…)` —
-   it filters out assets/analytics and creates endpoint SKELETONS (method +
-   parameterized URL) in one shot. The capture has no request bodies, so for
-   each skeleton that needs a body, refine it with `panel_learn_endpoint`:
-   add body_template and the CSRF source (Django/most SPA admins echo the
-   `csrftoken` cookie in an `X-CSRFToken` header → csrf_source='cookie'), and
-   mark writes mutating=true.
+3. Otherwise reverse-engineer — but PICK THE PATH BY PANEL TYPE:
+   - SPA / JSON-API admin (React/Vue dashboards, `/api/...` XHR): perform each
+     target task ONCE while capturing, read it with `browser(action='network')`,
+     and feed the whole `records` array to `panel_learn_from_capture(site,
+     records=…)` — it filters assets/analytics and creates endpoint SKELETONS
+     (method + parameterized URL) in one shot. The capture has no request bodies,
+     so refine each skeleton that needs one with `panel_learn_endpoint`.
+   - SERVER-RENDERED admin (Django/Rails/classic PHP — full-page loads, HTML
+     `<form>`s, few or no XHRs): browsing READ pages captures NOTHING usable —
+     `panel_learn_from_capture` will come back empty. Do NOT keep reloading list
+     pages hoping for traffic. Instead record each action's real endpoint BY HAND
+     with `panel_learn_endpoint(name, method='POST', url_template=…, body_template=…,
+     body_type='form')`: url_template = the form's action (e.g.
+     `/admin/app/blogpost/add/`), body_template = the form fields. To CAPTURE the
+     exact fields, perform the write action ONCE — a form submit is a navigation,
+     so it shows up as a top-level request in `browser(action='network')` — or
+     read them off the form inputs.
+   - CSRF (both paths): Django/most admins echo the `csrftoken` cookie in an
+     `X-CSRFToken` header → `csrf_source='cookie'`. Mark writes `mutating=true`.
 4. VERIFY each endpoint with a single `panel_call` before reporting it working.
    A read endpoint is safe to test; for a mutating one, note it needs
    confirm=true and user approval rather than firing it blindly.

@@ -92,6 +92,56 @@ class SDKUnavailable(RuntimeError):
     """
 
 
+class ContentPolicyRefusal(RuntimeError):
+    """Raised when the model DECLINED the request on content-policy grounds.
+
+    Distinct from every other failure: it is not a transport problem (so no
+    CLI fallback), not a bug to retry, and — critically — NOT something to
+    retry on a different model. A safety refusal is a model-family training
+    property, so model-shopping is both futile and a safeguard-evasion
+    anti-pattern. The caller renders an actionable message (what was refused +
+    the sanctioned exemption path) instead of an opaque "brain stalled".
+    """
+
+
+# Signatures that identify an upstream *content-policy refusal* in the error
+# text the CLI/SDK surfaces (vs. a transport error or the benign max_turns
+# stop). Kept specific so a generic subprocess failure is never misread as a
+# refusal. Seen 2026-08-23: "…safeguards flagged this message for a
+# cybersecurity topic… apply for an exemption: …/cyber-use-case".
+_CONTENT_POLICY_MARKERS: tuple[str, ...] = (
+    "safeguards flagged",
+    "flagged this message",
+    "cyber-use-case",
+    "cyber_use_case",
+)
+
+
+def _is_content_policy_refusal(text: str) -> bool:
+    """True if ``text`` is a model content-policy refusal, not a bug."""
+    low = text.lower()
+    return any(marker in low for marker in _CONTENT_POLICY_MARKERS)
+
+
+# The sanctioned path for legitimate security-adjacent / first-party
+# automation work that a safeguard declines. Named in the API error itself.
+_EXEMPTION_URL = "https://claude.com/form/cyber-use-case"
+
+
+def _content_policy_message(raw: str) -> str:
+    """A concise, actionable message for a content-policy refusal.
+
+    Keeps the original error text (for logs/debugging) but leads with what
+    happened and the sanctioned exemption path — never a bare stack detail.
+    """
+    return (
+        "The model declined this request on content-policy grounds. For "
+        "legitimate first-party automation of systems you own or administer, "
+        f"the sanctioned path is the cyber-use-case exemption ({_EXEMPTION_URL}). "
+        f"Original: {raw.strip()}"
+    )
+
+
 def _shorten_tool_name(name: str) -> str:
     """Strip the MCP UUID prefix for cleaner allowed_tools entries."""
     return _MCP_UUID_RE.sub("", name)
@@ -825,6 +875,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     "in the container) and retry."
                 ) from exc
 
+            # A model content-policy refusal is neither login nor max_turns:
+            # surface it as a typed ContentPolicyRefusal so the router/runtime
+            # can render an actionable message instead of an opaque hiccup.
+            if _is_content_policy_refusal(str(exc)):
+                raise ContentPolicyRefusal(_content_policy_message(str(exc))) from exc
+
             # The by-design max_turns=1 stop can arrive HERE, not only in the
             # generic `except Exception` below. claude-agent-sdk >= 0.2 raises
             # `ResultError`, and ResultError -> ProcessError -> ClaudeSDKError
@@ -952,6 +1008,10 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 # The CLI told us WHY it failed; the trailing
                 # ProcessError text ("...error result: success") did
                 # not. Surface the reason, not the placeholder.
+                if _is_content_policy_refusal(api_error):
+                    raise ContentPolicyRefusal(
+                        _content_policy_message(api_error)
+                    ) from exc
                 raise RuntimeError(
                     f"Claude SDK upstream error: {api_error}"
                 ) from exc
@@ -961,6 +1021,8 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 ) from exc
 
         if api_error:
+            if _is_content_policy_refusal(api_error):
+                raise ContentPolicyRefusal(_content_policy_message(api_error))
             raise RuntimeError(f"Claude SDK upstream error: {api_error}")
 
         content = "".join(text_parts).strip()
@@ -1139,6 +1201,8 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     "Claude CLI is not logged in. Run `claude /login` "
                     "and retry."
                 ) from exc
+            if _is_content_policy_refusal(str(exc)):
+                raise ContentPolicyRefusal(_content_policy_message(str(exc))) from exc
             raise RuntimeError(f"Claude SDK stream process error: {exc}") from exc
         except ClaudeSDKError as exc:
             raise RuntimeError(f"Claude SDK stream error: {exc}") from exc
@@ -1169,6 +1233,8 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 ) from exc
 
         if api_error:
+            if _is_content_policy_refusal(api_error):
+                raise ContentPolicyRefusal(_content_policy_message(api_error))
             raise RuntimeError(f"Claude SDK upstream error: {api_error}")
 
         # Dedup tool calls (same logic as chat()).

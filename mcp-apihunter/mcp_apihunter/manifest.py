@@ -24,6 +24,29 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _SITE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
+def slug_suggestion(raw: str) -> str | None:
+    """Best-effort slug derived from a domain/URL passed where a slug belongs.
+
+    The common mistake is calling a panel tool with ``site="himap.co"`` (a
+    domain) instead of a slug like ``"himap"`` — the domain belongs in
+    ``base_url``. Returns a usable slug candidate for that case, or ``None``
+    when ``raw`` is already a valid slug or nothing usable can be derived, so
+    callers only append a hint when one exists.
+    """
+    if not raw or _SITE_RE.match(raw):
+        return None
+    text = raw.strip().lower()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0]   # drop any path
+    text = text.split("@")[-1]     # drop any userinfo
+    text = text.split(":", 1)[0]   # drop any port
+    if "." in text:
+        text = text.split(".", 1)[0]   # first hostname label
+    text = re.sub(r"[^a-z0-9_-]+", "-", text).strip("-_")[:64]
+    return text if _SITE_RE.match(text) else None
+
+
 class CsrfSpec(BaseModel, frozen=True):
     """Where a CSRF token comes from and where it must be placed.
 
@@ -89,6 +112,11 @@ class Manifest(BaseModel, frozen=True):
     base_url: str
     cookie_domain: str = ""
     login_url: str = ""
+    # True once the user has confirmed they own/administer this panel. apihunter
+    # only RECORDS a panel after this is set — a code-level, fail-closed
+    # authorization gate (see tools.py). Defaults False so pre-existing
+    # manifests load unchanged.
+    owner_confirmed: bool = False
     endpoints: list[Endpoint] = Field(default_factory=list)
     version: int = 1
 
@@ -96,9 +124,11 @@ class Manifest(BaseModel, frozen=True):
     @classmethod
     def _valid_site(cls, v: str) -> str:
         if not _SITE_RE.match(v):
+            hint = slug_suggestion(v)
+            suffix = f" — try '{hint}' (the domain goes in base_url)" if hint else ""
             raise ValueError(
                 "site must be a slug: lowercase letters, digits, hyphens or "
-                "underscores (max 64 chars), e.g. 'himap-admin'"
+                f"underscores (max 64 chars), e.g. 'himap-admin'{suffix}"
             )
         return v
 
@@ -153,7 +183,9 @@ class ManifestStore:
         # site is slug-validated by the Manifest model; guard anyway so a raw
         # string from a tool arg can never escape the apihunter dir.
         if not _SITE_RE.match(site):
-            raise ValueError(f"invalid site slug: {site!r}")
+            hint = slug_suggestion(site)
+            suffix = f" — try '{hint}' (the domain goes in base_url)" if hint else ""
+            raise ValueError(f"invalid site slug: {site!r}{suffix}")
         return self._dir / f"{site}.json.enc"
 
     def list_sites(self) -> list[str]:

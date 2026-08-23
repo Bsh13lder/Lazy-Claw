@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # row is deleted or re-flagged. Small (one entry per active user) so no eviction.
 _PRIMARY_CACHE: dict[str, str] = {}
 
+# Reserved title for the per-user BACKGROUND session — the isolated bucket that
+# cron / heartbeat / watcher turns run in, kept OUT of the primary interactive
+# session. Without this, every background job shared the primary's context, so
+# one ad-hoc interactive turn (e.g. a content-policy refusal on a one-off task)
+# poisoned every recurring monitor's context on its next run (2026-08-23:
+# a himap "scan endpoints" refusal in the primary session started getting the
+# unrelated Upwork-inbox watch refused too). Never surfaced as a normal chat.
+BACKGROUND_SESSION_TITLE = "__background_jobs__"
+
+_BACKGROUND_CACHE: dict[str, str] = {}
+
 
 async def get_primary_session_id(config: Config, user_id: str) -> str:
     """Return the user's primary chat_session_id, creating one if missing.
@@ -57,12 +68,13 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
             return session_id
 
         # No primary yet — promote the oldest session if one exists,
-        # otherwise create a new "Main" session.
+        # otherwise create a new "Main" session. NEVER promote the reserved
+        # background session: a cron job must not hijack the shared bucket.
         row = await db.execute(
             "SELECT id FROM agent_chat_sessions "
-            "WHERE user_id = ? "
+            "WHERE user_id = ? AND title != ? "
             "ORDER BY created_at ASC LIMIT 1",
-            (user_id,),
+            (user_id, BACKGROUND_SESSION_TITLE),
         )
         oldest = await row.fetchone()
         if oldest:
@@ -136,6 +148,57 @@ async def get_primary_session_id(config: Config, user_id: str) -> str:
         return session_id
 
 
+async def get_background_session_id(config: Config, user_id: str) -> str:
+    """Return the user's dedicated background/cron session id, creating it once.
+
+    Heartbeat, watcher, and cron turns run here instead of the primary session
+    so interactive content never bleeds into a recurring job's context (and vice
+    versa). ``is_primary`` stays 0 so it never collides with the primary partial
+    unique index, and the reserved title keeps it out of primary promotion.
+    """
+    cached = _BACKGROUND_CACHE.get(user_id)
+    if cached:
+        return cached
+
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id FROM agent_chat_sessions "
+            "WHERE user_id = ? AND title = ? AND is_primary = 0 "
+            "ORDER BY created_at ASC LIMIT 1",
+            (user_id, BACKGROUND_SESSION_TITLE),
+        )
+        existing = await row.fetchone()
+        if existing:
+            _BACKGROUND_CACHE[user_id] = existing[0]
+            return existing[0]
+
+        session_id = str(uuid4())
+        try:
+            await db.execute(
+                "INSERT INTO agent_chat_sessions (id, user_id, title, is_primary) "
+                "VALUES (?, ?, ?, 0)",
+                (session_id, user_id, BACKGROUND_SESSION_TITLE),
+            )
+            await db.commit()
+        except Exception:
+            logger.debug(
+                "[session] background-session INSERT lost a race for user=%s",
+                user_id[:8] if user_id else user_id, exc_info=True,
+            )
+
+        # Re-SELECT the oldest matching row so concurrent creators converge.
+        row = await db.execute(
+            "SELECT id FROM agent_chat_sessions "
+            "WHERE user_id = ? AND title = ? AND is_primary = 0 "
+            "ORDER BY created_at ASC LIMIT 1",
+            (user_id, BACKGROUND_SESSION_TITLE),
+        )
+        final = await row.fetchone()
+        session_id = final[0] if final else session_id
+        _BACKGROUND_CACHE[user_id] = session_id
+        return session_id
+
+
 def invalidate_primary_session(user_id: str) -> None:
     """Drop cached primary id for a user (call after delete or reflag)."""
     had_cached = _PRIMARY_CACHE.pop(user_id, None) is not None
@@ -148,3 +211,4 @@ def invalidate_primary_session(user_id: str) -> None:
 def clear_cache() -> None:
     """Clear the entire cache — test-only helper."""
     _PRIMARY_CACHE.clear()
+    _BACKGROUND_CACHE.clear()

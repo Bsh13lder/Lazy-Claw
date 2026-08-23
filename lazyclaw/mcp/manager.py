@@ -71,6 +71,14 @@ BUNDLED_MCPS = {
             "browser clicking. Prefer over the browser skill for any panel "
             "action already recorded (panel_list_endpoints)."
         ),
+        # Disconnected 2026-08-23. The one-time endpoint-RECORDING step reads as
+        # reconnaissance to the model safeguard and got refused; worse, that
+        # refusal poisoned the shared session and spread to unrelated jobs. The
+        # browser skill + skill-lesson learning loop already operate panels by
+        # clicking and record reusable Site Knowledge, so no capability is lost.
+        # Re-enable by removing this flag once the recording flow is reworked
+        # (deterministic pipeline / official-API-first) or a CVP exemption lands.
+        "disabled": True,
         "optional": True,
         "persistent": True,
         "inject_user_context": True,  # LAZYCLAW_BROWSER_PROFILE_DIR + CDP port

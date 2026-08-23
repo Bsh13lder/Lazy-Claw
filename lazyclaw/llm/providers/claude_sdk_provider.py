@@ -1201,6 +1201,8 @@ class ClaudeSDKProvider(BaseLLMProvider):
                     "Claude CLI is not logged in. Run `claude /login` "
                     "and retry."
                 ) from exc
+            if _is_content_policy_refusal(str(exc)):
+                raise ContentPolicyRefusal(_content_policy_message(str(exc))) from exc
             raise RuntimeError(f"Claude SDK stream process error: {exc}") from exc
         except ClaudeSDKError as exc:
             raise RuntimeError(f"Claude SDK stream error: {exc}") from exc
@@ -1231,6 +1233,8 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 ) from exc
 
         if api_error:
+            if _is_content_policy_refusal(api_error):
+                raise ContentPolicyRefusal(_content_policy_message(api_error))
             raise RuntimeError(f"Claude SDK upstream error: {api_error}")
 
         # Dedup tool calls (same logic as chat()).

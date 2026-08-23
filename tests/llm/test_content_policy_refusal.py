@@ -127,3 +127,11 @@ async def test_answered_turn_then_refusal_text_is_not_hijacked(monkeypatch):
     )
     out = await _provider().chat(_MSGS, "opus")
     assert out.content == "Here is your answer."
+
+
+async def test_streaming_refusal_also_raises_typed(monkeypatch):
+    """The stream path must type the refusal too, not raise a bare error."""
+    _patch_query(monkeypatch, [], ResultError(_REFUSAL, exit_code=1))
+    with pytest.raises(ContentPolicyRefusal):
+        async for _ in _provider().stream_chat(_MSGS, "opus"):
+            pass

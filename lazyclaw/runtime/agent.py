@@ -1737,9 +1737,13 @@ def _is_content_policy_exception(exc: BaseException) -> bool:
     fallback so a refusal is still recognised even if it arrived untyped.
     """
     try:
-        from lazyclaw.llm.providers.claude_sdk_provider import ContentPolicyRefusal
+        from lazyclaw.llm.providers.claude_sdk_provider import (
+            ContentPolicyRefusal,
+            _is_content_policy_refusal,
+        )
     except Exception:  # pragma: no cover - provider import should not fail
         ContentPolicyRefusal = ()  # type: ignore[assignment]
+        _is_content_policy_refusal = None
 
     seen: set[int] = set()
     cur: BaseException | None = exc
@@ -1749,8 +1753,11 @@ def _is_content_policy_exception(exc: BaseException) -> bool:
             return True
         cur = cur.__cause__ or cur.__context__
 
-    msg = str(exc).lower()
-    return "safeguards flagged" in msg or "cyber-use-case" in msg
+    # String fallback for an untyped refusal — reuse the provider's markers so
+    # the two never drift.
+    if _is_content_policy_refusal is not None:
+        return _is_content_policy_refusal(str(exc))
+    return False
 
 
 def _is_timeout_exception(exc: BaseException) -> bool:

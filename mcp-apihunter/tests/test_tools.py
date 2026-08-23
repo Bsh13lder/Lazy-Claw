@@ -108,6 +108,15 @@ async def test_owner_confirmation_not_reasked_for_existing_site(tools):
 
 
 @pytest.mark.asyncio
+async def test_owner_confirmation_is_strict_boolean(tools):
+    # A truthy STRING must not satisfy a security gate — only boolean true.
+    out = await tools.discover({"site": "shop", "base_url": "https://shop.example",
+                                "owner_confirmed": "true"})
+    assert out.get("needs_owner_confirmation") is True
+    assert await tools.list_sites() == {"sites": []}
+
+
+@pytest.mark.asyncio
 async def test_owner_confirmed_persists_on_manifest(tools):
     await tools.discover({"site": "shop", "base_url": "https://shop.example",
                           "owner_confirmed": True})

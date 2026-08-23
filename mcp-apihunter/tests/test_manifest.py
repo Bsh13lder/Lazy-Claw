@@ -115,6 +115,9 @@ def test_store_isolates_users(tmp_path):
         ("already-valid", None),   # a valid slug needs no suggestion
         ("!!!", None),             # nothing usable can be derived
         ("", None),
+        ("http://", None),         # scheme with an empty host derives nothing
+        ("-abc", "abc"),           # leading punctuation is stripped
+        ("a" * 70, "a" * 64),      # over-long label truncates to a valid slug
     ],
 )
 def test_slug_suggestion(raw, expected):
